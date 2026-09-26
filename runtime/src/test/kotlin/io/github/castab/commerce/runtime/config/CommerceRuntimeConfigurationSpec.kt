@@ -29,7 +29,7 @@ class CommerceRuntimeConfigurationSpec :
             configuration.database.minimumIdle shouldBe 1
             configuration.database.connectionTimeoutMs shouldBe 500
             configuration.database.validationTimeoutMs shouldBe 1000
-            configuration.flyway.enabled shouldBe false
+            configuration.migrations.onStartup shouldBe CommerceRuntimeConfiguration.Migrations.OnStartup.VALIDATE
         }
 
         test("commerce-runtime ships no configuration: a missing application resource is rejected") {
@@ -57,7 +57,7 @@ class CommerceRuntimeConfigurationSpec :
                                 "DATABASE_MINIMUM_IDLE" to "2",
                                 "DATABASE_CONNECTION_TIMEOUT_MS" to "750",
                                 "DATABASE_VALIDATION_TIMEOUT_MS" to "1500",
-                                "FLYWAY_ENABLED" to "true",
+                                "MIGRATIONS_ON_STARTUP" to "migrate",
                             ),
                 )
 
@@ -66,7 +66,7 @@ class CommerceRuntimeConfigurationSpec :
             configuration.database.minimumIdle shouldBe 2
             configuration.database.connectionTimeoutMs shouldBe 750
             configuration.database.validationTimeoutMs shouldBe 1500
-            configuration.flyway.enabled shouldBe true
+            configuration.migrations.onStartup shouldBe CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE
         }
 
         test("unrelated environment variables are ignored") {
@@ -86,8 +86,8 @@ class CommerceRuntimeConfigurationSpec :
                 CommerceRuntimeConfiguration.load(environment = database + ("PORT" to "eighty"))
             }.message shouldBe "PORT must be an integer"
             shouldThrow<IllegalArgumentException> {
-                CommerceRuntimeConfiguration.load(environment = database + ("FLYWAY_ENABLED" to "yes"))
-            }.message shouldBe "FLYWAY_ENABLED must be true or false"
+                CommerceRuntimeConfiguration.load(environment = database + ("MIGRATIONS_ON_STARTUP" to "yes"))
+            }.message shouldBe "MIGRATIONS_ON_STARTUP must be migrate or validate"
             shouldThrow<IllegalArgumentException> {
                 CommerceRuntimeConfiguration.load(environment = database + ("DATABASE_JDBC_URL" to "jdbc:h2:mem:test"))
             }.message shouldBe "DATABASE_JDBC_URL must be a PostgreSQL JDBC URL"

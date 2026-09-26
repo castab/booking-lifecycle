@@ -94,9 +94,13 @@ its decision, not a runtime default.
 builds, in order:
 
 ```text
-configuration → DataSource (HikariCP) → Flyway → Jdbi → Transactor + repositories
-             → operations → commerce and application routes → error handling → http4k → Jetty
+configuration → DataSource (HikariCP) → migration phase (runtime, then application)
+             → Jdbi → Transactor + repositories → operations
+             → commerce and application routes → error handling → http4k → Jetty
 ```
+
+Nothing after the migration phase is built until it succeeds. See
+[Database and migrations](#database-and-migrations).
 
 The server is created but not started. `CommerceRuntime.start()` starts Jetty and returns
 immediately. `CommerceRuntime.close()` stops Jetty and closes the pool.
@@ -113,16 +117,17 @@ commerce-runtime
         │
         ├── commerce routes
         ├── application routes
-        ├── commerce migrations
-        ├── application migrations
+        ├── runtime migrations         (owned and discovered by commerce-runtime)
+        ├── application migrations     (owned by the application, orchestrated by the runtime)
         ├── transactions
         └── shared infrastructure
 ```
 
 `ApplicationContributions` is intentionally small and not booking-specific. An
-application contributes its own Flyway locations and its own routes. The routes are built
-from the shared `CommerceRuntimeContext`, which currently holds the configuration and the
-`Transactor`. The runtime owns the error handling around every route.
+application contributes the Flyway locations of its own migrations, never the runtime's,
+and its own routes. The routes are built from the shared `CommerceRuntimeContext`, which
+currently holds the configuration and the `Transactor`. The runtime owns the error
+handling around every route.
 
 ### Application entities and the shared transaction
 
@@ -245,7 +250,7 @@ never open their own transactions.
 |---|---|
 | `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration and `Transactor`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
-| `runtime.persistence` | `createDataSource` (HikariCP), `DatabaseMigrations` (Flyway), `Transactor` and `Transaction`, and PostgreSQL error helpers. |
+| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, and PostgreSQL error helpers. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
 | `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, and health routes. |
 
@@ -292,33 +297,82 @@ database {
 | `database.minimumIdle` | `DATABASE_MINIMUM_IDLE` | `1` |
 | `database.connectionTimeoutMs` | `DATABASE_CONNECTION_TIMEOUT_MS` | `500` |
 | `database.validationTimeoutMs` | `DATABASE_VALIDATION_TIMEOUT_MS` | `1000` |
-| `flyway.enabled` | `FLYWAY_ENABLED` | `false` |
+| `migrations.onStartup` | `MIGRATIONS_ON_STARTUP` (`migrate` or `validate`) | `VALIDATE` |
 
 Invalid values fail with a message naming the variable. Secrets come only from the
 environment. The database password is redacted from the configuration's `toString`.
 
 ### Database and migrations
 
-- Commerce-owned tables live in the PostgreSQL schema **`commerce`**, migrated from
-  `classpath:db/commerce` and tracked in `commerce.flyway_schema_history`.
-- Application migrations (from `ApplicationContributions.migrationLocations`) run
-  afterwards, in their own schema (`public` by default) with their own history table. The
-  two sets evolve independently. Application migrations may reference commerce tables but
-  must not change them.
+**The runtime owns migration orchestration. Each participant owns its own migrations.** A
+runtime version and the database shape it requires are one compatibility unit.
+
+| | Runtime migrations | Application migrations |
+|---|---|---|
+| Owner | commerce-runtime | the concrete application |
+| Objects | the `commerce` schema and everything in it | the application's own schemas and objects |
+| Discovered at | `classpath:db/commerce`, inside the runtime jar, internally | `ApplicationContributions.migrationLocations` |
+| Schema history | `commerce.flyway_schema_history` | `public.flyway_schema_history` |
+| Runs | first | only after the runtime migrations succeeded |
+
+- **Two independent streams.** Each has its own history and version space: the
+  application's `V1` coexists with the runtime's `V1`, and an application never numbers
+  its migrations after the runtime's. Upgrading `commerce-runtime` is enough to pick up its
+  new migrations. The application never lists them, and a contributed location that
+  overlaps `db/commerce` (such as `classpath:db`) is rejected.
+- **Ownership.** Sharing one database is not shared ownership. Runtime migrations change
+  only runtime-owned objects and never touch application tables, indexes, constraints,
+  sequences, or views. Application migrations may *reference* runtime-owned objects (for
+  example a foreign key to the key of a `commerce` table) but never alter them. This is an
+  architectural contract enforced by review, not by inspecting SQL.
+- **Explicit ordering.** `MigrationLifecycle.migrate()` validates and migrates the runtime
+  stream, then validates and migrates the application stream, so application migrations
+  may depend on objects the runtime migrations just created.
+- **Startup gating.** `commerceRuntime(...)` runs the migration phase before building
+  anything else. With `migrations.onStartup = MIGRATE`, it applies both streams. With
+  `VALIDATE`, the default, it applies nothing and fails unless both streams are fully
+  applied, accepting migrations newer than itself. Any failure throws Flyway's exception,
+  which names the script and carries the database error, and returns no runtime, so no
+  server starts against an incompatible database. After a runtime-stream failure, the
+  application stream is not attempted.
+- **Separate migration step.** The phase does not need the HTTP runtime. A release job can
+  migrate first and then deploy instances that only validate:
+
+  ```kotlin
+  // In the application's migration entry point: migrate, then exit. No Jetty is started.
+  createDataSource(configuration.database).use { dataSource ->
+      MigrationLifecycle(dataSource, application.migrationLocations).migrate()
+  }
+  ```
+
+- **Concurrent instances.** Several instances may migrate the same database at once.
+  Flyway serializes each stream with a PostgreSQL advisory lock keyed by its history
+  table. One instance migrates, the others wait and then find nothing pending. A waiting
+  instance gives up, and fails to start, after Flyway's lock retry limit (50 one-second
+  attempts by default), so long migrations belong in a separate migration step.
+- **Published database contract.** Runtime-owned structures that applications may
+  reference are part of the runtime's public contract, like its Kotlin API. Runtime
+  migrations preserve that contract across compatible releases, and destructive changes
+  require an explicit compatibility transition: **expand** (add the new structure and keep
+  the old), **migrate** (move the runtime and consumers to the new one), then **contract**
+  (remove the old structure once compatibility has been deliberately ended). Nothing
+  published is dropped in the release that introduces its replacement.
+- **Immutable history.** Released versioned migrations are never edited. A correction is a
+  new migration.
 - Every SQL statement names the `commerce` schema explicitly. PostgreSQL's default
   `search_path` starts with `"$user"`, so a role named `commerce` would otherwise resolve
-  unqualified names into the commerce schema.
-- With `FLYWAY_ENABLED=true`, `commerceRuntime(...)` migrates before building the
-  runtime. Otherwise migrations are run separately.
+  unqualified names into the commerce schema. Application migrations run with `public` as
+  their default schema.
 
-Current commerce tables: none. The `commerce` schema and its history table remain, ready
-for runtime persistence of commerce facts. An earlier migration
-(`V20260926120000__commerce_customers.sql`, released in 0.0.4) created
-`commerce.customers`; the forward migration `V20260926180000__drop_commerce_customers.sql`
-removes it unconditionally, because customers are application-owned. Migration history is
-never edited, so a fresh installation creates and then drops that table. There is no
-migration guard, data-preservation path, archive, or compatibility layer: any rows in
-`commerce.customers` are dropped with the table.
+Current commerce tables: none. The runtime migration stream is a single baseline,
+`V1__commerce_baseline.sql`, which records the `commerce` schema's ownership and creates
+no table. The runtime therefore publishes no database structure for applications to
+reference yet; the first one it adds becomes part of the published database contract.
+
+> **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
+> Before any real consumer existed, those two migrations were collapsed into the `V1`
+> baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
+> must be recreated. This was a one-time exception to the immutable-history rule.
 
 ### Transactions
 
@@ -358,7 +412,7 @@ text, stack traces, and exception details of unexpected failures never reach a r
 ### Logging
 
 commerce-runtime emits logs through Kotlin Logging on the SLF4J API, as key=value
-`event=` messages (for example `event=server_started`, `event=flyway_migrate`,
+`event=` messages (for example `event=server_started`, `event=migrations_completed owner=runtime`,
 `event=request_failed`). Ownership is split:
 
 - **commerce-runtime** owns its logging calls and the facade it compiles against (Kotlin
@@ -486,8 +540,10 @@ transaction in which the application writes it.
 
 The tests are this repository's only executable consumer of the runtime. The specs cover
 configuration loading and validation, the error contract, health and readiness, DTO
-serialization, every migration from an empty database, the upgrade path that drops
-`commerce.customers` (even when it holds rows), and commit and rollback of several
+serialization, every migration from an empty database, the migration contract (internal runtime
+discovery, runtime-before-application ordering proven by a real dependency on a stand-in
+runtime stream, independent version spaces, idempotent and concurrent migration,
+validation, and startup gating on failures), and commit and rollback of several
 application-owned writes sharing one `Transaction`. `CommerceRuntimeSpec` composes the
 runtime the way a concrete application does: it supplies explicit
 `ApplicationContributions` (an application migration and routes that receive

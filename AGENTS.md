@@ -186,9 +186,8 @@ The runtime currently owns no commerce repository or table. It provides the tran
 boundary required for future atomic application plus commerce writes; cross-boundary
 atomicity will be exercised once the runtime owns its first real commerce repository. Do
 not create a placeholder commerce table or fake repository to demonstrate it earlier, and
-do not describe the current tests as proving it. `commerce.customers`, a table from an
-earlier design, is removed unconditionally by a forward migration, with no guard,
-archive, or compatibility layer.
+do not describe the current tests as proving it. The runtime migration stream is a single
+baseline (`V1__commerce_baseline.sql`) that creates no table.
 
 ## Runtime opinionation
 
@@ -375,12 +374,12 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/build.gradle.kts` | The `commerce-runtime` publication (a `java-library`; no `application` plugin), its runtime stack, and the Docker-CLI PostgreSQL build service for tests. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `DatabaseMigrations` (Flyway), `Transactor`/`Transaction`, PostgreSQL error helpers. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes. |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (including the historical `commerce.customers` creation and its forward drop). No `application.conf` and no logging configuration. |
-| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the upgrade path that drops `commerce.customers`, and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt`. |
-| `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, and the test application migration in `db/testapp/`. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (currently only the `V1__commerce_baseline.sql` baseline; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
+| `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
 | `README.md`, `domain/README.md`, `runtime/README.md`, `AGENTS.md` | Documentation. Keep all of them in sync with the code. |
@@ -888,11 +887,8 @@ persistence to `:domain` for any reason.
 In `:runtime`:
 
 - PostgreSQL through HikariCP and JDBI, with Flyway migrations. No ORM.
-- Commerce-owned tables live in the `commerce` schema, migrated from
-  `classpath:db/commerce` with their own history table (`commerce.flyway_schema_history`).
-  Application migrations run afterwards, in their own schema and history table, through
-  `ApplicationContributions.migrationLocations`. Never put application tables in the
-  `commerce` schema or commerce tables in an application location.
+- Commerce-owned tables live in the `commerce` schema. Migrations follow the
+  [Migration contract](#migration-contract).
 - SQL always names the `commerce` schema explicitly. Do not rely on `search_path`: its
   `"$user"` entry resolves to `commerce` when the role is named `commerce`.
 - Migrations are append-only. Never edit a migration that has been released.
@@ -908,6 +904,70 @@ In `:runtime`:
 - Do not introduce a generic `Repository<T, ID>` or repository framework. Use
   intention-revealing repositories, and implement a domain SPI (such as
   `FinancialDocumentHistory`) where the domain already defines the boundary.
+
+## Migration contract
+
+**The runtime owns migration orchestration. Each participant owns its own migrations.** A
+runtime version and the database shape it requires are one compatibility unit.
+
+```text
+MigrationLifecycle.migrate():
+    runtime stream        validate → migrate   classpath:db/commerce    commerce.flyway_schema_history
+        ↓ (only if it succeeded)
+    application stream    validate → migrate   contributed locations    public.flyway_schema_history
+        ↓
+commerceRuntime(...) composes Jdbi, repositories, routes, Jetty    →    start() serves HTTP
+```
+
+- **Ownership.** `commerce-runtime` owns the `commerce` schema and every object in it. The
+  concrete application owns its schemas and objects. Sharing a database is not shared
+  ownership. A runtime migration creates, alters, or drops runtime-owned objects only and
+  never touches an application-owned table, index, constraint, sequence, view, or other
+  object. Application migrations never alter runtime-owned objects. This is enforced by
+  review, not SQL analysis: do not add SQL parsing or schema policing.
+- **Discovery.** `RuntimeMigrations` discovers the runtime's migrations internally, at
+  `classpath:db/commerce` in the runtime jar. Applications never list that location;
+  `ApplicationContributions.migrationLocations` names application migrations only, and a
+  location that overlaps `db/commerce` (including an ancestor such as `classpath:db`) is
+  rejected. Never put application migrations under `db/commerce`, or runtime migrations
+  anywhere else.
+- **Independent streams.** Runtime and application migrations are two Flyway streams with
+  separate schema histories and version spaces. An application's `V1` coexists with the
+  runtime's `V1`. Never merge them into one interleaved sequence or one history.
+- **Ordering is explicit code.** `MigrationLifecycle.migrate()` runs the runtime stream,
+  then the application stream. Never rely on classpath, filesystem, or Flyway location
+  order to sequence them. Application migrations may therefore reference runtime-owned
+  objects created in the same run.
+- **Startup gating.** `commerceRuntime(...)` runs the migration phase before it constructs
+  anything else: `migrations.onStartup = MIGRATE` applies both streams, and `VALIDATE`
+  (the default) applies nothing and fails unless both streams are fully applied. Any
+  failure throws Flyway's own exception (never wrapped into a vague one) and no
+  `CommerceRuntime` is returned, so no server can start against an incompatible database.
+  A runtime-stream failure means the application stream is never attempted.
+- **Separable from HTTP.** `MigrationLifecycle(dataSource, locations).migrate()` runs
+  the phase without composing the runtime or starting Jetty, for a release or migration
+  step that precedes deployment. Do not add a CLI or deployment tooling for it
+  incidentally.
+- **Concurrency.** Several instances may migrate at once. Flyway serializes each stream
+  with a PostgreSQL advisory lock keyed by its history table, and validates before
+  migrating. Keep Flyway's defaults: never disable `validateOnMigrate`, enable
+  `outOfOrder`, `baselineOnMigrate`, or `cleanDisabled(false)`, turn off the PostgreSQL
+  lock, or add a custom lock or leader election.
+- **Published database contract.** Runtime-owned structures an application may reference
+  (for example a foreign key to the key of a `commerce` table) are a compatibility surface, as
+  public as a Kotlin API. Runtime migrations must preserve the published database
+  contract across compatible runtime releases. Destructive changes require an explicit
+  compatibility transition: prefer **expand** (add the new structure, keep the old),
+  **migrate** (move runtime and consumers to it), then **contract** (remove the old
+  structure only once compatibility has been deliberately ended). Never drop or
+  incompatibly alter a published structure in a single release. `VALIDATE` accepts
+  migrations newer than the running release, so older instances keep starting after an
+  expand step.
+- **History is immutable.** Released versioned migrations are historical records. Correct
+  one with a new migration, never by editing it. Commerce-runtime 0.0.4 and 0.0.5 shipped a runtime migration that created `commerce.customers` and one
+  that dropped it. Before any real consumer existed, the maintainer collapsed that history
+  into `V1__commerce_baseline.sql`, a one-time pre-release reset: databases migrated by
+  those releases fail validation and must be recreated.
 
 ## Dependency policy
 
@@ -1112,11 +1172,20 @@ dependency just to support CI or publishing.
 - Runtime tests use Kotest `FunSpec` as well. Database specs run against a real
   PostgreSQL provided by the build (the Docker CLI build service, or
   `TEST_DATABASE_JDBC_URL`), create their own database through
-  `testing/TestDatabase.kt`, and apply the real migrations through `DatabaseMigrations`.
+  `testing/TestDatabase.kt`, and apply the real migrations through `MigrationLifecycle`.
   Never maintain a separate test schema, never use H2, and never use Testcontainers.
 - Runtime tests should prove behavior that matters: configuration loading, the error
   contract, serialization of DTOs, transaction commit and rollback, repository behavior,
-  and the composed runtime over real HTTP.
+  the migration contract, and the composed runtime over real HTTP.
+- `MigrationLifecycleSpec` and `CommerceRuntimeStartupSpec` pin the
+  [Migration contract](#migration-contract) against PostgreSQL: internal runtime
+  discovery, runtime-before-application ordering proven by a real dependency, independent
+  version spaces, idempotent and concurrent migration, validation, and startup gating on
+  runtime and application failures. Never replace them with Flyway mocks. Because the
+  runtime owns no table an application could reference, the dependency tests run a
+  test-only stand-in runtime stream (`src/test/resources/db/testruntime`, selected through
+  `RuntimeMigrations`' internal `location` parameter). It is never published and is not a
+  placeholder commerce table; applications can never select a runtime location.
 - The tests are the runtime's only executable consumer in this repository.
   `CommerceRuntimeSpec` composes the runtime the way a concrete application does: explicit
   `ApplicationContributions`, `commerceRuntime(...)`, `start()`, real HTTP and

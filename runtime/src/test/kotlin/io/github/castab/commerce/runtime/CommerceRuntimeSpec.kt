@@ -96,8 +96,8 @@ private fun testApplicationRoutes(context: CommerceRuntimeContext): RoutingHttpH
 
 /**
  * The runtime as a concrete application composes it: explicit application contributions
- * (an application migration and application routes), then configuration, pool, Flyway
- * (commerce and application migrations), JDBI, the shared transaction boundary, the
+ * (an application migration and application routes), then configuration, pool, the
+ * migration phase (runtime, then application), JDBI, the shared transaction boundary, the
  * runtime's infrastructure routes, error handling, and Jetty, exercised over real HTTP.
  */
 class CommerceRuntimeSpec :
@@ -112,7 +112,10 @@ class CommerceRuntimeSpec :
                 CommerceRuntimeConfiguration(
                     server = CommerceRuntimeConfiguration.Server(port = 0),
                     database = database.configuration,
-                    flyway = CommerceRuntimeConfiguration.Flyway(enabled = true),
+                    migrations =
+                        CommerceRuntimeConfiguration.Migrations(
+                            onStartup = CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE,
+                        ),
                 )
             val application =
                 ApplicationContributions(
