@@ -8,12 +8,11 @@ import io.github.castab.commerce.runtime.customer.CustomerRepository
 import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
-import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import org.jdbi.v3.core.Jdbi
 import java.util.UUID
 
-/** Flyway discovery and the transaction boundary, against a real PostgreSQL. */
+/** Connections and the transaction boundary, against a real PostgreSQL. Migrations: [MigrationLifecycleSpec]. */
 class PersistenceSpec :
     FunSpec({
         lateinit var database: TestDatabase
@@ -23,7 +22,7 @@ class PersistenceSpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, poolName = "persistence-spec")
-            DatabaseMigrations(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
             jdbi = Jdbi.create(dataSource)
         }
 
@@ -39,35 +38,7 @@ class PersistenceSpec :
 
         fun customer() = Customer(Customer.Id(UUID.randomUUID()), CustomerName("Grace Hopper"), EmailAddress("grace@example.com"))
 
-        context("migrations") {
-            test("commerce migrations own the commerce schema and its own history table") {
-                jdbi
-                    .withHandle<List<String>, Exception> {
-                        it
-                            .createQuery(
-                                "SELECT version FROM commerce.flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank",
-                            ).mapTo(String::class.java)
-                            .list()
-                    }.shouldContainExactly("20260926120000")
-            }
-
-            test("application migrations run afterwards with their own history in the default schema") {
-                jdbi
-                    .withHandle<List<String>, Exception> {
-                        it
-                            .createQuery(
-                                "SELECT version FROM public.flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank",
-                            ).mapTo(String::class.java)
-                            .list()
-                    }.shouldContainExactly("1")
-            }
-
-            test("migrating again is a no-op") {
-                DatabaseMigrations(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
-
-                count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 1
-            }
-
+        context("connections") {
             test("the database is reachable for readiness checks") {
                 dataSource.isReachable() shouldBe true
             }

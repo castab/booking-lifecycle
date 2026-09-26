@@ -2,13 +2,14 @@ package io.github.castab.commerce.runtime
 
 import com.zaxxer.hikari.HikariDataSource
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
 import io.github.castab.commerce.runtime.customer.CreateCustomer
 import io.github.castab.commerce.runtime.customer.CustomerRepository
 import io.github.castab.commerce.runtime.customer.GetCustomer
 import io.github.castab.commerce.runtime.customer.customerRoutes
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.healthRoutes
-import io.github.castab.commerce.runtime.persistence.DatabaseMigrations
+import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.persistence.isReachable
@@ -51,8 +52,10 @@ class CommerceRuntimeContext internal constructor(
  * further capabilities are designed from real consumer requirements, and it grows only
  * when a concrete consumer needs it.
  *
- * @property migrationLocations Flyway locations of the application's own migrations, run
- *   after the commerce migrations. See [DatabaseMigrations].
+ * @property migrationLocations Flyway locations of the application's own migrations, and
+ *   only those. commerce-runtime discovers its own migrations itself and always applies them
+ *   first; the application's are a separate stream with its own schema history and version
+ *   space. See [MigrationLifecycle].
  * @property routes The application's own routes, built from the shared
  *   [CommerceRuntimeContext]. They are served behind the same error handling as the
  *   commerce routes.
@@ -97,10 +100,18 @@ class CommerceRuntime internal constructor(
 /**
  * Composes the commerce runtime for a concrete application.
  *
- * Every dependency is constructed here, in order, with ordinary Kotlin: configuration,
- * DataSource, Flyway, Jdbi, transactions and repositories, operations, the commerce and
- * [application] routes, the http4k handler, and Jetty. There is no dependency injection
- * container, annotation scanning, or reflection.
+ * Composition begins with the migration phase ([MigrationLifecycle]), before anything else
+ * is built. With `migrations.onStartup = MIGRATE`, the runtime migrations and then the
+ * application migrations are applied. With `VALIDATE`, the default, they are expected to
+ * have been applied by a separate migration step, and the phase only validates that both
+ * streams are fully applied. Either
+ * way, a failure throws Flyway's exception and closes the pool: no runtime is returned, so
+ * there is no server to start against a database that is not compatible.
+ *
+ * Every other dependency is then constructed here, in order, with ordinary Kotlin: Jdbi,
+ * transactions and repositories, operations, the commerce and [application] routes, the
+ * http4k handler, and Jetty. There is no dependency injection container, annotation
+ * scanning, or reflection.
  *
  * [application] has no default: the runtime is not an application by itself, and the
  * caller decides what its application contributes. The server is created but not
@@ -112,9 +123,10 @@ fun commerceRuntime(
 ): CommerceRuntime {
     val dataSource = createDataSource(configuration.database)
     try {
-        if (configuration.flyway.enabled) {
-            logger.info { "event=flyway_migrate" }
-            DatabaseMigrations(dataSource, application.migrationLocations).migrate()
+        val migrations = MigrationLifecycle(dataSource, application.migrationLocations)
+        when (configuration.migrations.onStartup) {
+            OnStartup.MIGRATE -> migrations.migrate()
+            OnStartup.VALIDATE -> migrations.validate()
         }
 
         val jdbi = Jdbi.create(dataSource)

@@ -5,7 +5,7 @@ import io.github.castab.commerce.customer.Customer
 import io.github.castab.commerce.customer.CustomerName
 import io.github.castab.commerce.customer.EmailAddress
 import io.github.castab.commerce.runtime.operation.CommerceFailure
-import io.github.castab.commerce.runtime.persistence.DatabaseMigrations
+import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.testing.TestDatabase
@@ -27,7 +27,7 @@ class CustomerRepositorySpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, poolName = "customer-repository-spec")
-            DatabaseMigrations(dataSource).migrate()
+            MigrationLifecycle(dataSource, applicationLocations = emptyList()).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
         }
 

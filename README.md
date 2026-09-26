@@ -115,6 +115,12 @@ fun main() {
   `commerceRuntime(configuration, application)` with its explicit contributions. It does
   not fork or copy the runtime. The runtime has no default application, so even an
   application with nothing to add passes `ApplicationContributions()` deliberately.
+- **Migrations have two owners.** The runtime discovers and applies its own migrations
+  (the `commerce` schema) first, then the application's migrations from its contributed
+  locations, each with its own Flyway history and version space. Nothing is composed or
+  served until both are current. Runtime tables that applications reference are a
+  compatibility surface. See
+  [runtime/README.md](runtime/README.md#database-and-migrations).
 - **Booking is optional.** Booking is one commerce capability, not the root of commerce. A
   point-of-sale application uses customers, invoices, payments, allocations, refunds, and
   reconciliation without ever creating a booking.

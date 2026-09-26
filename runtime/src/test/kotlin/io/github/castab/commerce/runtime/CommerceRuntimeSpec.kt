@@ -21,7 +21,7 @@ import java.util.UUID
 
 /**
  * The runtime as a concrete application composes it: explicit application contributions,
- * then configuration, pool, Flyway (commerce and application migrations), JDBI,
+ * then configuration, pool, migrations (runtime, then application), JDBI,
  * operations, routes, error handling, and Jetty, exercised over real HTTP.
  */
 class CommerceRuntimeSpec :
@@ -36,7 +36,10 @@ class CommerceRuntimeSpec :
                 CommerceRuntimeConfiguration(
                     server = CommerceRuntimeConfiguration.Server(port = 0),
                     database = database.configuration,
-                    flyway = CommerceRuntimeConfiguration.Flyway(enabled = true),
+                    migrations =
+                        CommerceRuntimeConfiguration.Migrations(
+                            onStartup = CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE,
+                        ),
                 )
             // An application contribution that shares the runtime's transaction boundary with a
             // commerce repository, as a concrete application's own capability would.

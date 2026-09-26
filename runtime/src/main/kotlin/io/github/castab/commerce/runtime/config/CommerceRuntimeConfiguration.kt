@@ -24,12 +24,12 @@ import com.sksamuel.hoplite.PropertySource
  * | `database.minimumIdle` | `DATABASE_MINIMUM_IDLE` |
  * | `database.connectionTimeoutMs` | `DATABASE_CONNECTION_TIMEOUT_MS` |
  * | `database.validationTimeoutMs` | `DATABASE_VALIDATION_TIMEOUT_MS` |
- * | `flyway.enabled` | `FLYWAY_ENABLED` |
+ * | `migrations.onStartup` | `MIGRATIONS_ON_STARTUP` (`migrate` or `validate`) |
  */
 data class CommerceRuntimeConfiguration(
     val server: Server = Server(),
     val database: Database,
-    val flyway: Flyway = Flyway(),
+    val migrations: Migrations = Migrations(),
 ) {
     data class Server(
         val port: Int = 8080,
@@ -51,10 +51,20 @@ data class CommerceRuntimeConfiguration(
                 "connectionTimeoutMs=$connectionTimeoutMs, validationTimeoutMs=$validationTimeoutMs)"
     }
 
-    /** Whether the runtime applies migrations at startup. Off by default, as in production deployments that migrate separately. */
-    data class Flyway(
-        val enabled: Boolean = false,
-    )
+    /**
+     * What composing the runtime does with the runtime and application migrations; see
+     * `MigrationLifecycle`.
+     *
+     * [OnStartup.VALIDATE], the default, suits deployments that migrate in a separate step
+     * before instances start: composition applies nothing and fails unless both migration
+     * streams are fully applied. [OnStartup.MIGRATE] applies the pending migrations first,
+     * the runtime's and then the application's.
+     */
+    data class Migrations(
+        val onStartup: OnStartup = OnStartup.VALIDATE,
+    ) {
+        enum class OnStartup { MIGRATE, VALIDATE }
+    }
 
     /** Fails with [IllegalArgumentException], naming the environment variable, when a value is unusable. */
     fun validate() {
@@ -118,7 +128,7 @@ private fun CommerceRuntimeConfiguration.withEnvironmentOverrides(environment: E
                 connectionTimeoutMs = environment.long("DATABASE_CONNECTION_TIMEOUT_MS", database.connectionTimeoutMs),
                 validationTimeoutMs = environment.long("DATABASE_VALIDATION_TIMEOUT_MS", database.validationTimeoutMs),
             ),
-        flyway = flyway.copy(enabled = environment.boolean("FLYWAY_ENABLED", flyway.enabled)),
+        migrations = migrations.copy(onStartup = environment.onStartup("MIGRATIONS_ON_STARTUP", migrations.onStartup)),
     )
 
 private class Environment(
@@ -139,10 +149,13 @@ private class Environment(
         fallback: Long,
     ): Long = values[name]?.let { it.toLongOrNull() ?: throw IllegalArgumentException("$name must be an integer") } ?: fallback
 
-    fun boolean(
+    fun onStartup(
         name: String,
-        fallback: Boolean,
-    ): Boolean =
-        values[name]?.let { it.toBooleanStrictOrNull() ?: throw IllegalArgumentException("$name must be true or false") }
-            ?: fallback
+        fallback: CommerceRuntimeConfiguration.Migrations.OnStartup,
+    ): CommerceRuntimeConfiguration.Migrations.OnStartup =
+        values[name]?.let { value ->
+            CommerceRuntimeConfiguration.Migrations.OnStartup.entries
+                .firstOrNull { it.name.equals(value, ignoreCase = true) }
+                ?: throw IllegalArgumentException("$name must be migrate or validate")
+        } ?: fallback
 }
