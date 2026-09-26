@@ -7,14 +7,12 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
-import org.flywaydb.core.Flyway
 import org.jdbi.v3.core.Jdbi
 import java.util.UUID
-import javax.sql.DataSource
 
 /**
- * Flyway discovery, the commerce schema's upgrade path, and the transaction boundary, against
- * a real PostgreSQL. The migration lifecycle itself is covered by [MigrationLifecycleSpec].
+ * Flyway discovery and the transaction boundary, against a real PostgreSQL. The migration
+ * lifecycle itself is covered by [MigrationLifecycleSpec].
  */
 class PersistenceSpec :
     FunSpec({
@@ -39,15 +37,6 @@ class PersistenceSpec :
                 it.createQuery("SELECT count(*) FROM $table").mapTo(Int::class.java).one()
             }
 
-        fun Jdbi.tableExists(table: String): Boolean =
-            withHandle<String?, Exception> {
-                it
-                    .createQuery("SELECT to_regclass(:table)::text")
-                    .bind("table", table)
-                    .mapTo(String::class.java)
-                    .one()
-            } != null
-
         fun Jdbi.appliedVersions(historyTable: String): List<String> =
             withHandle<List<String>, Exception> {
                 it
@@ -57,13 +46,12 @@ class PersistenceSpec :
             }
 
         context("migrations") {
-            test("every migration succeeds from an empty database; commerce migrations own the commerce schema and history") {
-                jdbi.appliedVersions("commerce.flyway_schema_history") shouldContainExactly
-                    listOf("20260926120000", "20260926180000")
+            test("every migration succeeds from an empty database; runtime migrations own the commerce schema and history") {
+                jdbi.appliedVersions("commerce.flyway_schema_history") shouldContainExactly listOf("1")
             }
 
-            test("after every commerce migration the runtime owns no customer table") {
-                jdbi.tableExists("commerce.customers") shouldBe false
+            test("the runtime baseline owns no table") {
+                jdbi.count("pg_tables WHERE schemaname = 'commerce' AND tablename <> 'flyway_schema_history'") shouldBe 0
             }
 
             test("application migrations run afterwards with their own history in the default schema") {
@@ -73,66 +61,11 @@ class PersistenceSpec :
             test("migrating again is a no-op") {
                 MigrationLifecycle(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
 
-                jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 2
+                jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 1
             }
 
             test("the database is reachable for readiness checks") {
                 dataSource.isReachable() shouldBe true
-            }
-        }
-
-        context("upgrading a commerce schema created by commerce-runtime 0.0.4") {
-            // Migrates a fresh database only as far as the 0.0.4 schema (which still had
-            // commerce.customers), with the same settings RuntimeMigrations uses.
-            fun migrateTo004(dataSource: DataSource) {
-                Flyway
-                    .configure()
-                    .dataSource(dataSource)
-                    .schemas(RuntimeMigrations.SCHEMA)
-                    .createSchemas(true)
-                    .table(MigrationStream.HISTORY_TABLE)
-                    .locations(RuntimeMigrations.LOCATION)
-                    .target("20260926120000")
-                    .load()
-                    .migrate()
-            }
-
-            fun withUpgradeDatabase(block: (DataSource, Jdbi) -> Unit) {
-                TestDatabase.create().use { upgrade ->
-                    createDataSource(upgrade.configuration, poolName = "persistence-upgrade-spec").use { source ->
-                        migrateTo004(source)
-                        block(source, Jdbi.create(source))
-                    }
-                }
-            }
-
-            test("the forward migration drops the obsolete customer table") {
-                withUpgradeDatabase { source, upgraded ->
-                    upgraded.tableExists("commerce.customers") shouldBe true
-
-                    RuntimeMigrations(source).migrate()
-
-                    upgraded.tableExists("commerce.customers") shouldBe false
-                    upgraded.appliedVersions("commerce.flyway_schema_history") shouldContainExactly
-                        listOf("20260926120000", "20260926180000")
-                }
-            }
-
-            test("the forward migration drops the table unconditionally, even when it still holds rows") {
-                withUpgradeDatabase { source, upgraded ->
-                    upgraded.useHandle<Exception> {
-                        it.execute(
-                            "INSERT INTO commerce.customers (id, name, email) VALUES (?, 'Ada Lovelace', 'ada@example.com')",
-                            UUID.randomUUID(),
-                        )
-                    }
-
-                    RuntimeMigrations(source).migrate()
-
-                    upgraded.tableExists("commerce.customers") shouldBe false
-                    upgraded.appliedVersions("commerce.flyway_schema_history") shouldContainExactly
-                        listOf("20260926120000", "20260926180000")
-                }
             }
         }
 

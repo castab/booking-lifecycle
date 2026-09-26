@@ -186,9 +186,8 @@ The runtime currently owns no commerce repository or table. It provides the tran
 boundary required for future atomic application plus commerce writes; cross-boundary
 atomicity will be exercised once the runtime owns its first real commerce repository. Do
 not create a placeholder commerce table or fake repository to demonstrate it earlier, and
-do not describe the current tests as proving it. `commerce.customers`, a table from an
-earlier design, is removed unconditionally by a forward migration, with no guard,
-archive, or compatibility layer.
+do not describe the current tests as proving it. The runtime migration stream is a single
+baseline (`V1__commerce_baseline.sql`) that creates no table.
 
 ## Runtime opinionation
 
@@ -378,8 +377,8 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes. |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (including the historical `commerce.customers` creation and its forward drop; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
-| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the upgrade path that drops `commerce.customers`, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (currently only the `V1__commerce_baseline.sql` baseline; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
 | `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
@@ -965,7 +964,10 @@ commerceRuntime(...) composes Jdbi, repositories, routes, Jetty    →    start(
   migrations newer than the running release, so older instances keep starting after an
   expand step.
 - **History is immutable.** Released versioned migrations are historical records. Correct
-  one with a new migration, never by editing it.
+  one with a new migration, never by editing it. Commerce-runtime 0.0.4 and 0.0.5 shipped a runtime migration that created `commerce.customers` and one
+  that dropped it. Before any real consumer existed, the maintainer collapsed that history
+  into `V1__commerce_baseline.sql`, a one-time pre-release reset: databases migrated by
+  those releases fail validation and must be recreated.
 
 ## Dependency policy
 

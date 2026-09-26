@@ -364,16 +364,15 @@ runtime version and the database shape it requires are one compatibility unit.
   unqualified names into the commerce schema. Application migrations run with `public` as
   their default schema.
 
-Current commerce tables: none. The `commerce` schema and its history table remain, ready
-for runtime persistence of commerce facts. An earlier migration
-(`V20260926120000__commerce_customers.sql`, released in 0.0.4) created
-`commerce.customers`; the forward migration `V20260926180000__drop_commerce_customers.sql`
-removes it unconditionally, because customers are application-owned. Migration history is
-never edited, so a fresh installation creates and then drops that table. There is no
-migration guard, data-preservation path, archive, or compatibility layer: any rows in
-`commerce.customers` are dropped with the table. The runtime therefore publishes no
-database structure for applications to reference yet; the first one it adds becomes part
-of the published database contract.
+Current commerce tables: none. The runtime migration stream is a single baseline,
+`V1__commerce_baseline.sql`, which records the `commerce` schema's ownership and creates
+no table. The runtime therefore publishes no database structure for applications to
+reference yet; the first one it adds becomes part of the published database contract.
+
+> **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
+> Before any real consumer existed, those two migrations were collapsed into the `V1`
+> baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
+> must be recreated. This was a one-time exception to the immutable-history rule.
 
 ### Transactions
 
@@ -541,8 +540,7 @@ transaction in which the application writes it.
 
 The tests are this repository's only executable consumer of the runtime. The specs cover
 configuration loading and validation, the error contract, health and readiness, DTO
-serialization, every migration from an empty database, the upgrade path that drops
-`commerce.customers` (even when it holds rows), the migration contract (internal runtime
+serialization, every migration from an empty database, the migration contract (internal runtime
 discovery, runtime-before-application ordering proven by a real dependency on a stand-in
 runtime stream, independent version spaces, idempotent and concurrent migration,
 validation, and startup gating on failures), and commit and rollback of several

@@ -75,9 +75,9 @@ class MigrationLifecycleSpec :
 
         test("the two streams have independent version spaces, so equal versions do not collide") {
             withTestDatabase { _, dataSource ->
-                standInLifecycle(dataSource, testApplication).migrate()
+                MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1__test_runtime_records.sql and application V1__test_application_records.sql.
+                // Runtime V1__commerce_baseline.sql and application V1__test_application_records.sql.
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1")
                 dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
             }
