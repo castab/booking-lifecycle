@@ -19,11 +19,15 @@ package io.github.castab.commerce.booking.lifecycle
  * ## Application models inhabit phases
  *
  * Consuming applications do not store a lifecycle value inside their models. Their
- * domain types implement a phase interface directly:
+ * domain types implement a phase interface directly. Every type below, including
+ * `CustomerId`, belongs to an example catering application, not to this library:
  *
  * ```kotlin
+ * // Application-owned identity; commerce-domain defines no customer concept.
+ * data class CustomerId(val value: UUID)
+ *
  * data class CateringQuote(
- *     val customerId: Customer.Id,
+ *     val customerId: CustomerId,
  *     val total: BigDecimal,
  * ) : BookingLifecycle.Active.Quote {
  *     override fun toBooking(): CateringBooking = CateringBooking(customerId, total)
@@ -33,7 +37,9 @@ package io.github.castab.commerce.booking.lifecycle
  *
  * `CateringQuote` does not *contain* the `Quote` phase. It *is* a concrete application
  * representation of the `Quote` phase. Advancing the lifecycle means transforming one
- * lifecycle-typed application model into another, not mutating a state field.
+ * lifecycle-typed application model into another, not mutating a state field. The
+ * library defines no booking record, customer, contact, or location: what a booking
+ * contains, and whom it concerns, is the application's decision.
  *
  * ## Edges, not policies
  *
@@ -75,17 +81,21 @@ sealed interface BookingLifecycle {
      */
     sealed interface Active : BookingLifecycle {
         /**
-         * An inquiry or estimate request that has not yet become an official quote.
+         * A request for a booking that has not yet become an official quote.
          *
-         * **Active.** One of the two lifecycle entry points. It typically begins a lifecycle
-         * when a customer submits an inquiry through the adopting application.
+         * **Active.** One of the two lifecycle entry points, and the generic pre-quote phase.
+         * The adopting application decides what begins it, for example an inquiry submitted
+         * through its own channels.
          *
          * Legal transitions:
          * - [toQuote]: `InitialRequest → Quote`
          * - [cancel]: `InitialRequest → Cancelled`
          *
          * The implementing type owns all of its data (for example customer details,
-         * selections, notes, estimates, or a requested date). The lifecycle requires none of it.
+         * selections, notes, or a requested date). The lifecycle requires none of it. This
+         * phase is not a financial estimate: an application may issue a
+         * `FinancialDocument.Estimate` while a booking is in this phase, but relating the two
+         * is application policy.
          */
         interface InitialRequest : Active {
             /**
@@ -156,8 +166,9 @@ sealed interface BookingLifecycle {
          * - [complete]: `Booked → Completed`
          * - [cancel]: `Booked → Cancelled`
          *
-         * Invoice revisions and change orders are not lifecycle transitions. A model whose
-         * invoice has changed any number of times still inhabits the `Booked` phase.
+         * Invoice revisions and change orders are not lifecycle transitions. If an application
+         * associates financial documents with its booking models, a booking whose invoice has
+         * changed any number of times still inhabits the `Booked` phase.
          */
         interface Booked : Active {
             /**

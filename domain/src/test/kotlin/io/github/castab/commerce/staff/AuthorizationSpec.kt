@@ -13,23 +13,23 @@ class AuthorizationSpec :
     FunSpec({
         val userId = UserId(UUID.randomUUID())
         val serviceId = ServiceId(UUID.randomUUID())
-        val emailRespond = PermissionKey("fionas.email.respond")
-        val customerService = RoleKey("fionas.customer-service")
-        val accounting = RoleKey("fionas.accounting")
+        val observePayments = PermissionKey("example.payment.observe")
+        val paymentAdapter = RoleKey("example.payment-adapter")
+        val accounting = RoleKey("example.accounting")
 
         fun user(
             status: UserStatus = UserStatus.ACTIVE,
-            roles: Set<RoleAssignment> = setOf(RoleAssignment(customerService)),
+            roles: Set<RoleAssignment> = setOf(RoleAssignment(paymentAdapter)),
         ) = User(userId, "alex", "Alex", null, "Alex", status, roles)
 
         fun role(
-            key: RoleKey = customerService,
-            permissions: Set<PermissionKey> = setOf(emailRespond),
+            key: RoleKey = paymentAdapter,
+            permissions: Set<PermissionKey> = setOf(observePayments),
         ) = RoleDefinition(key, "Role", null, permissions)
 
         fun service(
             status: PrincipalStatus = PrincipalStatus.ACTIVE,
-            roles: Set<RoleAssignment> = setOf(RoleAssignment(customerService)),
+            roles: Set<RoleAssignment> = setOf(RoleAssignment(paymentAdapter)),
         ) = ServiceIdentity(serviceId, "stripe-adapter", status, roles)
 
         test("user identity and fields are independent of authentication") {
@@ -64,52 +64,52 @@ class AuthorizationSpec :
             shouldThrow<IllegalArgumentException> { PermissionKey("\t") }
             shouldThrow<IllegalArgumentException> { User(userId, "", null, null, "Alex", UserStatus.ACTIVE, emptySet()) }
             shouldThrow<IllegalArgumentException> { User(userId, "alex", null, null, " ", UserStatus.ACTIVE, emptySet()) }
-            shouldThrow<IllegalArgumentException> { RoleDefinition(customerService, " ", null, emptySet()) }
+            shouldThrow<IllegalArgumentException> { RoleDefinition(paymentAdapter, " ", null, emptySet()) }
             shouldThrow<IllegalArgumentException> { ServiceIdentity(serviceId, " ", PrincipalStatus.ACTIVE, emptySet()) }
-            RoleKey("fionas.booking-coordinator").value shouldBe "fionas.booking-coordinator"
-            emailRespond.value shouldBe "fionas.email.respond"
+            RoleKey("example.booking-coordinator").value shouldBe "example.booking-coordinator"
+            observePayments.value shouldBe "example.payment.observe"
         }
 
         test("users and role definitions copy their sets") {
-            val assignments = mutableSetOf(RoleAssignment(customerService))
+            val assignments = mutableSetOf(RoleAssignment(paymentAdapter))
             val staff = user(roles = assignments)
             assignments.clear()
-            staff.roles shouldBe setOf(RoleAssignment(customerService))
+            staff.roles shouldBe setOf(RoleAssignment(paymentAdapter))
             shouldThrow<UnsupportedOperationException> { (staff.roles as MutableSet).clear() }
 
-            val grants = mutableSetOf(emailRespond)
+            val grants = mutableSetOf(observePayments)
             val definition = role(permissions = grants)
             grants.clear()
-            definition.permissions shouldBe setOf(emailRespond)
+            definition.permissions shouldBe setOf(observePayments)
             shouldThrow<UnsupportedOperationException> { (definition.permissions as MutableSet).clear() }
         }
 
         test("service identities copy assigned roles") {
-            val assignments = mutableSetOf(RoleAssignment(customerService))
+            val assignments = mutableSetOf(RoleAssignment(paymentAdapter))
             val machine = service(roles = assignments)
             assignments.clear()
 
             machine.name shouldBe "stripe-adapter"
-            machine.roles shouldBe setOf(RoleAssignment(customerService))
+            machine.roles shouldBe setOf(RoleAssignment(paymentAdapter))
             shouldThrow<UnsupportedOperationException> { (machine.roles as MutableSet).clear() }
         }
 
         test("one assigned role grants its permission through the extension") {
             val resolver = RoleBasedPermissionResolver(PrincipalResolver { user() }, RoleResolver { role(it) })
 
-            resolver.permissionsFor(userId) shouldBe setOf(emailRespond)
-            userId.can(emailRespond, resolver) shouldBe true
+            resolver.permissionsFor(userId) shouldBe setOf(observePayments)
+            userId.can(observePayments, resolver) shouldBe true
             userId.can(CommercePermissions.PaymentRecord, resolver) shouldBe false
         }
 
         test("multiple roles union their grants and collapse duplicates") {
-            val staff = user(roles = setOf(RoleAssignment(customerService), RoleAssignment(accounting)))
+            val staff = user(roles = setOf(RoleAssignment(paymentAdapter), RoleAssignment(accounting)))
             val resolver =
                 RoleBasedPermissionResolver(
                     PrincipalResolver { staff },
                     RoleResolver {
                         when (it) {
-                            customerService -> role(permissions = setOf(emailRespond, CommercePermissions.PaymentRecord))
+                            paymentAdapter -> role(permissions = setOf(observePayments, CommercePermissions.PaymentRecord))
                             accounting -> role(accounting, setOf(CommercePermissions.PaymentRecord, CommercePermissions.RefundRecord))
                             else -> null
                         }
@@ -117,7 +117,7 @@ class AuthorizationSpec :
                 )
 
             resolver.permissionsFor(userId) shouldBe
-                setOf(emailRespond, CommercePermissions.PaymentRecord, CommercePermissions.RefundRecord)
+                setOf(observePayments, CommercePermissions.PaymentRecord, CommercePermissions.RefundRecord)
             userId.can(CommercePermissions.RefundRecord, resolver) shouldBe true
             userId.can(CommercePermissions.BookingModify, resolver) shouldBe false
         }
@@ -127,14 +127,14 @@ class AuthorizationSpec :
             val resolver = RoleBasedPermissionResolver(PrincipalResolver { null }, roles)
 
             resolver.permissionsFor(userId) shouldBe emptySet()
-            userId.can(emailRespond, resolver) shouldBe false
+            userId.can(observePayments, resolver) shouldBe false
             verify { roles wasNot Called }
         }
 
         test("a resolver returning a different user fails closed") {
             val roles = mockk<RoleResolver>()
             val other =
-                User(UserId(UUID.randomUUID()), "other", null, null, "Other", UserStatus.ACTIVE, setOf(RoleAssignment(customerService)))
+                User(UserId(UUID.randomUUID()), "other", null, null, "Other", UserStatus.ACTIVE, setOf(RoleAssignment(paymentAdapter)))
             val resolver = RoleBasedPermissionResolver(PrincipalResolver { other }, roles)
 
             resolver.permissionsFor(userId) shouldBe emptySet()
@@ -146,22 +146,22 @@ class AuthorizationSpec :
             val resolver = RoleBasedPermissionResolver(PrincipalResolver { user(UserStatus.DISABLED) }, roles)
 
             resolver.permissionsFor(userId) shouldBe emptySet()
-            userId.can(emailRespond, resolver) shouldBe false
+            userId.can(observePayments, resolver) shouldBe false
             verify { roles wasNot Called }
         }
 
         test("unresolved and mismatched role definitions fail closed") {
             val roles = mockk<RoleResolver>()
-            every { roles.resolve(customerService) } returns null andThen role(accounting)
+            every { roles.resolve(paymentAdapter) } returns null andThen role(accounting)
             val resolver = RoleBasedPermissionResolver(PrincipalResolver { user() }, roles)
 
             resolver.permissionsFor(userId) shouldBe emptySet()
             resolver.permissionsFor(userId) shouldBe emptySet()
-            verify(exactly = 2) { roles.resolve(customerService) }
+            verify(exactly = 2) { roles.resolve(paymentAdapter) }
         }
 
         test("a missing role does not suppress grants from another assigned role") {
-            val staff = user(roles = setOf(RoleAssignment(customerService), RoleAssignment(accounting)))
+            val staff = user(roles = setOf(RoleAssignment(paymentAdapter), RoleAssignment(accounting)))
             val resolver =
                 RoleBasedPermissionResolver(
                     PrincipalResolver { staff },
@@ -214,7 +214,7 @@ class AuthorizationSpec :
                             else -> null
                         }
                     },
-                    RoleResolver { if (it == customerService) definition else null },
+                    RoleResolver { if (it == paymentAdapter) definition else null },
                 )
 
             userId.can(CommercePermissions.PaymentRecord, resolver) shouldBe true
@@ -230,8 +230,8 @@ class AuthorizationSpec :
                 )
 
             resolver.permissionsFor(serviceId) shouldBe emptySet()
-            serviceId.can(emailRespond, resolver) shouldBe false
-            ServiceId(UUID.randomUUID()).can(emailRespond, resolver) shouldBe false
+            serviceId.can(observePayments, resolver) shouldBe false
+            ServiceId(UUID.randomUUID()).can(observePayments, resolver) shouldBe false
             verify { roles wasNot Called }
         }
 
@@ -245,11 +245,11 @@ class AuthorizationSpec :
                     null,
                     "Alex",
                     PrincipalStatus.ACTIVE,
-                    setOf(RoleAssignment(customerService)),
+                    setOf(RoleAssignment(paymentAdapter)),
                 )
             val resolver = RoleBasedPermissionResolver(PrincipalResolver { wrongType }, roles)
 
-            serviceId.can(emailRespond, resolver) shouldBe false
+            serviceId.can(observePayments, resolver) shouldBe false
             verify { roles wasNot Called }
         }
     })

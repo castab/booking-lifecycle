@@ -1,9 +1,7 @@
 package io.github.castab.commerce.financial
 
-import io.github.castab.commerce.customer.Customer
 import io.github.castab.commerce.financial.ChangeOrder.Change
 import io.github.castab.commerce.financial.fixtures.InMemoryFinancialDocumentHistory
-import io.github.castab.commerce.financial.fixtures.TEST_CUSTOMER_ID
 import io.github.castab.commerce.financial.fixtures.lineItem
 import io.github.castab.commerce.financial.fixtures.usd
 import io.kotest.assertions.throwables.shouldThrow
@@ -25,7 +23,7 @@ class FinancialDocumentHistorySpec :
 
         /** v1 Estimate → v2 Estimate → v3 Quote → v4 Quote → v5 Invoice. */
         fun lineage(): List<FinancialDocument> {
-            val v1 = FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(chairs), customerId = TEST_CUSTOMER_ID)
+            val v1 = FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(chairs))
             val v2 = v1.changeOrder(ChangeOrder(listOf(Change.AddLineItem(serviceFee))))
             val v3 = v2.toQuote()
             val v4 = v3.changeOrder(ChangeOrder(listOf(Change.RemoveLineItem(chairs.id))))
@@ -88,21 +86,6 @@ class FinancialDocumentHistorySpec :
 
                 shouldThrow<IllegalStateException> { invoiceV5.retrievePreviousVersion(from = history) }
             }
-
-            test("rejects a previous snapshot assigned to a different customer") {
-                val invoiceV5 = lineage().last()
-                val wrongCustomer =
-                    FinancialDocument.Quote.restore(
-                        invoiceV5.id,
-                        Version.of(4),
-                        invoiceV5.lineItems,
-                        Customer.Id(UUID.randomUUID()),
-                    )
-                val history = mockk<FinancialDocumentHistory>()
-                every { history.retrieveVersion(invoiceV5.previousReference!!) } returns wrongCustomer
-
-                shouldThrow<IllegalStateException> { invoiceV5.retrievePreviousVersion(from = history) }
-            }
         }
 
         context("retrieveVersion") {
@@ -142,18 +125,9 @@ class FinancialDocumentHistorySpec :
             test("rejects a history that returns another lineage") {
                 val history = mockk<FinancialDocumentHistory>()
                 every { history.retrieveLatestVersion(any()) } returns
-                    FinancialDocument.Invoice.create(UUID.randomUUID(), listOf(chairs), customerId = TEST_CUSTOMER_ID)
+                    FinancialDocument.Invoice.create(UUID.randomUUID(), listOf(chairs))
 
                 shouldThrow<IllegalStateException> { lineage().first().retrieveLatestVersion(from = history) }
-            }
-
-            test("rejects the latest snapshot when its customer differs") {
-                val source = lineage().first()
-                val history = mockk<FinancialDocumentHistory>()
-                every { history.retrieveLatestVersion(source.id) } returns
-                    FinancialDocument.Invoice.restore(source.id, Version.of(5), source.lineItems, Customer.Id(UUID.randomUUID()))
-
-                shouldThrow<IllegalStateException> { source.retrieveLatestVersion(from = history) }
             }
         }
 
@@ -172,7 +146,7 @@ class FinancialDocumentHistorySpec :
 
             test("the store, not the library, rejects a second successor for the same version") {
                 val history = InMemoryFinancialDocumentHistory()
-                val v1 = FinancialDocument.Quote.create(UUID.randomUUID(), listOf(chairs), customerId = TEST_CUSTOMER_ID)
+                val v1 = FinancialDocument.Quote.create(UUID.randomUUID(), listOf(chairs))
                 history.save(v1)
 
                 val first = v1.changeOrder(ChangeOrder(listOf(Change.AddLineItem(serviceFee))))

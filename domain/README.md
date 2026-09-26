@@ -20,21 +20,26 @@ can depend on `io.github.castab:commerce-domain` alone without acquiring
 io.github.castab:commerce-domain:<version>
 ```
 
-It currently contains customer identity, booking records and lifecycle, financial
-documents, payment reconciliation, a payment adapter contract, and principal authorization:
+It contains independent, reusable commerce concepts: the booking lifecycle protocol,
+financial documents, payment reconciliation, a payment adapter contract, and principal
+authorization:
 
 | Domain | Package | What it provides |
 |---|---|---|
 | [Booking lifecycle](#booking-lifecycle) | `io.github.castab.commerce.booking.lifecycle` | A type-level protocol for the phases of a booking (`InitialRequest → Quote → Booked → Completed`, or `Cancelled`). Your application's own types implement the phases. |
-| [Customer and booking records](#customer-and-booking-records) | `io.github.castab.commerce.customer`, `io.github.castab.commerce.booking` | Minimal customer identity, a booking-to-customer association, and independently held contacts and locations. |
 | [Financial documents](#financial-documents) | `io.github.castab.commerce.financial` | Immutable, versioned commercial documents (`Estimate → Quote → Invoice`) with line items, change orders, derived totals, and persistence-agnostic history lookup. |
 | [Payment reconciliation](#payment-reconciliation) | `io.github.castab.commerce.payment` | Immutable payment records, payment allocations, allocation reversals, refund records, and refund allocations, with derived payment and document reconciliation. |
 | [Principal authorization](#principal-authorization) | `io.github.castab.commerce.staff` | Human and service identities, extensible roles and permissions, resolver ports, and additive role-based authorization. |
 | [Payment adapter contract](#payment-adapter-contract) | `io.github.castab.commerce.payment.adapter` | Provider-neutral payment and refund instructions, observations, capability descriptions, and event decisions. |
 
-The booking lifecycle protocol remains independent of financial documents. Booking
-records and financial documents both reference `Customer.Id`. The payment domain references
-financial documents, one way only. A financial document never knows about its payments.
+The booking lifecycle protocol and financial documents are independent of each other and
+of any customer. The payment domain references financial documents, one way only. A
+financial document never knows about its payments.
+
+The library defines no customer, booking record, inquiry, contact, or location. Those are
+application entities, and so are their relationships to the facts this library models
+(which customer a document concerns, which inquiry produced an estimate, which booking an
+invoice belongs to). See [Application-owned entities and relationships](#application-owned-entities-and-relationships).
 
 The domains share one design stance. Lifecycle progression is expressed by the type
 system rather than a mutable status field: an operation that is not legal in a stage or
@@ -47,7 +52,7 @@ is `kotlin-stdlib`.
 
 - [Installation](#installation)
 - [Booking lifecycle](#booking-lifecycle)
-- [Customer and booking records](#customer-and-booking-records)
+- [Application-owned entities and relationships](#application-owned-entities-and-relationships)
 - [Financial documents](#financial-documents)
 - [Payment reconciliation](#payment-reconciliation)
 - [Principal authorization](#principal-authorization)
@@ -218,8 +223,9 @@ to each application.
 **Application models implement lifecycle phase interfaces directly.**
 
 ```kotlin
+// CustomerId is the application's own type; this library defines no customer concept.
 data class CateringQuote(
-    val customerId: Customer.Id,
+    val customerId: CustomerId,
     val total: BigDecimal,
 ) : BookingLifecycle.Active.Quote {
     // transition implementations, shown below
@@ -287,7 +293,8 @@ Cancelled
 
 A lifecycle can begin at either of two phases:
 
-- **`InitialRequest`**: a customer submits an inquiry through your application.
+- **`InitialRequest`**: the generic pre-quote phase. Your application decides what starts
+  it, for example an inquiry submitted through its own channels.
 - **`Quote`**: the opportunity started outside your application (a phone call, a text,
   an email, an in-person conversation, another system), and the first thing your
   application records is an issued quote.
@@ -299,15 +306,17 @@ construct a model that implements one of these two phases.
 
 | Phase | Classification | Meaning | Legal transitions |
 |---|---|---|---|
-| `InitialRequest` | Active | An inquiry or estimate request that has not yet become an official quote. | `toQuote()`, `cancel()` |
+| `InitialRequest` | Active | A request for a booking that has not yet become an official quote. | `toQuote()`, `cancel()` |
 | `Quote` | Active | A booking opportunity for which an official quote has been issued. It can also be the entry point. | `toBooking()`, `cancel()` |
 | `Booked` | Active | A confirmed booking. The library does not define what "confirmed" requires. | `complete()`, `cancel()` |
 | `Cancelled` | Terminal | The lifecycle ended without fulfillment. | none |
 | `Completed` | Terminal | The booked service or event was fulfilled. | none |
 
 The application owns what each phase contains. An `InitialRequest` might hold customer
-details, selections, notes, an estimate, or a requested date, but the lifecycle requires
-none of these.
+details, selections, notes, or a requested date, but the lifecycle requires none of these.
+`InitialRequest` is a booking phase, not a financial `Estimate` document: an application may
+issue an estimate while a booking is in this phase, but relating the two is application
+policy.
 
 ### Lifecycle API
 
@@ -397,24 +406,30 @@ fun describe(phase: BookingLifecycle): String =
 
 Below is a complete application-owned chain for a catering business. It lives in the
 application's own package. Every field and every type other than `BookingLifecycle`
-belongs to the application. The library defines `Booking.Id` for a stable booking
-reference; the application carries it through its own phase types.
+belongs to the application, including the identities: the library defines no booking
+record, booking ID, customer, or customer ID. This application declares its own
+`BookingId` and `CustomerId` and chooses to carry one `BookingId` through every phase.
+That is the example's choice, not a protocol requirement: how a request, its quote, and
+its booking are known to be the same booking is application-owned and remains an open
+question for the library.
 
 ```kotlin
 package com.example.catering
 
-import io.github.castab.commerce.booking.Booking
 import io.github.castab.commerce.booking.lifecycle.BookingLifecycle
-import io.github.castab.commerce.customer.Customer
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.util.UUID
 
+// Application-owned identities. commerce-domain defines neither.
+data class BookingId(val value: UUID)
+data class CustomerId(val value: UUID)
+
 data class MenuSelection(val item: String, val servings: Int)
 
 data class CateringInitialRequest(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
     val eventDate: LocalDate,
     val selections: List<MenuSelection>,
     val estimatedTotal: BigDecimal,
@@ -428,8 +443,8 @@ data class CateringInitialRequest(
 }
 
 data class CateringQuote(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
     val eventDate: LocalDate,
     val selections: List<MenuSelection>,
     val total: BigDecimal,
@@ -448,8 +463,8 @@ data class CateringQuote(
 }
 
 data class CateringBooking(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
     val eventDate: LocalDate,
     val selections: List<MenuSelection>,
     val invoiceTotal: BigDecimal,
@@ -472,26 +487,26 @@ data class CateringBooking(
 }
 
 data class CompletedCateringBooking(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
     val eventDate: LocalDate,
     val finalTotal: BigDecimal,
 ) : BookingLifecycle.Terminal.Completed
 
 data class CancelledCateringInquiry(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
 ) : BookingLifecycle.Terminal.Cancelled
 
 data class DeclinedCateringQuote(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
     val quotedTotal: BigDecimal,
 ) : BookingLifecycle.Terminal.Cancelled
 
 data class CancelledCateringBooking(
-    val bookingId: Booking.Id,
-    val customerId: Customer.Id,
+    val bookingId: BookingId,
+    val customerId: CustomerId,
     val eventDate: LocalDate,
 ) : BookingLifecycle.Terminal.Cancelled
 ```
@@ -500,8 +515,8 @@ Walking the canonical path:
 
 ```kotlin
 val request = CateringInitialRequest(
-    bookingId = Booking.Id(UUID.randomUUID()),
-    customerId = Customer.Id(UUID.randomUUID()),
+    bookingId = BookingId(UUID.randomUUID()),
+    customerId = CustomerId(UUID.randomUUID()),
     eventDate = LocalDate.of(2026, 11, 14),
     selections = listOf(MenuSelection("Tamales", servings = 80)),
     estimatedTotal = BigDecimal("1200.00"),
@@ -641,9 +656,9 @@ val someBooking: BookingLifecycle.Active.Booked = someQuote.toBooking()
 
 The booking lifecycle does not own, define, or constrain any of the following:
 
-- customer fields or customer management (the separate customer package defines minimal identity)
+- customers: customer identity, fields, or management
 - staff identity or actors
-- carrying `Booking.Id` through application-owned phase models
+- booking identity, and how it is carried through application-owned phase models
 - selections, line items, or estimates
 - quote contents and quote versions
 - invoice details and invoice versions
@@ -653,8 +668,8 @@ The booking lifecycle does not own, define, or constrain any of the following:
 - timestamps
 - persistence structure
 
-Every example type above (`MenuSelection`, `CateringQuote`, `bookingId`, `invoiceVersion`,
-...) is application code. The booking lifecycle compiles without knowing what any of it means.
+Every example type above (`BookingId`, `CustomerId`, `MenuSelection`, `CateringQuote`,
+`invoiceVersion`, ...) is application code. The booking lifecycle compiles without knowing what any of it means.
 
 An application that wants versioned, immutable quote and invoice documents can hold
 [financial documents](#financial-documents) inside its phase models. See
@@ -716,7 +731,7 @@ lifecycle. Money actually returned can be recorded with the
 than bookings; the application links the two. A minimal application-owned sketch:
 
 ```kotlin
-data class Refund(val bookingId: Booking.Id, val amount: BigDecimal, val reason: String)
+data class Refund(val bookingId: BookingId, val amount: BigDecimal, val reason: String)
 
 val refund = Refund(completed.bookingId, BigDecimal("150.00"), reason = "late delivery")
 // `completed` is still a BookingLifecycle.Terminal.Completed
@@ -735,61 +750,64 @@ support, and accounting are orthogonal to the booking lifecycle. For that reason
 are no phases such as `CompletedRefunded`, `PartiallyRefunded`, `DepositPaid`,
 `ChargebackReceived`, or `ComplaintOpened`.
 
-## Customer and booking records
+## Application-owned entities and relationships
+
+This library models independent commerce facts and the invariants they protect. It does
+not decide what a customer is, what fields a customer has, what a booking contains, which
+customer owns a booking or a financial document, which inquiry produced an estimate, which
+booking produced a quote or invoice, which contacts a booking needs, or where a booking
+takes place. Those are the concrete application's entities and relationships.
 
 ```text
-CUSTOMER                            Minimal durable commerce identity
-(id, name, email)                   Who is the person doing business with us?
-           │ Customer.Id
-      ┌────┴──────────────┐
-      ▼                   ▼
-BOOKING              FINANCIAL DOCUMENTS
-(id, customerId)     (id, customerId, stage, lines, versions)
-      │
-      ├── BookingContact  0..N  Who should we contact for this booking?
-      └── BookingLocation 0..1  Where does this booking take place?
+                    CONCRETE APPLICATION
+
+Customer ───────────────┐
+Inquiry ────────────────┼──── application-owned relationships
+Booking ────────────────┤
+                         │
+                         ▼
+               independent commerce facts
+                         │
+       ┌─────────────────┼─────────────────┐
+       ▼                 ▼                 ▼
+FinancialDocument   BookingLifecycle    Payments/etc.
 ```
 
-`Customer` contains exactly an ID, name, and email. Its `Customer.Id` is a
-UUID-backed value. It has no phone number, address, postal code, booking history, or payment information.
-`Booking` identifies the service arrangement and references that customer by ID. The
-application still owns the concrete lifecycle phase models and business transitions.
+The diagram is conceptual, not a required persistence design. Each application chooses its
+own types, tables, and relationships. A catering application might define a `Customer`
+with a name and email and a `CateringBooking` with a guest count and event date that
+implements a lifecycle phase; a mobile-detailing application might define entirely
+different types. Neither has to share a customer or booking schema through this library.
 
-Each `BookingContact` has its own `BookingContact.Id` and `Booking.Id`.
-`CustomerContact` references an existing `Customer.Id`; its name and email resolve through
-that customer. It may hold a separate, optional phone number for this booking.
-`ExternalContact` describes a booking-specific person without creating a customer. It
-requires a name and at least one of email or phone. Several contacts can share a booking ID.
-A phone number on a `BookingContact` is booking-scoped operational contact information and
-is not part of the durable `Customer` identity. The customer and operational contact may be
-the same person or different people. SMS, RCS, voice, and other delivery behavior belongs
-to consuming applications and adapters.
-A booking may exist before any operational contact is established. Whether a quote needs
-one before becoming `Booked` is policy for the consuming application.
+An application relates its entities to commerce facts from the outside, typically by
+storing a document's `id` or `reference` next to its own records. `commerce-runtime`
+provides the shared transaction boundary for writing such relationships alongside the
+application's own records. Once the runtime persists commerce facts, an application will
+be able to write its inquiry, the estimate, and the relationship between them in one
+transaction, without either generic module knowing about the relationship.
 
-`BookingLocation` has its own `BookingLocation.Id`, `Booking.Id`, and `PostalAddress`.
-Region and postal code are optional for places that do not use them; when present, they
-belong to that booking's location. Two bookings of one customer can therefore have different
-addresses. An application may keep at most one active location per booking; the library
-has no repository or global registry to enforce collection-wide cardinality.
-
-Contacts and locations are separate records referenced by booking ID. An application can
-later apply shorter retention to this operational PII and remove those records without
-deleting the customer, booking, financial history, or payment history. This library does
-not perform retention or purging.
-
-Financial documents answer what was proposed, agreed to, or invoiced. Payment records and
-reconciliation answer what was paid, refunded, and allocated. Documents retain only the
-`Customer.Id` relationship; they do not copy customer contact details or event addresses.
+The library deliberately offers no generic owner, party, subject, application-relationship
+reference, context, or metadata field on its types to hold such relationships. (This does
+not concern the library's own document references, `FinancialDocumentReference` and
+`previousReference`, which identify financial-document snapshots.) Business-specific data stays
+strongly typed in the application.
 
 ## Financial documents
 
 Package `io.github.castab.commerce.financial`. Immutable, versioned commercial documents:
 estimates, quotes, and invoices.
 
-`create` and `restore` on every stage now require `Customer.Id`. This is a deliberate
-source and binary API change: applications must supply and persist the customer reference
-for each document lineage. Revisions and stage transitions preserve it automatically.
+A financial document is an independent financial fact: its identity, version lineage, stage,
+line items, currency, and derived totals. It carries no customer, inquiry, or booking
+reference; applications persist those relationships externally. It also carries no
+recipient or billing snapshot (name, email, address): whether an issued document should
+ever hold an immutable recipient snapshot as part of the financial fact is an open design
+question, separate from customer ownership.
+
+> **Upgrading from 0.0.3 or 0.0.4.** Those releases required a `customerId` on every
+> document, including in `create` and `restore`. It has been removed, which is a source and
+> binary API change: drop the argument, and keep any customer relationship in your own
+> storage.
 
 Unlike the booking lifecycle, these are concrete library-owned types. The library enforces
 the invariants that every application needs from a financial document: one identity per
@@ -973,7 +991,6 @@ import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
-import io.github.castab.commerce.customer.Customer
 import java.math.BigDecimal
 import java.util.Currency
 import java.util.UUID
@@ -1000,7 +1017,6 @@ val serviceFee = LineItem(
 // 1. Create an estimate: v1, no previous version.
 val estimateV1 = FinancialDocument.Estimate.create(
     id = UUID.randomUUID(),
-    customerId = Customer.Id(UUID.randomUUID()),
     lineItems = listOf(tamales, serviceFee),
 )
 estimateV1.total                      // 898.00 USD  (600.00 + 250.00 + 48.00 tax)
@@ -1052,7 +1068,6 @@ A sale that never had an estimate or quote starts its lineage as an invoice:
 ```kotlin
 val receipt = FinancialDocument.Invoice.create(
     id = UUID.randomUUID(),
-    customerId = Customer.Id(UUID.randomUUID()),
     lineItems = listOf(
         LineItem(
             id = UUID.randomUUID(),
@@ -1139,13 +1154,12 @@ class JdbiFinancialDocumentHistory(private val jdbi: Jdbi) : FinancialDocumentHi
 
     private fun toDocument(rs: ResultSet): FinancialDocument {
         val id = rs.getObject("document_id", UUID::class.java)
-        val customerId = Customer.Id(rs.getObject("customer_id", UUID::class.java))
         val version = Version.of(rs.getInt("version"))
         val lineItems = readLineItems(rs)                      // your mapping
         return when (rs.getString("stage")) {
-            "ESTIMATE" -> FinancialDocument.Estimate.restore(id, version, lineItems, customerId)
-            "QUOTE" -> FinancialDocument.Quote.restore(id, version, lineItems, customerId)
-            "INVOICE" -> FinancialDocument.Invoice.restore(id, version, lineItems, customerId)
+            "ESTIMATE" -> FinancialDocument.Estimate.restore(id, version, lineItems)
+            "QUOTE" -> FinancialDocument.Quote.restore(id, version, lineItems)
+            "INVOICE" -> FinancialDocument.Invoice.restore(id, version, lineItems)
             else -> error("Unknown stage")
         }
     }
@@ -1210,7 +1224,6 @@ The complete public API of `io.github.castab.commerce.financial`, without KDoc a
 ```kotlin
 public sealed class FinancialDocument {
     public val id: UUID
-    public val customerId: Customer.Id
     public val version: Version
     public val previousVersion: Version?
     public val lineItems: List<LineItem>
@@ -1226,8 +1239,8 @@ public sealed class FinancialDocument {
         override fun changeOrder(changeOrder: ChangeOrder): Estimate
         public fun toQuote(): Quote
         public companion object {
-            public fun create(id: UUID, lineItems: List<LineItem>, customerId: Customer.Id): Estimate
-            public fun restore(id: UUID, version: Version, lineItems: List<LineItem>, customerId: Customer.Id): Estimate
+            public fun create(id: UUID, lineItems: List<LineItem>): Estimate
+            public fun restore(id: UUID, version: Version, lineItems: List<LineItem>): Estimate
         }
     }
 
@@ -1235,16 +1248,16 @@ public sealed class FinancialDocument {
         override fun changeOrder(changeOrder: ChangeOrder): Quote
         public fun toInvoice(): Invoice
         public companion object {
-            public fun create(id: UUID, lineItems: List<LineItem>, customerId: Customer.Id): Quote
-            public fun restore(id: UUID, version: Version, lineItems: List<LineItem>, customerId: Customer.Id): Quote
+            public fun create(id: UUID, lineItems: List<LineItem>): Quote
+            public fun restore(id: UUID, version: Version, lineItems: List<LineItem>): Quote
         }
     }
 
     public class Invoice : FinancialDocument {
         override fun changeOrder(changeOrder: ChangeOrder): Invoice
         public companion object {
-            public fun create(id: UUID, lineItems: List<LineItem>, customerId: Customer.Id): Invoice
-            public fun restore(id: UUID, version: Version, lineItems: List<LineItem>, customerId: Customer.Id): Invoice
+            public fun create(id: UUID, lineItems: List<LineItem>): Invoice
+            public fun restore(id: UUID, version: Version, lineItems: List<LineItem>): Invoice
         }
     }
 }
@@ -1299,7 +1312,7 @@ public fun FinancialDocument.retrieveVersion(version: Version, from: FinancialDo
 public fun FinancialDocument.retrieveLatestVersion(from: FinancialDocumentHistory): FinancialDocument?
 ```
 
-From Java, the factories are static (`FinancialDocument.Quote.create(id, items, customerId)`,
+From Java, the factories are static (`FinancialDocument.Quote.create(id, items)`,
 `Version.of(3)`, `Version.INITIAL`), and the history helpers are static methods on
 `FinancialDocumentHistories`.
 
@@ -1546,7 +1559,6 @@ deposit, or only invoices take payment, is your policy.
 ### Example: deposit, later invoice version, partial refund
 
 ```kotlin
-import io.github.castab.commerce.customer.Customer
 import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
@@ -1565,7 +1577,7 @@ val catering = LineItem(UUID.randomUUID(), "Catering", quantity = null, price = 
 val rentals = LineItem(UUID.randomUUID(), "Table rentals", quantity = null, price = usd("200.00"), taxAmount = usd("0.00"))
 
 // D/v1: a $1,000 quote.
-val quoteV1 = FinancialDocument.Quote.create(id = UUID.randomUUID(), customerId = Customer.Id(UUID.randomUUID()), lineItems = listOf(catering))
+val quoteV1 = FinancialDocument.Quote.create(id = UUID.randomUUID(), lineItems = listOf(catering))
 
 // A $300 card deposit arrives through a provider and is applied to the quote as it stands.
 val deposit = PaymentRecord(
@@ -1792,12 +1804,13 @@ Applications define the actual role bundles and may add their own, for example:
 import io.github.castab.commerce.staff.*
 import java.util.UUID
 
-val EmailRespond = PermissionKey("fionas.email.respond")
-val CustomerService = RoleDefinition(
-    key = RoleKey("fionas.customer-service"),
-    displayName = "Customer Service",
-    description = "Handles customer communication",
-    permissions = setOf(EmailRespond),
+// Application-defined example keys; the "example." prefix stands for your own namespace.
+val MessageRespond = PermissionKey("example.message.respond")
+val Support = RoleDefinition(
+    key = RoleKey("example.support"),
+    displayName = "Support",
+    description = "Responds to incoming messages",
+    permissions = setOf(MessageRespond),
 )
 
 val StripeAdapterRole = RoleDefinition(
@@ -1827,7 +1840,7 @@ val permissionResolver = RoleBasedPermissionResolver(principalResolver, roleReso
 
 stripeAdapter.id.can(CommercePermissions.PaymentRecord, permissionResolver) // true
 stripeAdapter.id.can(CommercePermissions.UserManage, permissionResolver)    // false
-userId.can(EmailRespond, permissionResolver)                                // same API for a human
+userId.can(MessageRespond, permissionResolver)                              // same API for a human
 ```
 
 Here `usersById`, `servicesById`, and `rolesByKey` represent application-owned sources,
@@ -1969,16 +1982,16 @@ can use any transport while preserving these meanings.
 The booking lifecycle and financial document stages are independent and compose in
 application code. A booking's `Quote` *phase* and a financial `Quote` *document* are
 different concepts: one says where the booking stands, and the other is the priced offer.
-An application can let its phase models carry documents:
+An application can let its phase models carry documents. `BookingId` is the application's
+own type, as in [Implementing the lifecycle](#implementing-the-lifecycle):
 
 ```kotlin
-import io.github.castab.commerce.booking.Booking
 import io.github.castab.commerce.booking.lifecycle.BookingLifecycle
 import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 
 data class CateringQuote(
-    val bookingId: Booking.Id,
+    val bookingId: BookingId,
     val quote: FinancialDocument.Quote,
 ) : BookingLifecycle.Active.Quote {
 
@@ -1991,7 +2004,7 @@ data class CateringQuote(
 }
 
 data class CateringBooking(
-    val bookingId: Booking.Id,
+    val bookingId: BookingId,
     val invoice: FinancialDocument.Invoice,
 ) : BookingLifecycle.Active.Booked {
 
@@ -2004,9 +2017,10 @@ data class CateringBooking(
 }
 ```
 
-The booking lifecycle still owns no financial data, and the financial documents hold
-only customer identity, not booking data. Whether the two advance together, and when, is your
-application's decision.
+The booking lifecycle still owns no financial data, and the financial documents hold no
+booking or customer data. The relationship between them lives in the application's own
+model (here, the phase types hold the documents). Whether the two advance together, and
+when, is your application's decision.
 
 ## What this library is not
 
@@ -2077,10 +2091,6 @@ a problem, fix it and release `0.0.2`.
 
 What exists today:
 
-- the minimal `Customer` identity, UUID-backed `Customer.Id`, and validated name,
-  email, and phone value objects (with phone used by booking contacts);
-- the `Booking` to customer association, separate `BookingContact` variants, and
-  `BookingLocation` with a postal address;
 - the booking lifecycle protocol: 3 sealed classifications, 5 open phase interfaces, and
   6 abstract transition functions;
 - the financial document domain: the sealed `FinancialDocument` with `Estimate`, `Quote`,
@@ -2124,8 +2134,9 @@ applications depend on `commerce-runtime`. The dependency points one way:
 `commerce-runtime`.
 
 Some relationships only coordinate concepts that are each meaningful on their own, such
-as which financial document belongs to which booking. `commerce-runtime` or the concrete
-application owns those, not this library. The domain semantics documented here stay
+as which financial document belongs to which booking or customer. The concrete application
+owns those, not this library and not `commerce-runtime`, which lets application
+persistence share its transactions. The domain semantics documented here stay
 persistence-agnostic. Persistence adapters build on them without changing the model.
 
 Publishing to Maven Central may be added as an additional distribution channel. If it is,

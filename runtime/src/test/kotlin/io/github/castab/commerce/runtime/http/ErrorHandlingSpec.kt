@@ -30,16 +30,16 @@ private fun failing(failure: Exception): HttpHandler = CommerceErrorHandling.the
 
 class ErrorHandlingSpec :
     FunSpec({
-        context("each application failure maps to one status and code, keeping its message") {
+        context("each operation failure maps to one status and code, keeping its message") {
             withTests(
                 nameFn = { (failure, _, _) -> failure::class.simpleName!! },
                 Triple(
-                    CommerceFailure.ValidationFailed("Customer name must not be blank"),
+                    CommerceFailure.ValidationFailed("A financial document must contain at least one line item"),
                     Status.UNPROCESSABLE_ENTITY,
                     "validation_failed",
                 ),
-                Triple(CommerceFailure.NotFound("Customer 1 was not found"), Status.NOT_FOUND, "not_found"),
-                Triple(CommerceFailure.Conflict("Customer 1 already exists"), Status.CONFLICT, "conflict"),
+                Triple(CommerceFailure.NotFound("Financial document 1 was not found"), Status.NOT_FOUND, "not_found"),
+                Triple(CommerceFailure.Conflict("Financial document 1 v2 already exists"), Status.CONFLICT, "conflict"),
                 Triple(CommerceFailure.IllegalTransition("A quote cannot be completed"), Status.CONFLICT, "illegal_transition"),
                 Triple(
                     CommerceFailure.InvariantViolated("Allocation exceeds the payment"),
@@ -105,7 +105,7 @@ class ErrorHandlingSpec :
 
         test("validating reports a domain require failure as a validation failure with the domain's message") {
             shouldThrow<CommerceFailure.ValidationFailed> {
-                validating { require(false) { "Email address must not be blank" } }
-            }.message shouldBe "Email address must not be blank"
+                validating { require(false) { "Line item quantity must be positive" } }
+            }.message shouldBe "Line item quantity must be positive"
         }
     })

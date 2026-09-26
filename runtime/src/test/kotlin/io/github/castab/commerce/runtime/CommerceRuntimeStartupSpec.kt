@@ -12,7 +12,7 @@ import io.github.castab.commerce.runtime.testing.withTestDatabase
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
-import io.kotest.matchers.collections.shouldContain
+import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
 import org.flywaydb.core.api.FlywayException
 import org.http4k.core.Method
@@ -52,7 +52,7 @@ class CommerceRuntimeStartupSpec :
 
                 shouldThrow<FlywayException> { commerceRuntime(database.runtimeConfiguration(OnStartup.MIGRATE), broken) }
 
-                dataSource.appliedVersions("commerce") shouldContain "1"
+                dataSource.appliedVersions("commerce").shouldNotBeEmpty()
                 dataSource.appliedVersions("public").shouldBeEmpty()
             }
         }

@@ -42,15 +42,17 @@ commerce-runtime                 (this repository)
 concrete commerce application    (the consuming project)
 ```
 
-1. **Domain.** `commerce-domain` holds the reusable concepts, facts, invariants, and
-   protocols: customers, bookings and the booking lifecycle, estimates, quotes, and
-   invoices, payments, allocations, refunds, reconciliation, the provider-neutral payment
-   adapter contract, and principals, roles, and permissions. It knows nothing about HTTP,
-   databases, serialization, or frameworks.
+1. **Domain.** `commerce-domain` holds independent, reusable commerce concepts, facts,
+   invariants, and protocols: the booking lifecycle topology, estimates, quotes, and
+   invoices (line items, money, change orders), payments, allocations, refunds,
+   reconciliation, the provider-neutral payment adapter contract, and principals, roles,
+   and permissions. It defines no customer, booking record, inquiry, contact, or location,
+   and it knows nothing about HTTP, databases, serialization, or frameworks.
 2. **Runtime.** `commerce-runtime` is the opinionated, reusable machinery from which a
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
-   commerce repositories and routes, and application contribution points. It is a
+   and application contribution points, and later commerce repositories and routes for
+   domain facts. It owns no customer or other application data model. It is a
    library. It is not itself an application, and it provides no default application and
    no `main()`. It defines the configuration it requires but ships no `application.conf`,
    and it emits logs through the SLF4J API but selects no logging backend and ships no
@@ -58,10 +60,31 @@ concrete commerce application    (the consuming project)
 3. **Concrete application.** The consuming project, for example Fiona's catering
    application or a detailing, repair, pet salon, or point-of-sale application. It
    depends on `commerce-runtime` and supplies its business-specific behavior and details
-   through explicit `ApplicationContributions`. It owns `main()` and its process
+   through explicit `ApplicationContributions`. It owns its business entities (customers,
+   inquiries, concrete bookings that implement lifecycle phases, contacts, locations) and
+   their relationships to commerce facts, which it can persist in the runtime's shared
+   transaction. It owns `main()` and its process
    lifecycle, its deployment configuration (`application.conf` and environment), and its
    logging backend (an SLF4J provider such as Logback) and logging configuration, and it
    creates and starts the runtime.
+
+```text
+                    CONCRETE APPLICATION
+
+Customer ───────────────┐
+Inquiry ────────────────┼──── application-owned relationships
+Booking ────────────────┤
+                         │
+                         ▼
+               independent commerce facts
+                         │
+       ┌─────────────────┼─────────────────┐
+       ▼                 ▼                 ▼
+FinancialDocument   BookingLifecycle    Payments/etc.
+```
+
+This is conceptual, not a required persistence design: each application chooses its own
+types, tables, and relationships.
 
 The module dependency points one way: `:runtime` → `:domain`, never the reverse. The build
 enforces it. `:domain`'s `check` fails if its runtime classpath ever contains anything
@@ -122,8 +145,9 @@ fun main() {
   compatibility surface. See
   [runtime/README.md](runtime/README.md#database-and-migrations).
 - **Booking is optional.** Booking is one commerce capability, not the root of commerce. A
-  point-of-sale application uses customers, invoices, payments, allocations, refunds, and
-  reconciliation without ever creating a booking.
+  point-of-sale application uses invoices, payments, allocations, refunds, and
+  reconciliation (with its own customer model, if it has one) without ever creating a
+  booking.
 
 `commerce-runtime` does **not** define `CateringBooking`, `DetailingBooking`,
 `RepairBooking`, `GroomingBooking`, or any other business-specific booking model. Neither
@@ -200,7 +224,7 @@ commerce/
     └── src/{main,test}/{kotlin,resources}
 ```
 
-The domain lives in `io.github.castab.commerce.*` (booking, customer, financial, payment,
+The domain lives in `io.github.castab.commerce.*` (booking lifecycle, financial, payment,
 staff), and the runtime lives in `io.github.castab.commerce.runtime.*`. There is no
 executable module in this repository: concrete applications live in their own projects.
 

@@ -1,6 +1,5 @@
 package io.github.castab.commerce.financial
 
-import io.github.castab.commerce.customer.Customer
 import io.github.castab.commerce.financial.ChangeOrder.Change
 import java.util.Collections
 import java.util.Currency
@@ -23,7 +22,7 @@ import java.util.UUID
  *                 ─changeOrder→ ABC v4 Quote    ─toInvoice→ ABC v5 Invoice
  * ```
  *
- * The stage may change along a lineage. The [id] and [customerId] never do.
+ * The stage may change along a lineage. The [id] never does.
  *
  * ## Lifecycle stage
  *
@@ -47,11 +46,13 @@ import java.util.UUID
  * items and can never be supplied by a caller, so a document cannot contradict its own
  * lines.
  *
- * ## Customer relationship
+ * ## Relationships are application-owned
  *
- * Every snapshot identifies the customer through [customerId], without copying name,
- * email, phone, or booking location. A change order or stage transition preserves this
- * reference. Payment and refund facts remain outside the document.
+ * A financial document is an independent financial fact. It does not know who requested
+ * it, which customer it concerns, which inquiry produced it, or which booking it may be
+ * associated with. Those are application entities and relationships: an application
+ * persists them itself, outside the document, keyed by the document's [id] or
+ * [reference]. Payment and refund facts likewise remain outside the document.
  *
  * ## History and persistence
  *
@@ -79,8 +80,6 @@ import java.util.UUID
 sealed class FinancialDocument(
     /** The identity of the lineage this snapshot belongs to. Shared by every version. */
     val id: UUID,
-    /** The customer this document lineage concerns; shared by every snapshot. */
-    val customerId: Customer.Id,
     /** The position of this snapshot within its lineage. */
     val version: Version,
     /**
@@ -164,7 +163,6 @@ sealed class FinancialDocument(
             other is FinancialDocument &&
             other.javaClass == javaClass &&
             other.id == id &&
-            other.customerId == customerId &&
             other.version == version &&
             other.previousVersion == previousVersion &&
             other.lineItems == lineItems
@@ -172,7 +170,6 @@ sealed class FinancialDocument(
     final override fun hashCode(): Int {
         var result = javaClass.hashCode()
         result = 31 * result + id.hashCode()
-        result = 31 * result + customerId.hashCode()
         result = 31 * result + version.hashCode()
         result = 31 * result + lineItems.hashCode()
         return result
@@ -185,7 +182,7 @@ sealed class FinancialDocument(
                 is Quote -> "Quote"
                 is Invoice -> "Invoice"
             }
-        return "$stage(id=$id, customerId=$customerId, version=$version, previousVersion=$previousVersion, " +
+        return "$stage(id=$id, version=$version, previousVersion=$previousVersion, " +
             "lineItems=$lineItems, subtotal=$subtotal, taxAmount=$taxAmount, total=$total)"
     }
 
@@ -198,13 +195,12 @@ sealed class FinancialDocument(
      */
     class Estimate private constructor(
         id: UUID,
-        customerId: Customer.Id,
         version: Version,
         previousVersion: Version?,
         lineItems: List<LineItem>,
-    ) : FinancialDocument(id, customerId, version, previousVersion, lineItems) {
+    ) : FinancialDocument(id, version, previousVersion, lineItems) {
         override fun changeOrder(changeOrder: ChangeOrder): Estimate =
-            Estimate(id, customerId, version.next(), version, lineItems.applying(changeOrder))
+            Estimate(id, version.next(), version, lineItems.applying(changeOrder))
 
         /**
          * Issues this estimate as a quote.
@@ -230,8 +226,7 @@ sealed class FinancialDocument(
             fun create(
                 id: UUID,
                 lineItems: List<LineItem>,
-                customerId: Customer.Id,
-            ): Estimate = Estimate(id, customerId, Version.INITIAL, null, lineItems)
+            ): Estimate = Estimate(id, Version.INITIAL, null, lineItems)
 
             /**
              * Reconstructs a previously produced estimate snapshot, for use by persistence
@@ -246,8 +241,7 @@ sealed class FinancialDocument(
                 id: UUID,
                 version: Version,
                 lineItems: List<LineItem>,
-                customerId: Customer.Id,
-            ): Estimate = Estimate(id, customerId, version, version.previous(), lineItems)
+            ): Estimate = Estimate(id, version, version.previous(), lineItems)
         }
     }
 
@@ -260,13 +254,11 @@ sealed class FinancialDocument(
      */
     class Quote private constructor(
         id: UUID,
-        customerId: Customer.Id,
         version: Version,
         previousVersion: Version?,
         lineItems: List<LineItem>,
-    ) : FinancialDocument(id, customerId, version, previousVersion, lineItems) {
-        override fun changeOrder(changeOrder: ChangeOrder): Quote =
-            Quote(id, customerId, version.next(), version, lineItems.applying(changeOrder))
+    ) : FinancialDocument(id, version, previousVersion, lineItems) {
+        override fun changeOrder(changeOrder: ChangeOrder): Quote = Quote(id, version.next(), version, lineItems.applying(changeOrder))
 
         /**
          * Issues this quote as an invoice.
@@ -292,8 +284,7 @@ sealed class FinancialDocument(
             fun create(
                 id: UUID,
                 lineItems: List<LineItem>,
-                customerId: Customer.Id,
-            ): Quote = Quote(id, customerId, Version.INITIAL, null, lineItems)
+            ): Quote = Quote(id, Version.INITIAL, null, lineItems)
 
             /**
              * Reconstructs a previously produced quote snapshot, for use by persistence
@@ -308,12 +299,11 @@ sealed class FinancialDocument(
                 id: UUID,
                 version: Version,
                 lineItems: List<LineItem>,
-                customerId: Customer.Id,
-            ): Quote = Quote(id, customerId, version, version.previous(), lineItems)
+            ): Quote = Quote(id, version, version.previous(), lineItems)
 
             @JvmSynthetic
             internal fun successorOf(estimate: Estimate): Quote =
-                Quote(estimate.id, estimate.customerId, estimate.version.next(), estimate.version, estimate.lineItems)
+                Quote(estimate.id, estimate.version.next(), estimate.version, estimate.lineItems)
         }
     }
 
@@ -330,13 +320,11 @@ sealed class FinancialDocument(
      */
     class Invoice private constructor(
         id: UUID,
-        customerId: Customer.Id,
         version: Version,
         previousVersion: Version?,
         lineItems: List<LineItem>,
-    ) : FinancialDocument(id, customerId, version, previousVersion, lineItems) {
-        override fun changeOrder(changeOrder: ChangeOrder): Invoice =
-            Invoice(id, customerId, version.next(), version, lineItems.applying(changeOrder))
+    ) : FinancialDocument(id, version, previousVersion, lineItems) {
+        override fun changeOrder(changeOrder: ChangeOrder): Invoice = Invoice(id, version.next(), version, lineItems.applying(changeOrder))
 
         companion object {
             /**
@@ -354,8 +342,7 @@ sealed class FinancialDocument(
             fun create(
                 id: UUID,
                 lineItems: List<LineItem>,
-                customerId: Customer.Id,
-            ): Invoice = Invoice(id, customerId, Version.INITIAL, null, lineItems)
+            ): Invoice = Invoice(id, Version.INITIAL, null, lineItems)
 
             /**
              * Reconstructs a previously produced invoice snapshot, for use by persistence
@@ -370,12 +357,10 @@ sealed class FinancialDocument(
                 id: UUID,
                 version: Version,
                 lineItems: List<LineItem>,
-                customerId: Customer.Id,
-            ): Invoice = Invoice(id, customerId, version, version.previous(), lineItems)
+            ): Invoice = Invoice(id, version, version.previous(), lineItems)
 
             @JvmSynthetic
-            internal fun successorOf(quote: Quote): Invoice =
-                Invoice(quote.id, quote.customerId, quote.version.next(), quote.version, quote.lineItems)
+            internal fun successorOf(quote: Quote): Invoice = Invoice(quote.id, quote.version.next(), quote.version, quote.lineItems)
         }
     }
 }

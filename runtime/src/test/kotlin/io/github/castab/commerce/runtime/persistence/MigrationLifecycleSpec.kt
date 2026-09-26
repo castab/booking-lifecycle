@@ -11,67 +11,75 @@ import io.kotest.assertions.throwables.shouldNotThrowAny
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
-import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.collections.shouldContainExactly
+import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import org.flywaydb.core.api.FlywayException
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import javax.sql.DataSource
 
 /**
  * The migration phase against a real PostgreSQL: the runtime stream is discovered
  * internally, the application stream comes from contributed locations, the runtime stream
  * always runs first, and the two keep independent histories and version spaces. Every test
  * uses a fresh database.
+ *
+ * commerce-runtime currently owns no table an application could reference, so the tests
+ * that need such a dependency run a stand-in runtime stream from `db/testruntime`.
  */
 class MigrationLifecycleSpec :
     FunSpec({
-        // The first runtime migration. The test application's own migration is also V1.
-        val runtimeVersion = "1"
         val testApplication = listOf("classpath:db/testapp")
+        val dependentApplication = listOf("classpath:db/testapp-dependent")
+
+        // The lifecycle with the stand-in runtime stream (V1 creates commerce.test_runtime_records).
+        fun standInLifecycle(
+            dataSource: DataSource,
+            applicationLocations: List<String>,
+        ) = MigrationLifecycle(
+            RuntimeMigrations(dataSource, location = "classpath:db/testruntime"),
+            ApplicationMigrations(dataSource, applicationLocations),
+        )
 
         test("runtime migrations are discovered internally and own the commerce schema and its history") {
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, applicationLocations = emptyList()).migrate()
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContain runtimeVersion
-                dataSource.relationExists("commerce.customers") shouldBe true
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldNotBeEmpty()
                 // No application stream: no application history is created.
                 dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
             }
         }
 
-        test("an application migration depends on a runtime-owned table, so it fails on its own") {
+        test("an application migration that depends on a runtime-owned table fails on its own") {
             withTestDatabase { _, dataSource ->
                 shouldThrow<FlywayException> {
-                    ApplicationMigrations(dataSource, testApplication).migrate()
+                    ApplicationMigrations(dataSource, dependentApplication).migrate()
                 }.message shouldContain "schema \"commerce\" does not exist"
 
-                dataSource.relationExists("public.test_application_customer_notes") shouldBe false
+                dataSource.relationExists("public.test_application_dependents") shouldBe false
             }
         }
 
         test("the same application migration succeeds because the runtime stream runs first") {
             withTestDatabase { _, dataSource ->
-                MigrationLifecycle(dataSource, testApplication).migrate()
+                standInLifecycle(dataSource, dependentApplication).migrate()
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContain runtimeVersion
-                dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
-                dataSource.relationExists("public.test_application_customer_notes") shouldBe true
+                dataSource.relationExists("commerce.test_runtime_records") shouldBe true
+                dataSource.relationExists("public.test_application_dependents") shouldBe true
             }
         }
 
         test("the two streams have independent version spaces, so equal versions do not collide") {
             withTestDatabase { _, dataSource ->
-                MigrationLifecycle(dataSource, testApplication).migrate()
+                standInLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1__commerce_customers.sql and application V1__test_application_customer_notes.sql.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).first() shouldBe "1"
+                // Runtime V1__test_runtime_records.sql and application V1__test_application_records.sql.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1")
                 dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
-                dataSource.relationExists("commerce.customers") shouldBe true
-                dataSource.relationExists("public.test_application_customer_notes") shouldBe true
             }
         }
 
@@ -90,19 +98,20 @@ class MigrationLifecycleSpec :
             }
         }
 
-        test("instances migrating a fresh database at the same time apply each migration exactly once") {
+        test("instances migrating a fresh database at the same time apply each migration exactly once, in order") {
             withTestDatabase { database, _ ->
                 val instances = 4
                 val barrier = CyclicBarrier(instances)
                 val executor = Executors.newFixedThreadPool(instances)
                 try {
-                    // Each instance has its own pool, as separate processes would.
+                    // Each instance has its own pool, as separate processes would. The application
+                    // migration depends on the runtime one, so running it early would fail.
                     val runs =
                         (1..instances).map { instance ->
                             executor.submit {
                                 createDataSource(database.configuration, poolName = "instance-$instance").use { dataSource ->
                                     barrier.await()
-                                    MigrationLifecycle(dataSource, testApplication).migrate()
+                                    standInLifecycle(dataSource, dependentApplication).migrate()
                                 }
                             }
                         }
@@ -112,9 +121,7 @@ class MigrationLifecycleSpec :
                 }
 
                 createDataSource(database.configuration, poolName = "verification").use { dataSource ->
-                    val runtimeVersions = dataSource.appliedVersions(RuntimeMigrations.SCHEMA)
-                    runtimeVersions shouldContain runtimeVersion
-                    runtimeVersions shouldBe runtimeVersions.distinct()
+                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1")
                     dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
                 }
             }
@@ -124,14 +131,14 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 RuntimeMigrations(dataSource).migrate()
                 // As if a released runtime migration had been edited after it was applied.
-                dataSource.execute("UPDATE commerce.$HISTORY_TABLE SET checksum = checksum + 1 WHERE version = '$runtimeVersion'")
+                dataSource.execute("UPDATE commerce.$HISTORY_TABLE SET checksum = checksum + 1 WHERE version IS NOT NULL")
 
                 shouldThrow<FlywayException> {
                     MigrationLifecycle(dataSource, testApplication).migrate()
                 }.message shouldContain "checksum mismatch"
 
                 dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
-                dataSource.relationExists("public.test_application_customer_notes") shouldBe false
+                dataSource.relationExists("public.test_application_records") shouldBe false
             }
         }
 
@@ -141,7 +148,7 @@ class MigrationLifecycleSpec :
                     MigrationLifecycle(dataSource, listOf("classpath:db/testapp-broken")).migrate()
                 }.message shouldContain "V1__test_application_broken.sql"
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContain runtimeVersion
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldNotBeEmpty()
                 dataSource.appliedVersions(ApplicationMigrations.SCHEMA).shouldBeEmpty()
                 dataSource.relationExists("public.test_application_broken") shouldBe false
             }

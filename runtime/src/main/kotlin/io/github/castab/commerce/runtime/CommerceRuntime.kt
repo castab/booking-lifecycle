@@ -3,10 +3,6 @@ package io.github.castab.commerce.runtime
 import com.zaxxer.hikari.HikariDataSource
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
-import io.github.castab.commerce.runtime.customer.CreateCustomer
-import io.github.castab.commerce.runtime.customer.CustomerRepository
-import io.github.castab.commerce.runtime.customer.GetCustomer
-import io.github.castab.commerce.runtime.customer.customerRoutes
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.healthRoutes
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
@@ -26,16 +22,22 @@ import org.jdbi.v3.core.Jdbi
 private val logger = KotlinLogging.logger {}
 
 /**
- * The shared runtime pieces an application may build on: the transaction boundary and the
- * commerce repositories. Application code that must write its own tables and commerce
- * tables atomically uses the same [transactor] and passes one transaction to both.
+ * The shared runtime pieces an application may build on: the configuration and the
+ * transaction boundary. Application repositories use the same [transactor] and
+ * [io.github.castab.commerce.runtime.persistence.Transaction] the runtime uses.
+ *
+ * The runtime provides the transaction boundary required for future atomic application
+ * plus commerce writes. It owns no commerce repository yet, so no such cross-boundary write
+ * exists today; commerce repositories join the context only when the runtime gains real
+ * persistence for commerce-domain facts. The runtime has no customer or other application
+ * data model, so relationships between application entities and commerce facts stay in
+ * application repositories.
  *
  * Part of the provisional application-extension seam; see [ApplicationContributions].
  */
 class CommerceRuntimeContext internal constructor(
     val configuration: CommerceRuntimeConfiguration,
     val transactor: Transactor,
-    val customers: CustomerRepository,
 )
 
 /**
@@ -104,14 +106,14 @@ class CommerceRuntime internal constructor(
  * is built. With `migrations.onStartup = MIGRATE`, the runtime migrations and then the
  * application migrations are applied. With `VALIDATE`, the default, they are expected to
  * have been applied by a separate migration step, and the phase only validates that both
- * streams are fully applied. Either
- * way, a failure throws Flyway's exception and closes the pool: no runtime is returned, so
- * there is no server to start against a database that is not compatible.
+ * streams are fully applied. Either way, a failure throws Flyway's exception and closes the
+ * pool: no runtime is returned, so there is no server to start against a database that is
+ * not compatible.
  *
  * Every other dependency is then constructed here, in order, with ordinary Kotlin: Jdbi,
- * transactions and repositories, operations, the commerce and [application] routes, the
- * http4k handler, and Jetty. There is no dependency injection container, annotation
- * scanning, or reflection.
+ * the transaction boundary, the runtime's infrastructure routes (`/health`, `/ready`) and
+ * the [application] routes, the http4k handler, and Jetty. There is no dependency
+ * injection container, annotation scanning, or reflection.
  *
  * [application] has no default: the runtime is not an application by itself, and the
  * caller decides what its application contributes. The server is created but not
@@ -131,18 +133,10 @@ fun commerceRuntime(
 
         val jdbi = Jdbi.create(dataSource)
         val transactor = Transactor(jdbi)
-        val customers = CustomerRepository()
-        val context = CommerceRuntimeContext(configuration, transactor, customers)
+        val context = CommerceRuntimeContext(configuration, transactor)
 
-        val createCustomer = CreateCustomer(transactor, customers)
-        val getCustomer = GetCustomer(transactor, customers)
-
-        val commerceRoutes =
-            listOf(
-                healthRoutes(ready = { dataSource.isReachable() }),
-                customerRoutes(createCustomer, getCustomer),
-            )
-        val http = CommerceErrorHandling.then(routes(*(commerceRoutes + application.routes(context)).toTypedArray()))
+        val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))
+        val http = CommerceErrorHandling.then(routes(*(runtimeRoutes + application.routes(context)).toTypedArray()))
         val server = http.asServer(JettyLoom(configuration.server.port))
         return CommerceRuntime(http, server, dataSource)
     } catch (e: Exception) {

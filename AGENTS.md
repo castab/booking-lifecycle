@@ -105,10 +105,90 @@ work (moving files, changing builds) must not redesign domain semantics.
 A relationship belongs in `commerce-domain` when one domain concept cannot meaningfully
 express its semantics or invariants without the other concept. Relationships that
 coordinate otherwise independently meaningful concepts belong to the consuming
-application/runtime layer. Do not add relationships to `commerce-domain` merely because
-`commerce-runtime` commonly coordinates those concepts. Booking and financial documents,
-for example, stay independent in the domain. `:runtime` may establish and persist their
-association.
+application layer. Do not add relationships to `commerce-domain` merely because
+applications commonly coordinate those concepts. Booking and financial documents, for
+example, stay independent in the domain; the concrete application establishes and
+persists their association, using the runtime's shared transaction.
+
+The governing principle:
+
+> The domain owns independent commerce facts and their invariants. The application owns
+> business entities and the relationships between those facts.
+
+## Application-owned entities and relationships
+
+`commerce-domain` does not define a generic customer entity or customer identifier.
+Customer profiles, customer IDs, booking records, booking contacts, service or event
+locations, inquiries, and business-specific booking data belong to concrete consuming
+applications. Do not reintroduce them, and do not introduce stand-ins under other names
+(`Party`, `AccountHolder`, `CommerceCustomer`, `Subject`, `Owner`, `Actor`, `Client`,
+`Consumer`, ...) unless a domain operation genuinely needs the concept for one of its own
+invariants.
+
+The domain must not introduce generic fields merely to attach those concepts to commerce
+facts. That includes untyped escape hatches: no `metadata: Map<String, String>`,
+`details: JsonObject`, `context: Any`, or similar on financial documents, lifecycle types,
+runtime persistence, or any other generic model. Business-specific data stays strongly
+typed in the concrete application.
+
+```text
+                    CONCRETE APPLICATION
+
+Customer ───────────────┐
+Inquiry ────────────────┼──── application-owned relationships
+Booking ────────────────┤
+                         │
+                         ▼
+               independent commerce facts
+                         │
+       ┌─────────────────┼─────────────────┐
+       ▼                 ▼                 ▼
+FinancialDocument   BookingLifecycle    Payments/etc.
+```
+
+The diagram is conceptual, not a required persistence design.
+
+## Independent financial documents
+
+`FinancialDocument` is independent of customers, bookings, inquiries, and
+application-specific ownership. Applications persist relationships to financial
+documents externally, typically keyed by the document's `id` or `reference`. Do not add
+generic ownership, application-relationship reference, recipient, or metadata fields
+(`customerId`, `ownerId`, `subjectId`, `partyId`, `customerReference`,
+`externalReference`, `contextId`, `relationshipId`, `metadata`, ...) to
+`FinancialDocument` to recreate application relationships indirectly. This prohibition
+concerns references that attach application entities to a document, not the document's
+own snapshot references (`FinancialDocumentReference`, `reference`,
+`previousReference`), which are legitimate financial-document concepts and stay as they
+are. Issuance-time recipient information (`BillTo`, `InvoiceRecipient`, ...) is a
+separate, undecided design question; see [Open questions](#open-questions).
+
+## Booking boundary
+
+`io.github.castab.commerce.booking.lifecycle` defines reusable booking lifecycle topology
+only. Concrete booking models belong to applications and implement lifecycle phase
+interfaces directly. Do not add generic booking record models (`Booking`, a booking ID,
+contacts, locations, addresses) without a new explicit architectural decision.
+`BookingLifecycle.Active.InitialRequest` is a generic pre-quote phase, not an inquiry and
+not a financial estimate; relating an application's inquiry, its lifecycle phase, and any
+estimate it issues is application policy.
+
+## Runtime boundary
+
+`commerce-runtime` provides reusable infrastructure and orchestration for commerce-domain
+concepts. It does not provide generic customer persistence, customer CRUD, customer HTTP
+endpoints, or a generic application data model. `commerce-runtime` owns the shared
+transaction abstraction; application repositories may use the same `Transactor` and
+`Transaction`. Relationships between application entities and commerce-domain facts are
+application-owned.
+
+The runtime currently owns no commerce repository or table. It provides the transaction
+boundary required for future atomic application plus commerce writes; cross-boundary
+atomicity will be exercised once the runtime owns its first real commerce repository. Do
+not create a placeholder commerce table or fake repository to demonstrate it earlier, and
+do not describe the current tests as proving it. `commerce.customers`, a table from an
+earlier design, is removed unconditionally by a forward migration, with no guard,
+archive, or compatibility layer.
 
 ## Runtime opinionation
 
@@ -119,7 +199,7 @@ frameworks. The runtime rules are:
 
 - Routes translate only: request DTO → domain values → one operation → response DTO. No
   SQL and no orchestration in routes.
-- Operations (use cases such as `CreateCustomer`) orchestrate and own the transaction
+- Operations (use cases such as issuing an invoice or recording a payment) orchestrate and own the transaction
   boundary through `Transactor`. Repositories take the caller's `Transaction`. Operation
   support (`CommerceFailure`, `validating`) lives in `io.github.castab.commerce.runtime.operation`.
   In this repository, "application" means the concrete consuming application; do not use
@@ -139,7 +219,8 @@ frameworks. The runtime rules are:
 ## Provisional application-extension seam
 
 `ApplicationContributions` (Flyway locations and routes) and `CommerceRuntimeContext` (the
-configuration, `Transactor`, and commerce repositories handed to contributed routes) are
+configuration and `Transactor` handed to contributed routes; commerce repositories join it
+only when the runtime gains real persistence for commerce facts, never placeholders) are
 the **provisional** application-extension seam. They let a concrete application run on
 the shared runtime today, and they are expected to change once the booking extension and
 the other capabilities are designed from real consumer requirements. Whether the seam
@@ -191,14 +272,13 @@ compile-time known to the concrete application. Never model them as opaque JSON
 (`type: String, details: JsonObject`). The extension seam is an open design question (see
 [Open questions](#open-questions)); do not invent a large `BookingExtension<B>` API
 incidentally. If a booking type parameter is ever introduced, keep it inside booking APIs.
-It must not spread into customer, financial, or payment APIs.
+It must not spread into financial or payment APIs.
 
 ## Booking optionality
 
 Do not make booking mandatory for financial or payment functionality. Booking is one
 commerce capability, not the root of commerce. A point-of-sale application uses
-customers, invoices, payments, allocations, refunds, and reconciliation without a
-booking. Every runtime operation, table, and endpoint outside booking must work with no
+invoices, payments, allocations, refunds, and reconciliation without a booking. Every runtime operation, table, and endpoint outside booking must work with no
 booking at all.
 
 ## Provider neutrality
@@ -219,7 +299,7 @@ explicit about their inputs so a principal can be added without restructuring.
 ## Kotlin style
 
 Do not use redundant explicit `public` modifiers anywhere in either module. Write
-`data class Customer(...)`, not `public data class Customer(...)`.
+`data class LineItem(...)`, not `public data class LineItem(...)`.
 
 ## Domain module mission
 
@@ -230,8 +310,6 @@ beneath `io.github.castab.commerce`:
 | Domain | Package | Style |
 |---|---|---|
 | Booking lifecycle | `io.github.castab.commerce.booking.lifecycle` | A type-level protocol. Adopters' own types implement the phases. The library owns no booking data. |
-| Customer identity | `io.github.castab.commerce.customer` | Minimal durable identity: UUID-backed `Customer.Id`, name, email. |
-| Booking records | `io.github.castab.commerce.booking` | Immutable booking-to-customer association and separate operational contact and location records. |
 | Financial documents | `io.github.castab.commerce.financial` | Concrete, library-owned immutable value types (`Estimate`, `Quote`, `Invoice`) whose invariants the library enforces. |
 | Payment reconciliation | `io.github.castab.commerce.payment` | Concrete, library-owned immutable records (payments, allocations, allocation reversals, refunds, refund allocations) and reconciliation derived from records the application supplies. |
 | Principal authorization | `io.github.castab.commerce.staff` | Human and service identities, distinct UUID-backed principal IDs, extensible roles and permissions, and additive role-based permission resolution. |
@@ -248,11 +326,10 @@ toolchain, and publication rules apply to the whole repository.
 Dependencies between domains are fixed:
 
 ```text
-booking.lifecycle    imports nothing from the other domains, and nothing imports it
-booking ──imports──→ customer
-financial ──imports──→ customer
-payment ──imports──→ financial   (FinancialDocument, FinancialDocumentReference, Money)
-payment.adapter ──imports──→ payment, financial   (Money)
+booking.lifecycle     independent; imports nothing from the other domains, and nothing imports it
+financial             independent; imports nothing from the other domains
+payment ────────────→ financial   (FinancialDocument, FinancialDocumentReference, Money)
+payment.adapter ────→ payment, financial   (Money)
 staff                 independent of the other domains
 ```
 
@@ -262,8 +339,9 @@ staff                 independent of the other domains
 - The payment domain references financial documents, one way only. `financial` must never
   import `payment`: a document does not own, hold, or know about its settlement. The
   payment domain never imports the booking lifecycle.
-- The booking identity record and financial documents reference the same `Customer.Id`.
-  Neither embeds `Customer`, booking contacts, or booking locations.
+- No domain package references a customer, booking record, inquiry, contact, or
+  location. There is no `customer` package and no generic `booking` record package; only
+  `booking.lifecycle` exists.
 
 For the booking lifecycle:
 
@@ -282,8 +360,6 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `gradle.properties`, `gradle/libs.versions.toml` | Build properties and the version catalog for both modules. |
 | `domain/build.gradle.kts` | The `commerce-domain` publication and the `verifyRuntimeDependencies` boundary check. |
 | `domain/src/main/kotlin/io/github/castab/commerce/booking/lifecycle/BookingLifecycle.kt` | The entire booking lifecycle API. |
-| `domain/src/main/kotlin/io/github/castab/commerce/customer/Customer.kt` | Minimal customer identity and contact value objects. |
-| `domain/src/main/kotlin/io/github/castab/commerce/booking/` | Booking identity association, contacts, postal address, and location. |
 | `domain/src/main/kotlin/io/github/castab/commerce/payment/` | The payment reconciliation API: `PaymentMethod.kt`, `ExternalPaymentReference.kt`, `ExternalRefundReference.kt`, `PaymentRecord.kt`, `PaymentAllocation.kt`, `PaymentAllocationReversal.kt`, `RefundRecord.kt`, `RefundAllocation.kt`, `PaymentReconciliation.kt` (payment-level reconciliation and the shared validation helpers), and `FinancialDocumentReconciliation.kt`. |
 | `domain/src/main/kotlin/io/github/castab/commerce/payment/adapter/` | The transport-neutral payment adapter contract and pure validation of provider observations. |
 | `domain/src/main/kotlin/io/github/castab/commerce/financial/` | The financial document API: `FinancialDocument.kt` (the sealed class, its three stages, and change application), `Version.kt`, `Money.kt`, `LineItem.kt`, `ChangeOrder.kt`, `FinancialDocumentReference.kt`, and `FinancialDocumentHistory.kt` (the history SPI and its lookup extensions). |
@@ -302,10 +378,9 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/customer/` | The representative capability: repository, operations, routes, DTOs. |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
-| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), the customer repository, and `CommerceRuntimeSpec` (the runtime composed with explicit contributions, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
-| `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, and the test application migrations in `db/testapp/` (a table referencing `commerce.customers`) and `db/testapp-broken/` (a failing migration). |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (including the historical `commerce.customers` creation and its forward drop; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the upgrade path that drops `commerce.customers`, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
+| `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
 | `README.md`, `domain/README.md`, `runtime/README.md`, `AGENTS.md` | Documentation. Keep all of them in sync with the code. |
@@ -414,8 +489,8 @@ them.
 ## Application data boundary
 
 Booking lifecycle interfaces declare transitions only, with no properties and no data.
-`Booking` in the sibling `booking` package is a separate immutable association between
-`Booking.Id` and `Customer.Id`. It is not a lifecycle phase or a container for operational PII.
+The library has no booking record, booking ID, customer, contact, or location type; see
+[Booking boundary](#booking-boundary).
 
 Avoid introducing types or fields such as these into the booking lifecycle:
 
@@ -425,11 +500,11 @@ Complaint  Refund  CancellationReason  bookingId  createdAt  version
 ```
 
 Add one only if a future architectural decision proves it is a lifecycle concept rather
-than adopter data. `Customer` now exists in the customer package, `Booking` in the booking
-package, `Money` and `Invoice` in the financial package, and payments
-and refunds in the payment package. That does not make them booking lifecycle concepts:
-never reference customer, booking, financial, or payment types from `BookingLifecycle`.
-Applications may carry the library's `Booking.Id` through their own phase models.
+than adopter data. `Money` and `Invoice` exist in the financial package, and payments and
+refunds in the payment package. That does not make them booking lifecycle concepts:
+never reference financial or payment types from `BookingLifecycle`. Booking identity (how
+a quote and its booking are known to be the same booking) is application-owned; see
+[Open questions](#open-questions).
 
 ## New lifecycle phase checklist
 
@@ -500,29 +575,11 @@ to `InitialRequest`, or similar. An illegal edge must have no method at all.
 
 # Financial document domain
 
-## Customer and booking record boundary
+## Relationship boundary
 
-`Customer` contains exactly `id`, `name`, and `email`. It holds no phone number,
-address, booking history, payment details, or operational contact information. New
-`Customer.Id`, `Booking.Id`, `BookingContact.Id`, and `BookingLocation.Id` types wrap UUIDs
-to keep these peer references distinct. Existing financial/payment record IDs stay raw
-UUIDs; this focused exception does not require a repository-wide identifier migration.
-
-`Booking` holds only `id` and `customerId`. `BookingContact.CustomerContact` holds a
-`customerId` and optional `phoneNumber`; name and email resolve through the customer.
-`ExternalContact` holds a name and at least one of email or phone without creating a
-customer. A phone number on a `BookingContact` is booking-scoped operational contact
-information and is not part of the durable `Customer` identity. Do not add contact
-fields to `Customer` merely for correspondence; SMS, RCS, and other delivery capabilities
-belong to consuming applications and adapters. `BookingLocation` holds the postal
-address for one booking. Contacts and locations have independent IDs and contain only a
-booking reference, so applications can remove operational records independently later.
-This library implements neither retention policy nor purging. Applications enforce
-collection-wide cardinality, including at most one active location per booking.
-
-Financial document lineages hold a required `customerId` through every snapshot and
-stage. Documents contain no customer name, email, phone, or event address. Payment and
-refund records do not repeat `customerId`.
+A financial document carries no customer, booking, inquiry, or other application
+reference. See [Independent financial documents](#independent-financial-documents).
+Payment and refund records do not reference customers either.
 
 These rules govern `io.github.castab.commerce.financial`. A `FinancialDocument` is one
 immutable snapshot of a commercial document. The domain describes what is charged and how
@@ -559,8 +616,10 @@ These are non-negotiable without an explicit decision from the maintainer.
 10. **History is referenced, never embedded.** A snapshot holds no other snapshot and no
     reference object to one. History is reached only through `FinancialDocumentHistory`,
     one explicit lookup at a time.
-11. **Customer identity is stable.** Every snapshot carries the same `Customer.Id` as
-    its lineage's first snapshot; revisions and stage transitions preserve it.
+11. **A document is an independent fact.** Its state is its identity, version lineage,
+    stage, line items, currency, and derived totals, nothing else. `FinancialDocumentSpec`
+    asserts this public shape by reflection; update it deliberately and never add an
+    ownership or relationship field to make a change pass.
 
 The topology, which code, KDoc, README, and tests must all agree on:
 
@@ -580,7 +639,7 @@ Entry points: Estimate.create, Quote.create, Invoice.create
 - The stages are **not** data classes. A `copy()` would let callers forge versions,
   previous-version links, or stages. Equality, `hashCode`, and `toString` are implemented
   once, finally, on `FinancialDocument`.
-- `restore(id, version, lineItems, customerId)` exists on each stage only so persistence adapters and
+- `restore(id, version, lineItems)` exists on each stage only so persistence adapters and
   `FinancialDocumentHistory` implementations can rebuild stored snapshots. It derives
   `previousVersion` from `version` and cannot express any other link. Do not add
   parameters that let callers choose `previousVersion`, totals, or anything else derived.
@@ -589,10 +648,9 @@ Entry points: Estimate.create, Quote.create, Invoice.create
 
 ## Values and collections
 
-- Existing financial identifiers are `java.util.UUID`; do not add wrapper types
-  (`FinancialDocumentId`, `LineItemId`, ...). `Customer.Id` is a required cross-domain
-  reference, not a financial document ID. Do not add an id to `ChangeOrder` for symmetry.
-  `Version` is a domain value, not an identifier.
+- Every financial identifier is a `java.util.UUID`. Do not add id wrapper types
+  (`FinancialDocumentId`, `LineItemId`, ...). Do not add an id to `ChangeOrder` for
+  symmetry. `Version` is a domain value, not an identifier.
 - Money is `BigDecimal` plus `java.util.Currency`. Never `Double` or `Float`. Don't add
   rounding, scale normalization, currency conversion, or exchange rates.
 - `LineItem.quantity == null` means flat-priced (subtotal = price). Otherwise
@@ -631,9 +689,9 @@ ledgers. Settlement is a separate bounded context, modeled by the
 [payment reconciliation domain](#payment-reconciliation-domain), which references a
 document by `FinancialDocumentReference`. The financial package never imports it.
 
-Also out of scope: pricing rules, tax calculation, discount engines, customer PII or
-counterparty models, dates and due dates, document numbering, and serialization
-annotations. These are application data unless an architectural decision says otherwise.
+Also out of scope: pricing rules, tax calculation, discount engines, customers, customer
+PII, counterparty or recipient models, dates and due dates, document numbering, and
+serialization annotations. These are application data unless an architectural decision says otherwise.
 
 ## Financial anti-patterns
 
@@ -793,8 +851,8 @@ val PaymentRecord.status: PaymentStatus                         // wrong: status
 These rules govern `io.github.castab.commerce.staff`. A `User` is a human staff member;
 `ServiceIdentity` is a non-human software caller. Both implement `Principal`, with a
 shared `PrincipalStatus` and role assignments. Their UUID-backed `UserId` and
-`ServiceId` are distinct `PrincipalId` types. The package is independent of the booking,
-customer, financial, and payment packages. Neither principal holds passwords, API keys,
+`ServiceId` are distinct `PrincipalId` types. The package is independent of the booking
+lifecycle, financial, and payment packages. Neither principal holds passwords, API keys,
 tokens, certificates, or other authentication data. Applications authenticate callers
 before supplying a `PrincipalId` to authorization. `UserStatus` remains a Kotlin alias
 for `PrincipalStatus` for source compatibility.
@@ -897,7 +955,7 @@ commerceRuntime(...) composes Jdbi, repositories, routes, Jetty    →    start(
   `outOfOrder`, `baselineOnMigrate`, or `cleanDisabled(false)`, turn off the PostgreSQL
   lock, or add a custom lock or leader election.
 - **Published database contract.** Runtime-owned structures an application may reference
-  (for example a foreign key to `commerce.customers (id)`) are a compatibility surface, as
+  (for example a foreign key to the key of a `commerce` table) are a compatibility surface, as
   public as a Kotlin API. Runtime migrations must preserve the published database
   contract across compatible runtime releases. Destructive changes require an explicit
   compatibility transition: prefer **expand** (add the new structure, keep the old),
@@ -1121,12 +1179,26 @@ dependency just to support CI or publishing.
   [Migration contract](#migration-contract) against PostgreSQL: internal runtime
   discovery, runtime-before-application ordering proven by a real dependency, independent
   version spaces, idempotent and concurrent migration, validation, and startup gating on
-  runtime and application failures. Never replace them with Flyway mocks.
+  runtime and application failures. Never replace them with Flyway mocks. Because the
+  runtime owns no table an application could reference, the dependency tests run a
+  test-only stand-in runtime stream (`src/test/resources/db/testruntime`, selected through
+  `RuntimeMigrations`' internal `location` parameter). It is never published and is not a
+  placeholder commerce table; applications can never select a runtime location.
 - The tests are the runtime's only executable consumer in this repository.
   `CommerceRuntimeSpec` composes the runtime the way a concrete application does: explicit
   `ApplicationContributions`, `commerceRuntime(...)`, `start()`, real HTTP and
-  PostgreSQL, then `close()`. Keep the application-contribution transaction coverage: an
-  application-owned table and a commerce repository commit and roll back together. Don't write tests only to inflate coverage.
+  PostgreSQL, then `close()`. Keep the transaction coverage: contributed routes receive
+  `CommerceRuntimeContext`, use `context.transactor`, and persist a contributed migration's
+  table; several application-owned writes sharing one `Transaction` commit and roll back
+  together; an application route's failure rolls back its writes. These tests prove the
+  shared transaction boundary, not atomicity across application and commerce persistence.
+  Do not add a fake commerce capability just to give runtime tests something
+  domain-specific to exercise.
+- **Future test requirement.** When the first legitimate commerce repository is added (a
+  likely candidate is financial-document persistence or history, but no API is decided),
+  add an integration test that (1) writes an application-owned row, (2) writes a
+  commerce-owned row, (3) fails intentionally before commit, and (4) verifies both writes
+  rolled back.
 
 Run:
 
@@ -1168,7 +1240,7 @@ methods are the state machine".
 ## Scope discipline
 
 When solving a focused issue, do not opportunistically add persistence or serialization to
-`:domain`, payment logic outside the payment package, speculative customer/CRM fields,
+`:domain`, payment logic outside the payment package, customer/CRM models or fields,
 workflow engines, generic transition contexts, event buses, new domains, or new modules
 unless the requested work requires them. Do not couple the booking lifecycle to the other
 domains, and do not make the financial documents depend on payments. Prefer narrow
@@ -1203,10 +1275,14 @@ or in `:runtime`, and only if it is generic across the known consumers.
 
 These are intentionally unresolved. Do not settle them incidentally.
 
-- **Booking identity through phases.** `Booking.Id` now identifies a booking and `Booking`
-  links it to `Customer.Id`. The protocol does not require phase models to carry that ID.
-  Applications decide how to preserve it through transitions; do not bolt an `id`
-  property onto the phase interfaces.
+- **Booking identity (unresolved; application-owned).** The protocol does not say how an
+  `InitialRequest`, its `Quote`, and its `Booked` model are known to be the same booking.
+  `BookingLifecycle` is reusable phase topology and legal transitions; concrete application
+  booking models own identity, data, relationships, and persistence. An application may
+  preserve one application-defined booking or opportunity ID across
+  `InitialRequest → Quote → Booked`, but that is not a generic commerce invariant. Do not
+  add a generic `BookingId`, add IDs to the lifecycle interfaces, or reintroduce a generic
+  `Booking` record without an explicit architectural decision.
 - **Phase exclusivity enforcement.** One class can currently implement several phases.
   Whether to enforce exclusivity at the type level is undecided.
 - **Booking and financial coupling.** The two domains are deliberately independent.
@@ -1220,9 +1296,15 @@ These are intentionally unresolved. Do not settle them incidentally.
   timestamp order, so a history in which an over-allocation was later reversed is
   accepted. Whether to reject histories that were inconsistent at some earlier moment is
   undecided.
-- **Financial document numbering, dates, and counterparties.** Human-facing document
-  numbers, issue and due dates, and billing snapshots remain application data. The
-  `Customer.Id` reference is now part of each financial document snapshot.
+- **Financial document numbering and dates.** Human-facing document numbers, issue and due
+  dates, and customer relationships are application data.
+- **Financial document recipient snapshots (unresolved).** Should an issued financial
+  document eventually carry an immutable recipient or billing snapshot as part of the
+  financial fact itself? That concerns document issuance semantics and historical
+  correctness, not customer ownership, and needs its own design discussion. Until then, do
+  not add `InvoiceRecipient`, `FinancialDocumentRecipient`, `BillTo`, `SoldTo`,
+  `BillingContact`, `RecipientSnapshot`, `CustomerSnapshot`, or name/email/address fields
+  to `FinancialDocument`, and never use such a type to reintroduce a customer reference.
 - **The booking extension seam.** How an application supplies strongly typed booking
   details (and phase rehydration, transition policy, serializers, and persistence) to
   `:runtime` is undecided. `runtime/README.md` lists the responsibilities identified so
@@ -1230,9 +1312,9 @@ These are intentionally unresolved. Do not settle them incidentally.
 - **HTTP authentication and authorization.** The staff principals and permissions exist
   in `:domain`, but `:runtime` does not yet authenticate requests or check permissions.
   That is a dedicated future iteration.
-- **Capability selection (intentionally deferred).** Every runtime serves the commerce
-  routes (currently the customer endpoints), and `/health` and `/ready` are runtime
-  infrastructure that stays enabled. Whether and how an application selects commerce
+- **Capability selection (intentionally deferred).** The runtime currently serves only its
+  infrastructure routes, `/health` and `/ready`, which stay enabled. Any future commerce
+  routes would be served by every runtime. Whether and how an application selects commerce
   capabilities will be designed only after concrete consumers show the composition they
   need. Until then, do not add capability flags, per-route toggles, or a capability
   framework.

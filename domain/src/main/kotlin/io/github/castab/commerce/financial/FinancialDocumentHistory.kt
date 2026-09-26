@@ -2,7 +2,6 @@
 
 package io.github.castab.commerce.financial
 
-import io.github.castab.commerce.customer.Customer
 import java.util.UUID
 
 /**
@@ -12,7 +11,7 @@ import java.util.UUID
  * history on its own and does not know where snapshots live: an implementation may use a
  * relational table, a document store, a key-value store, a remote API, or an in-memory
  * collection. A typical store holds one immutable snapshot per row or document, keyed by
- * `(id, version)`, with the customer id, stage, previous version, and line items alongside.
+ * `(id, version)`, with the stage, previous version, and line items alongside.
  * Implementations rebuild snapshots with the stages' `restore` factories.
  *
  * Each call retrieves at most one snapshot. Nothing here walks a lineage, so a document
@@ -25,8 +24,7 @@ interface FinancialDocumentHistory {
     /**
      * Returns the snapshot identified by [reference], or `null` if it is not stored.
      *
-     * A returned snapshot must have exactly the referenced id and version. The lookup
-     * extensions also verify the customer identity against the requesting snapshot.
+     * A returned snapshot must have exactly the referenced id and version.
      */
     fun retrieveVersion(reference: FinancialDocumentReference): FinancialDocument?
 
@@ -45,11 +43,11 @@ interface FinancialDocumentHistory {
  * [FinancialDocument.previousReference], and nothing else: earlier versions are not
  * retrieved.
  *
- * @throws IllegalStateException if [from] returns a different reference or customer.
+ * @throws IllegalStateException if [from] returns a snapshot other than the one requested.
  */
 fun FinancialDocument.retrievePreviousVersion(from: FinancialDocumentHistory): FinancialDocument? {
     val previous = previousReference ?: return null
-    return from.retrieveVersion(previous).checkMatches(previous, customerId)
+    return from.retrieveVersion(previous).checkMatches(previous)
 }
 
 /**
@@ -57,14 +55,14 @@ fun FinancialDocument.retrievePreviousVersion(from: FinancialDocumentHistory): F
  * [FinancialDocumentHistory.retrieveVersion] call and without retrieving any intervening
  * version.
  *
- * @throws IllegalStateException if [from] returns a different reference or customer.
+ * @throws IllegalStateException if [from] returns a snapshot other than the one requested.
  */
 fun FinancialDocument.retrieveVersion(
     version: Version,
     from: FinancialDocumentHistory,
 ): FinancialDocument? {
     val reference = FinancialDocumentReference(id, version)
-    return from.retrieveVersion(reference).checkMatches(reference, customerId)
+    return from.retrieveVersion(reference).checkMatches(reference)
 }
 
 /**
@@ -72,24 +70,19 @@ fun FinancialDocument.retrieveVersion(
  * snapshot or a newer one, by delegating to [FinancialDocumentHistory.retrieveLatestVersion]
  * with this document's id.
  *
- * @throws IllegalStateException if [from] returns another lineage or customer.
+ * @throws IllegalStateException if [from] returns a snapshot of another lineage.
  */
 fun FinancialDocument.retrieveLatestVersion(from: FinancialDocumentHistory): FinancialDocument? {
     val latest = from.retrieveLatestVersion(id)
-    check(latest == null || (latest.id == id && latest.customerId == customerId)) {
-        "History returned financial document ${latest?.id} for customer ${latest?.customerId} " +
-            "when asked for the latest version of $id for customer $customerId"
+    check(latest == null || latest.id == id) {
+        "History returned financial document ${latest?.id} when asked for the latest version of $id"
     }
     return latest
 }
 
-private fun FinancialDocument?.checkMatches(
-    reference: FinancialDocumentReference,
-    customerId: Customer.Id,
-): FinancialDocument? {
-    check(this == null || (this.reference == reference && this.customerId == customerId)) {
-        "History returned ${this?.reference} for customer ${this?.customerId} " +
-            "when asked for $reference for customer $customerId"
+private fun FinancialDocument?.checkMatches(reference: FinancialDocumentReference): FinancialDocument? {
+    check(this == null || this.reference == reference) {
+        "History returned ${this?.reference} when asked for $reference"
     }
     return this
 }

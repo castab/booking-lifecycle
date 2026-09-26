@@ -4,7 +4,6 @@ import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
-import io.github.castab.commerce.financial.fixtures.TEST_CUSTOMER_ID
 import io.github.castab.commerce.financial.fixtures.lineItem
 import io.github.castab.commerce.payment.ExternalPaymentReference
 import io.github.castab.commerce.payment.PaymentMethod
@@ -41,17 +40,17 @@ fun flatLine(
 fun estimateTotalling(
     total: Money,
     id: UUID = UUID.randomUUID(),
-): FinancialDocument.Estimate = FinancialDocument.Estimate.create(id, listOf(flatLine(total)), customerId = TEST_CUSTOMER_ID)
+): FinancialDocument.Estimate = FinancialDocument.Estimate.create(id, listOf(flatLine(total)))
 
 fun quoteTotalling(
     total: Money,
     id: UUID = UUID.randomUUID(),
-): FinancialDocument.Quote = FinancialDocument.Quote.create(id, listOf(flatLine(total)), customerId = TEST_CUSTOMER_ID)
+): FinancialDocument.Quote = FinancialDocument.Quote.create(id, listOf(flatLine(total)))
 
 fun invoiceTotalling(
     total: Money,
     id: UUID = UUID.randomUUID(),
-): FinancialDocument.Invoice = FinancialDocument.Invoice.create(id, listOf(flatLine(total)), customerId = TEST_CUSTOMER_ID)
+): FinancialDocument.Invoice = FinancialDocument.Invoice.create(id, listOf(flatLine(total)))
 
 /** A change order that replaces every line of [document] with one flat line of [total]. */
 fun retotal(

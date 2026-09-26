@@ -13,7 +13,7 @@ import org.http4k.lens.LensFailure
  * The body of every commerce error response.
  *
  * ```json
- * {"code": "validation_failed", "message": "Customer name must not be blank"}
+ * {"code": "validation_failed", "message": "Financial document 5f0c6a7e-... must contain at least one line item"}
  * ```
  *
  * [code] is stable and machine-readable; [message] is for people and may change.

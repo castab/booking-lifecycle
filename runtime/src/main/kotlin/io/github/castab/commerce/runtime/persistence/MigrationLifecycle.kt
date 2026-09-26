@@ -46,13 +46,15 @@ private val logger = KotlinLogging.logger {}
  * alter, and drop only runtime-owned objects in the `commerce` schema, and never
  * application-owned objects. Application migrations never alter runtime-owned objects.
  */
-class MigrationLifecycle(
-    dataSource: DataSource,
-    /** Flyway locations of the application's own migrations only; possibly none. */
-    applicationLocations: List<String>,
+class MigrationLifecycle internal constructor(
+    private val runtime: RuntimeMigrations,
+    private val application: ApplicationMigrations,
 ) {
-    private val runtime = RuntimeMigrations(dataSource)
-    private val application = ApplicationMigrations(dataSource, applicationLocations)
+    /** [applicationLocations] names the application's own migrations only; possibly none. */
+    constructor(
+        dataSource: DataSource,
+        applicationLocations: List<String>,
+    ) : this(RuntimeMigrations(dataSource), ApplicationMigrations(dataSource, applicationLocations))
 
     /** Applies the pending runtime migrations, then the pending application migrations. */
     fun migrate() {
@@ -130,10 +132,14 @@ internal sealed class MigrationStream(
     }
 }
 
-/** commerce-runtime's own migrations. Their location is internal: applications never list it. */
+/**
+ * commerce-runtime's own migrations. Their location is internal: applications never list it.
+ * Only the runtime's own tests pass another [location], to stand in for runtime migrations.
+ */
 internal class RuntimeMigrations(
     dataSource: DataSource,
-) : MigrationStream("runtime", dataSource, SCHEMA, listOf(LOCATION)) {
+    location: String = LOCATION,
+) : MigrationStream("runtime", dataSource, SCHEMA, listOf(location)) {
     companion object {
         /** The PostgreSQL schema that holds every runtime-owned database object. */
         const val SCHEMA = "commerce"

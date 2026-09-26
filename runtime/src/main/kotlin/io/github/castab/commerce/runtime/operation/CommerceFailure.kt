@@ -1,7 +1,8 @@
 package io.github.castab.commerce.runtime.operation
 
 /**
- * An expected failure of an operation (a use case such as creating a customer).
+ * An expected failure of an operation (a use case such as issuing an invoice or recording
+ * a payment).
  *
  * Operations throw these, so a failure inside a transaction also rolls it back. The HTTP
  * layer maps each kind to one status and error code. The [message] is returned to
@@ -13,7 +14,7 @@ sealed class CommerceFailure(
     message: String,
     cause: Throwable? = null,
 ) : RuntimeException(message, cause) {
-    /** Well-formed input whose values are invalid, for example a blank customer name. */
+    /** Well-formed input whose values are invalid, for example a document with no line items. */
     class ValidationFailed(
         message: String,
         cause: Throwable? = null,
