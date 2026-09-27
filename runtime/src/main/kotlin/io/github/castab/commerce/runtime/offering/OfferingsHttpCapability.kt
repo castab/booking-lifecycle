@@ -20,8 +20,12 @@ import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
 import org.http4k.core.with
+import org.http4k.lens.BiDiMapping
+import org.http4k.lens.Invalid
+import org.http4k.lens.LensFailure
+import org.http4k.lens.ParamMeta
 import org.http4k.lens.Path
-import org.http4k.lens.int
+import org.http4k.lens.mapWithNewMeta
 
 enum class OfferingsHttpAccess { READ_ONLY, READ_WRITE }
 
@@ -81,17 +85,22 @@ fun offeringsHttpCapability(
     val categoryRequest = jsonBody(OfferingCategoryDto.serializer())
     val offeringRequest = jsonBody(OfferingDto.serializer())
     val errorBody = jsonBody(ErrorResponse.serializer())
-    val revisionPath = Path.int().of("revision")
+    // Documented as an integer but read as text: a contract path lens that fails to parse
+    // makes the route not match (404), whereas a non-integer revision is a malformed request.
+    val revisionPath = Path.mapWithNewMeta(BiDiMapping<String, String>({ it }, { it }), ParamMeta.IntegerParam).of("revision")
     val categoryPath = Path.of("categoryKey")
     val offeringPath = Path.of("offeringKey")
     val sampleCategory = OfferingCategoryDto("choice", "Choice", "An optional choice", 0, 2)
     val samplePrice = OfferingPriceDto("PER_QUANTITY", "0.75", "USD", "guest")
     val sampleOffering = OfferingDto("item", "choice", "Item", "An item", samplePrice)
+    // Examples follow one coherent history: initialization creates an empty r1, adding the
+    // category creates r2, and adding the offering creates r3, which the reads return.
+    val initializedCatalog = OfferingsCatalogDto(catalogId.value.toString(), 1, null, emptyList())
     val sampleCatalog =
         OfferingsCatalogDto(
             catalogId.value.toString(),
+            3,
             2,
-            1,
             listOf(CatalogCategoryDto("choice", "Choice", "An optional choice", 0, 2, listOf(sampleOffering))),
         )
 
@@ -119,9 +128,10 @@ fun offeringsHttpCapability(
                     operationId = "${binding.operationIdPrefix}GetCatalogRevision"
                     summary = "Get an exact historical catalog revision"
                     returning(Status.OK, catalogBody to sampleCatalog)
-                    errors(Status.NOT_FOUND, Status.BAD_REQUEST)
-                } bindContract Method.GET to { revision: Int ->
-                    { _: Request ->
+                    errors(Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
+                } bindContract Method.GET to { text: String ->
+                    { request: Request ->
+                        val revision = text.toIntOrNull() ?: throw LensFailure(Invalid(revisionPath.meta), target = request)
                         val reference = validating { OfferingsSnapshotReference(catalogId, OfferingsRevision.of(revision)) }
                         Response(Status.OK).with(catalogBody of getRevision(reference).dto())
                     }
@@ -131,7 +141,7 @@ fun offeringsHttpCapability(
                 "$base/categories" meta {
                     operationId = "${binding.operationIdPrefix}ListCategories"
                     summary = "List categories in snapshot order"
-                    returning(Status.OK, categoriesBody to CategoriesDto(1, emptyList()))
+                    returning(Status.OK, categoriesBody to CategoriesDto(3, listOf(sampleCategory)))
                     errors(Status.NOT_FOUND)
                 } bindContract Method.GET to { _: Request ->
                     Response(Status.OK).with(categoriesBody of listCategories(catalogId).categoriesDto())
@@ -141,8 +151,8 @@ fun offeringsHttpCapability(
                 "$base/categories" / categoryPath meta {
                     operationId = "${binding.operationIdPrefix}GetCategory"
                     summary = "Get a category from the latest catalog"
-                    returning(Status.OK, categoryBody to CategoryDto(1, sampleCategory))
-                    errors(Status.NOT_FOUND)
+                    returning(Status.OK, categoryBody to CategoryDto(3, sampleCategory))
+                    errors(Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { key: String ->
                     { _: Request ->
                         val categoryKey = validating { OfferingCategoryKey(key) }
@@ -154,8 +164,8 @@ fun offeringsHttpCapability(
                 "$base/categories" / categoryPath / "offerings" meta {
                     operationId = "${binding.operationIdPrefix}ListCategoryOfferings"
                     summary = "List a category's offerings in snapshot order"
-                    returning(Status.OK, categoryOfferingsBody to CategoryOfferingsDto(1, sampleCategory, listOf(sampleOffering)))
-                    errors(Status.NOT_FOUND)
+                    returning(Status.OK, categoryOfferingsBody to CategoryOfferingsDto(3, sampleCategory, listOf(sampleOffering)))
+                    errors(Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { key: String, _: String ->
                     { _: Request ->
                         val categoryKey = validating { OfferingCategoryKey(key) }
@@ -169,7 +179,7 @@ fun offeringsHttpCapability(
                 "$base/offerings" meta {
                     operationId = "${binding.operationIdPrefix}ListOfferings"
                     summary = "List offerings in snapshot order"
-                    returning(Status.OK, offeringsBody to OfferingsDto(1, listOf(sampleOffering)))
+                    returning(Status.OK, offeringsBody to OfferingsDto(3, listOf(sampleOffering)))
                     errors(Status.NOT_FOUND)
                 } bindContract Method.GET to { _: Request ->
                     Response(Status.OK).with(offeringsBody of listOfferings(catalogId).offeringsDto())
@@ -179,8 +189,8 @@ fun offeringsHttpCapability(
                 "$base/offerings" / offeringPath meta {
                     operationId = "${binding.operationIdPrefix}GetOffering"
                     summary = "Get an offering from the latest catalog"
-                    returning(Status.OK, offeringBody to OfferingResultDto(1, sampleOffering))
-                    errors(Status.NOT_FOUND)
+                    returning(Status.OK, offeringBody to OfferingResultDto(3, sampleOffering))
+                    errors(Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { key: String ->
                     { _: Request ->
                         val offeringKey = validating { OfferingKey(key) }
@@ -195,7 +205,7 @@ fun offeringsHttpCapability(
             base meta {
                 operationId = "${binding.operationIdPrefix}CreateCatalog"
                 summary = "Initialize an empty offerings catalog"
-                returning(Status.CREATED, catalogBody to sampleCatalog)
+                returning(Status.CREATED, catalogBody to initializedCatalog)
                 errors(Status.CONFLICT)
             } bindContract Method.POST to { _: Request ->
                 Response(Status.CREATED).with(catalogBody of createCatalog(catalogId).dto())
@@ -218,7 +228,7 @@ fun offeringsHttpCapability(
                 summary = "Append an offering in a successor catalog revision"
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
                 receiving(offeringRequest to sampleOffering)
-                returning(Status.CREATED, offeringBody to OfferingResultDto(2, sampleOffering))
+                returning(Status.CREATED, offeringBody to OfferingResultDto(3, sampleOffering))
                 errors(Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND, Status.CONFLICT)
             } bindContract Method.POST to { request: Request ->
                 val offering = offeringRequest(request).toDomain()

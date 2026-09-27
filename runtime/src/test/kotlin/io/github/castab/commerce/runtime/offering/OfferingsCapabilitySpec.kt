@@ -1,5 +1,6 @@
 package io.github.castab.commerce.runtime.offering
 
+import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
@@ -20,10 +21,12 @@ import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
+import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.shouldBe
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -164,20 +167,9 @@ class OfferingsCapabilitySpec :
             val prices =
                 listOf(
                     null,
-                    OfferingPrice.Fixed(
-                        io.github.castab.commerce.financial
-                            .Money(BigDecimal("120.00"), Currency.getInstance("USD")),
-                    ),
-                    OfferingPrice.PerQuantity(
-                        io.github.castab.commerce.financial
-                            .Money(BigDecimal("0.75"), Currency.getInstance("USD")),
-                        QuantityDimension("guest"),
-                    ),
-                    OfferingPrice.PerDuration(
-                        io.github.castab.commerce.financial
-                            .Money(BigDecimal("50.00"), Currency.getInstance("USD")),
-                        Duration.ofNanos(123456789),
-                    ),
+                    OfferingPrice.Fixed(Money(BigDecimal("120.00"), Currency.getInstance("USD"))),
+                    OfferingPrice.PerQuantity(Money(BigDecimal("0.75"), Currency.getInstance("USD")), QuantityDimension("guest")),
+                    OfferingPrice.PerDuration(Money(BigDecimal("50.00"), Currency.getInstance("USD")), Duration.ofNanos(123456789)),
                 )
             prices.forEachIndexed { index, price ->
                 addOffering(id, Offering(OfferingKey("item$index"), OfferingCategoryKey("a"), "Item $index", price = price))
@@ -303,6 +295,35 @@ class OfferingsCapabilitySpec :
                 ).status shouldBe
                     Status.UNPROCESSABLE_ENTITY
             }
+            val additive =
+                request(
+                    Method.POST,
+                    "/catalog-a/offerings",
+                    """{"key":"fixed-with-extra","category":"flavors","displayName":"Fixed with Extra",
+                      "price":{"kind":"FIXED","amount":"120.00","currency":"USD","futureField":"ignored"}}""",
+                )
+            additive.status shouldBe Status.CREATED
+            additive
+                .json()["offering"]!!
+                .jsonObject["price"]!!
+                .jsonObject.keys shouldBe setOf("kind", "amount", "currency")
+            request(Method.GET, "/catalog-a/offerings/fixed-with-extra")
+                .json()["offering"]!!
+                .jsonObject["price"]!!
+                .jsonObject.keys shouldBe setOf("kind", "amount", "currency")
+            val conflicting =
+                request(
+                    Method.POST,
+                    "/catalog-a/offerings",
+                    """{"key":"fixed-with-dimension","category":"flavors","displayName":"Fixed with Dimension",
+                      "price":{"kind":"FIXED","amount":"120.00","currency":"USD","dimension":"guest"}}""",
+                )
+            conflicting.status shouldBe Status.UNPROCESSABLE_ENTITY
+            conflicting.json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
+            priceShapes.forEachIndexed { index, (price, status) ->
+                val body = """{"key":"shape$index","category":"flavors","displayName":"Shape $index","price":$price}"""
+                request(Method.POST, "/catalog-a/offerings", body).status shouldBe status
+            }
             val openapi = request(Method.GET, "/openapi.json").json()
             val paths = openapi["paths"]!!.jsonObject
             paths.containsKey("/host") shouldBe true
@@ -358,23 +379,40 @@ class OfferingsCapabilitySpec :
             listOf("FIXED", "PER_QUANTITY", "PER_DURATION").forEachIndexed { index, kind ->
                 mappings[kind]!!.jsonPrimitive.content shouldBe refs[index]
             }
+
+            data class Branch(
+                val name: String,
+                val kind: String,
+                val fields: Set<String>,
+                val forbidden: Set<String>,
+            )
             listOf(
-                Triple("FixedOfferingPrice", "FIXED", setOf("kind", "amount", "currency")),
-                Triple("PerQuantityOfferingPrice", "PER_QUANTITY", setOf("kind", "amount", "currency", "dimension")),
-                Triple("PerDurationOfferingPrice", "PER_DURATION", setOf("kind", "amount", "currency", "interval")),
-            ).forEach { (name, kind, fields) ->
+                Branch("FixedOfferingPrice", "FIXED", setOf("kind", "amount", "currency"), setOf("dimension", "interval")),
+                Branch("PerQuantityOfferingPrice", "PER_QUANTITY", setOf("kind", "amount", "currency", "dimension"), setOf("interval")),
+                Branch("PerDurationOfferingPrice", "PER_DURATION", setOf("kind", "amount", "currency", "interval"), setOf("dimension")),
+            ).forEach { (name, kind, fields, forbidden) ->
                 val branch = schemas[name]!!.jsonObject
                 branch["type"]!!.jsonPrimitive.content shouldBe "object"
-                branch["additionalProperties"]!!.jsonPrimitive.content shouldBe "false"
+                branch.containsKey("additionalProperties") shouldBe false
                 branch["properties"]!!.jsonObject.keys shouldBe fields
                 branch["required"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet() shouldBe fields
-                branch["example"]!!.jsonObject.keys shouldBe fields
                 branch["properties"]!!
                     .jsonObject["kind"]!!
                     .jsonObject["enum"]!!
                     .jsonArray
                     .single()
                     .jsonPrimitive.content shouldBe kind
+                val example = branch["example"]!!.jsonObject
+                example.keys shouldBe fields
+                branch.accepts(example, schemas) shouldBe true
+                branch.accepts(JsonObject(example + ("futureField" to JsonPrimitive("ignored"))), schemas) shouldBe true
+                forbidden.forEach { field ->
+                    branch.accepts(JsonObject(example + (field to JsonPrimitive("x"))), schemas) shouldBe false
+                }
+                fields.forEach { field -> branch.accepts(JsonObject(example - field), schemas) shouldBe false }
+            }
+            priceShapes.forEach { (body, status) ->
+                price.accepts(CommerceJson.parse(body), schemas) shouldBe (status == Status.CREATED)
             }
 
             fun reachesPrice(
@@ -426,6 +464,48 @@ class OfferingsCapabilitySpec :
                 reachesPrice(responseSchema(path, method, status)) shouldBe true
             }
 
+            fun responseExample(
+                path: String,
+                method: String,
+                status: String,
+            ): JsonObject =
+                paths[path]!!
+                    .jsonObject[method]!!
+                    .jsonObject["responses"]!!
+                    .jsonObject[status]!!
+                    .jsonObject["content"]!!
+                    .jsonObject["application/json"]!!
+                    .jsonObject["example"]!!
+                    .jsonObject
+
+            val initialized = responseExample("/catalog-a", "post", "201")
+            initialized["catalogId"]!!.jsonPrimitive.content shouldBe catalogA.value.toString()
+            initialized["revision"]!!.jsonPrimitive.content shouldBe "1"
+            (initialized["previousRevision"] ?: JsonNull) shouldBe JsonNull
+            initialized["categories"]!!.jsonArray.size shouldBe 0
+            listOf(
+                Triple("/catalog-a/categories", "post", "201") to 2,
+                Triple("/catalog-a/offerings", "post", "201") to 3,
+                Triple("/catalog-a", "get", "200") to 3,
+                Triple("/catalog-a/revisions/{revision}", "get", "200") to 3,
+                Triple("/catalog-a/categories", "get", "200") to 3,
+                Triple("/catalog-a/categories/{categoryKey}", "get", "200") to 3,
+                Triple("/catalog-a/categories/{categoryKey}/offerings", "get", "200") to 3,
+                Triple("/catalog-a/offerings", "get", "200") to 3,
+                Triple("/catalog-a/offerings/{offeringKey}", "get", "200") to 3,
+            ).forEach { (route, revision) ->
+                val (path, method, status) = route
+                responseExample(path, method, status)["revision"]!!.jsonPrimitive.content shouldBe revision.toString()
+            }
+            responseExample("/catalog-a", "get", "200")["previousRevision"]!!.jsonPrimitive.content shouldBe "2"
+            // The empty initialization example must not erase the shared catalog definition's shape.
+            val catalogSchema = schemas["OfferingsCatalogDto"]!!.jsonObject["properties"]!!.jsonObject
+            catalogSchema.keys shouldBe setOf("catalogId", "revision", "previousRevision", "categories")
+            catalogSchema["categories"]!!
+                .jsonObject["items"]!!
+                .jsonObject["\$ref"]!!
+                .jsonPrimitive.content shouldBe "#/components/schemas/CatalogCategoryDto"
+
             var checkedPriceExamples = 0
 
             fun checkExamples(
@@ -460,4 +540,115 @@ class OfferingsCapabilitySpec :
             checkExamples(document)
             (checkedPriceExamples > 0) shouldBe true
         }
+
+        test("path parameter failures match each route's documented error statuses") {
+            val paths = request(Method.GET, "/openapi.json").json()["paths"]!!.jsonObject
+            paths["/catalog-a/revisions/{revision}"]!!
+                .jsonObject["get"]!!
+                .jsonObject["parameters"]!!
+                .jsonArray
+                .single()
+                .jsonObject["schema"]!!
+                .jsonObject["type"]!!
+                .jsonPrimitive.content shouldBe "integer"
+            mapOf(
+                "/catalog-a/revisions/{revision}" to
+                    listOf(
+                        "/catalog-a/revisions/abc" to "malformed_request",
+                        "/catalog-a/revisions/1.5" to "malformed_request",
+                        "/catalog-a/revisions/0" to "validation_failed",
+                        "/catalog-a/revisions/-1" to "validation_failed",
+                        "/catalog-a/revisions/999" to "not_found",
+                    ),
+                "/catalog-a/categories/{categoryKey}" to
+                    listOf(
+                        "/catalog-a/categories/%20" to "validation_failed",
+                        "/catalog-a/categories/a%20b" to "validation_failed",
+                        "/catalog-a/categories/missing" to "not_found",
+                    ),
+                "/catalog-a/categories/{categoryKey}/offerings" to
+                    listOf(
+                        "/catalog-a/categories/%20/offerings" to "validation_failed",
+                        "/catalog-a/categories/missing/offerings" to "not_found",
+                    ),
+                "/catalog-a/offerings/{offeringKey}" to
+                    listOf(
+                        "/catalog-a/offerings/%20" to "validation_failed",
+                        "/catalog-a/offerings/a%20b" to "validation_failed",
+                        "/catalog-a/offerings/missing" to "not_found",
+                    ),
+            ).forEach { (template, cases) ->
+                val observed =
+                    cases.map { (path, code) ->
+                        val response = request(Method.GET, path)
+                        response.json()["code"]!!.jsonPrimitive.content shouldBe code
+                        response.status.code.toString()
+                    }
+                val documented =
+                    paths[template]!!
+                        .jsonObject["get"]!!
+                        .jsonObject["responses"]!!
+                        .jsonObject.keys
+                        .filterNot { it.startsWith("2") }
+                documented.shouldContainExactlyInAnyOrder(observed.distinct())
+            }
+        }
     })
+
+/** Price request shapes and the status the HTTP capability answers; the OpenAPI schema must agree. */
+private val priceShapes =
+    listOf(
+        """{"kind":"FIXED","amount":"120.00","currency":"USD"}""" to Status.CREATED,
+        """{"kind":"PER_QUANTITY","amount":"0.75","currency":"USD","dimension":"guest"}""" to Status.CREATED,
+        """{"kind":"PER_DURATION","amount":"50.00","currency":"USD","interval":"PT1H"}""" to Status.CREATED,
+        """{"kind":"FIXED","amount":"120.00","currency":"USD","futureField":"ignored"}""" to Status.CREATED,
+        """{"kind":"PER_QUANTITY","amount":"0.75","currency":"USD","dimension":"guest","futureField":1}""" to Status.CREATED,
+        """{"kind":"FIXED","amount":"120.00","currency":"USD","dimension":"guest"}""" to Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"FIXED","amount":"120.00","currency":"USD","interval":"PT1H"}""" to Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"PER_QUANTITY","amount":"0.75","currency":"USD"}""" to Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"PER_QUANTITY","amount":"0.75","currency":"USD","dimension":"guest","interval":"PT1H"}""" to
+            Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"PER_DURATION","amount":"50.00","currency":"USD"}""" to Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"PER_DURATION","amount":"50.00","currency":"USD","dimension":"guest","interval":"PT1H"}""" to
+            Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"OTHER","amount":"1.00","currency":"USD"}""" to Status.UNPROCESSABLE_ENTITY,
+        """{"kind":"FIXED","currency":"USD"}""" to Status.BAD_REQUEST,
+    )
+
+/**
+ * Evaluates the JSON Schema keywords the price schemas use. An unsupported keyword fails
+ * the test, so a schema change can never pass by being silently ignored.
+ */
+private fun JsonObject.accepts(
+    value: JsonElement,
+    schemas: JsonObject,
+): Boolean {
+    val supported = setOf("\$ref", "type", "properties", "required", "enum", "not", "anyOf", "oneOf", "example", "discriminator")
+    check((keys - supported).isEmpty()) { "Unsupported schema keywords ${keys - supported}" }
+    val fields = value as? JsonObject
+    val checks =
+        listOf(
+            { this["\$ref"]?.let { schemas[it.jsonPrimitive.content.substringAfterLast('/')]!!.jsonObject.accepts(value, schemas) } },
+            {
+                this["type"]?.let {
+                    when (val type = it.jsonPrimitive.content) {
+                        "object" -> fields != null
+                        "string" -> value is JsonPrimitive && value.isString
+                        else -> error("Unsupported schema type $type")
+                    }
+                }
+            },
+            { this["enum"]?.let { value in it.jsonArray } },
+            { this["required"]?.let { required -> fields == null || required.jsonArray.all { it.jsonPrimitive.content in fields } } },
+            {
+                this["properties"]?.let { properties ->
+                    fields == null ||
+                        properties.jsonObject.all { (name, schema) -> fields[name]?.let { schema.jsonObject.accepts(it, schemas) } ?: true }
+                }
+            },
+            { this["not"]?.let { !it.jsonObject.accepts(value, schemas) } },
+            { this["anyOf"]?.let { branches -> branches.jsonArray.any { it.jsonObject.accepts(value, schemas) } } },
+            { this["oneOf"]?.let { branches -> branches.jsonArray.count { it.jsonObject.accepts(value, schemas) } == 1 } },
+        )
+    return checks.all { check -> check() ?: true }
+}

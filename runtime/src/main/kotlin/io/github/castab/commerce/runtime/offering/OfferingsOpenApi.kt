@@ -28,8 +28,9 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         overrideDefinitionId: String?,
         refModelNamePrefix: String?,
     ): JsonSchema<NODE> {
-        // http4k needs values in both optional fields to discover them. This copy is
-        // only a schema input; the route's original object remains the HTTP example.
+        // http4k discovers schemas from example values, so both optional price fields, a
+        // null predecessor, and an empty catalog are filled in. This copy is only a
+        // schema input; the route's original object remains the HTTP example.
         val schema = delegate.toSchema(obj.withCompletePriceShape(), overrideDefinitionId, refModelNamePrefix)
         if ("OfferingPriceDto" !in schema.definitions) return schema
         return schema.copy(
@@ -43,9 +44,20 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
                 } +
                     mapOf(
                         "OfferingPriceDto" to priceUnion(),
-                        "FixedOfferingPrice" to priceVariant("FIXED"),
-                        "PerQuantityOfferingPrice" to priceVariant("PER_QUANTITY", "dimension"),
-                        "PerDurationOfferingPrice" to priceVariant("PER_DURATION", "interval"),
+                        "FixedOfferingPrice" to
+                            priceVariant("FIXED", null, """{"kind":"FIXED","amount":"120.00","currency":"USD"}"""),
+                        "PerQuantityOfferingPrice" to
+                            priceVariant(
+                                "PER_QUANTITY",
+                                "dimension",
+                                """{"kind":"PER_QUANTITY","amount":"0.75","currency":"USD","dimension":"guest"}""",
+                            ),
+                        "PerDurationOfferingPrice" to
+                            priceVariant(
+                                "PER_DURATION",
+                                "interval",
+                                """{"kind":"PER_DURATION","amount":"50.00","currency":"USD","interval":"PT1H"}""",
+                            ),
                     ),
         )
     }
@@ -70,32 +82,26 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
             }""",
         )
 
+    /**
+     * One price branch. Unknown additive fields stay valid, matching `CommerceJson`'s
+     * `ignoreUnknownKeys`; only the fields of the other variants are forbidden.
+     */
     private fun priceVariant(
         kind: String,
-        variantField: String? = null,
+        variantField: String?,
+        example: String,
     ): NODE {
-        val field = variantField?.let { ",\"$it\":{\"type\":\"string\"}" }.orEmpty()
-        val required = variantField?.let { ",\"$it\"" }.orEmpty()
-        val amount =
-            if (kind == "FIXED") {
-                "120.00"
-            } else if (kind == "PER_QUANTITY") {
-                "0.75"
-            } else {
-                "50.00"
-            }
-        val exampleField =
-            when (variantField) {
-                "dimension" -> ",\"dimension\":\"guest\""
-                "interval" -> ",\"interval\":\"PT1H\""
-                else -> ""
-            }
+        val variantFields = listOfNotNull(variantField)
+        val properties = (listOf("amount", "currency") + variantFields).joinToString(",") { "\"$it\":{\"type\":\"string\"}" }
+        val required = (listOf("kind", "amount", "currency") + variantFields).joinToString(",") { "\"$it\"" }
+        val forbidden = (listOf("dimension", "interval") - variantFields).map { """{"required":["$it"]}""" }
+        val not = forbidden.singleOrNull() ?: forbidden.joinToString(",", """{"anyOf":[""", "]}")
         return json.parse(
-            """{"type":"object","additionalProperties":false,
-              "properties":{"kind":{"type":"string","enum":["$kind"]},
-                "amount":{"type":"string"},"currency":{"type":"string"}$field},
-              "required":["kind","amount","currency"$required],
-              "example":{"kind":"$kind","amount":"$amount","currency":"USD"$exampleField}}""",
+            """{"type":"object",
+              "properties":{"kind":{"type":"string","enum":["$kind"]},$properties},
+              "required":[$required],
+              "not":$not,
+              "example":$example}""",
         )
     }
 
@@ -124,7 +130,24 @@ private fun Any.withCompletePriceShape(): Any {
         is OfferingsDto -> copy(offerings = offerings.map { it.complete() })
         is CategoryOfferingsDto -> copy(offerings = offerings.map { it.complete() })
         is OfferingsCatalogDto ->
-            copy(categories = categories.map { category -> category.copy(offerings = category.offerings.map { it.complete() }) })
+            copy(
+                previousRevision = previousRevision ?: revision,
+                categories =
+                    categories.ifEmpty { listOf(schemaOnlyCategory) }.map { category ->
+                        category.copy(offerings = category.offerings.map { it.complete() })
+                    },
+            )
         else -> this
     }
 }
+
+/** Discovers the catalog's nested shape when a route's example is an empty catalog. */
+private val schemaOnlyCategory =
+    CatalogCategoryDto(
+        "category",
+        "Category",
+        "Description",
+        0,
+        1,
+        listOf(OfferingDto("offering", "category", "Offering", "Description", OfferingPriceDto("FIXED", "1.00", "USD"))),
+    )

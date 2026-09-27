@@ -466,8 +466,16 @@ the resulting revision. Runtime-owned DTOs explicitly translate domain values. P
 form a `kind`-discriminated `oneOf`: `FIXED` has `amount` and `currency`;
 `PER_QUANTITY` also requires an application-named `dimension`; `PER_DURATION` also
 requires an ISO-8601 `interval`. `amount` is an exact decimal string and `currency`
-is an ISO currency code. Each variant excludes the other variant's fields.
-The runtime validates the discriminator's fields and domain values. It does not evaluate
+is an ISO currency code. Each variant excludes the other variant's fields. Unknown
+additive fields are ignored, as for every `CommerceJson` body, so each OpenAPI branch
+forbids only the conflicting variant fields (`not` + `required`), never all additional
+properties. The runtime validates the discriminator's fields and domain values.
+
+Path parameters fail the same way as bodies: a non-integer revision is
+`malformed_request` (400); a revision below 1, or a category or offering key that is
+blank or contains whitespace, is `validation_failed` (422); a well-formed but absent
+revision, category, or offering is `not_found` (404). Each route's OpenAPI metadata lists
+the error statuses among these that the route can actually return. It does not evaluate
 an `OfferingsEngine`, own any application catalog contents, or implement update/delete
 commands. Released `V2__offerings_snapshots.sql` remains unchanged.
 
