@@ -27,8 +27,7 @@ import javax.sql.DataSource
  * always runs first, and the two keep independent histories and version spaces. Every test
  * uses a fresh database.
  *
- * commerce-runtime currently owns no table an application could reference, so the tests
- * that need such a dependency run a stand-in runtime stream from `db/testruntime`.
+ * Dependency-order tests use a small stand-in runtime stream from `db/testruntime`.
  */
 class MigrationLifecycleSpec :
     FunSpec({
@@ -77,8 +76,8 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1__commerce_baseline.sql and application V1__test_application_records.sql.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1")
+                // Runtime V1 and V2 coexist with application V1 in separate version spaces.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2")
                 dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
             }
         }

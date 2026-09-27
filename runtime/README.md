@@ -144,20 +144,17 @@ runtime Transactor
         │
         ├──────────────► application repositories
         │
-        └──────────────► commerce repositories   (as the runtime gains commerce persistence)
+        └──────────────► OfferingsSnapshotRepository
 ```
 
 `commerce-runtime` owns this shared transaction abstraction, and application repositories
 use the same `Transaction`. Repositories never open their own transactions.
 
-The runtime provides the transaction boundary required for future atomic application plus
-commerce writes. There is currently no runtime-owned commerce repository or table (see
-[Database and migrations](#database-and-migrations)), so no application-plus-commerce
-write exists yet, and none is tested. Once the runtime owns its first real commerce
-repository, an application will be able to, for example, insert its inquiry, the commerce
-estimate, and its own inquiry-to-estimate relationship, and commit all three together,
-without either generic module knowing about the relationship. Cross-boundary atomicity
-will be exercised by a test at that point.
+`OfferingsSnapshotRepository` is the first commerce-owned repository. An application
+can insert an offering snapshot and write its own catalog or audit row in the same
+transaction. The PostgreSQL integration tests prove that both writes commit or roll back
+together across the `commerce` and application schemas. Neither module knows the
+application's relationships.
 
 ### Provisional extension seam
 
@@ -364,15 +361,47 @@ runtime version and the database shape it requires are one compatibility unit.
   unqualified names into the commerce schema. Application migrations run with `public` as
   their default schema.
 
-Current commerce tables: none. The runtime migration stream is a single baseline,
-`V1__commerce_baseline.sql`, which records the `commerce` schema's ownership and creates
-no table. The runtime therefore publishes no database structure for applications to
-reference yet; the first one it adds becomes part of the published database contract.
+The runtime migration stream starts with `V1__commerce_baseline.sql` and adds the
+offerings tables in `V2__offerings_snapshots.sql`. The latter creates
+`commerce.offerings_snapshots`, `commerce.offering_categories`, and `commerce.offerings`.
+These are runtime-owned published structures; later changes follow the compatibility
+contract above.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
 > baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
 > must be recreated. This was a one-time exception to the immutable-history rule.
+
+### Offerings snapshots
+
+`CommerceRuntimeContext.offeringsSnapshotRepository` exposes the append-only
+`OfferingsSnapshotRepository`. Each method takes the caller's `Transaction` first:
+
+```kotlin
+context.transactor.inTransaction { transaction ->
+    context.offeringsSnapshotRepository.insert(transaction, snapshot)
+    // Application-owned writes may use transaction.handle here too.
+}
+
+val latest = context.transactor.inTransaction { transaction ->
+    context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, catalogId)
+}
+```
+
+`retrieveVersion(transaction, reference)` retrieves an exact revision or returns null;
+`retrieveLatestVersion` returns the highest revision for one catalog or null. `insert`
+never updates existing rows. The `(catalog_id, revision)` primary key rejects duplicate
+revisions, and a self-reference requires a successor's immediate predecessor to exist.
+Categories and offerings use explicit positions, so round trips preserve snapshot order.
+Price forms have stable `FIXED`, `PER_QUANTITY`, and `PER_DURATION` discriminators;
+amounts use exact PostgreSQL `numeric`, and durations store seconds plus nanoseconds.
+The repository maps rows to domain values explicitly through `OfferingsSnapshot.restore`.
+It does not open a connection or transaction. A duplicate revision is reported as
+`CommerceFailure.Conflict`.
+
+There are no runtime offering HTTP routes or default pricing engine. A concrete
+application supplies its catalog, `OfferingsEngine` implementation, API representation,
+and access policy.
 
 ### Transactions
 
@@ -551,10 +580,8 @@ runtime the way a concrete application does: it supplies explicit
 `context.transactor`), starts Jetty, exercises it over real HTTP and PostgreSQL, including
 error handling and rollback, and closes it.
 
-What the tests do **not** prove yet: atomicity across application-owned and
-commerce-owned persistence, because the runtime has no commerce-owned repository. When the
-first legitimate commerce repository is added, an integration test must write an
-application-owned row and a commerce-owned row in one transaction, fail intentionally
-before commit, and verify both writes rolled back. Database specs run against a real PostgreSQL 18 that
+`OfferingsSnapshotRepositorySpec` proves append-only round trips, revision constraints,
+price subtype reconstruction, ordering, and atomic commit and rollback of an offering
+snapshot with an application-owned row. Database specs run against a real PostgreSQL 18 that
 the build starts through the Docker CLI. See
 [Building and testing](../README.md#building-and-testing).

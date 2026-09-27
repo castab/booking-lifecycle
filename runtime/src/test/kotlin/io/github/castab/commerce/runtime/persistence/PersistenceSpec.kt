@@ -47,11 +47,11 @@ class PersistenceSpec :
 
         context("migrations") {
             test("every migration succeeds from an empty database; runtime migrations own the commerce schema and history") {
-                jdbi.appliedVersions("commerce.flyway_schema_history") shouldContainExactly listOf("1")
+                jdbi.appliedVersions("commerce.flyway_schema_history") shouldContainExactly listOf("1", "2")
             }
 
-            test("the runtime baseline owns no table") {
-                jdbi.count("pg_tables WHERE schemaname = 'commerce' AND tablename <> 'flyway_schema_history'") shouldBe 0
+            test("the runtime owns the offerings snapshot tables") {
+                jdbi.count("pg_tables WHERE schemaname = 'commerce' AND tablename <> 'flyway_schema_history'") shouldBe 3
             }
 
             test("application migrations run afterwards with their own history in the default schema") {
@@ -61,7 +61,7 @@ class PersistenceSpec :
             test("migrating again is a no-op") {
                 MigrationLifecycle(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
 
-                jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 1
+                jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 2
             }
 
             test("the database is reachable for readiness checks") {
@@ -72,10 +72,8 @@ class PersistenceSpec :
         context("transactions") {
             val transactor = Transactor(jdbi)
 
-            // Stand-ins for application repositories that receive the same Transaction. Every write
-            // here is application-owned: the runtime has no commerce-owned repository yet, so these
-            // tests prove the shared transaction boundary, not atomicity across application and
-            // commerce persistence. See the future test requirement in AGENTS.md.
+            // Stand-ins for application repositories that receive the same Transaction.
+            // Cross-schema atomicity with the offerings repository is covered separately.
             fun insertRecord(
                 transaction: Transaction,
                 value: String,
