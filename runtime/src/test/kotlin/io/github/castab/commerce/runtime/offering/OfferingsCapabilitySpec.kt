@@ -15,9 +15,16 @@ import io.github.castab.commerce.runtime.CommerceRuntime
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.session.BearerSessionToken
+import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.PermissionResolver
+import io.github.castab.commerce.staff.ServiceId
+import io.github.castab.commerce.staff.UserId
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -57,6 +64,16 @@ class OfferingsCapabilitySpec :
         lateinit var http: HttpHandler
         val catalogA = OfferingsCatalogId(UUID.randomUUID())
         val catalogB = OfferingsCatalogId(UUID.randomUUID())
+        val catalogC = OfferingsCatalogId(UUID.randomUUID())
+        // The application's principals and grants; the runtime only declares what writes require.
+        val editor = UserId(UUID.randomUUID())
+        val viewer = UserId(UUID.randomUUID())
+        val importer = ServiceId(UUID.randomUUID())
+        val permissions =
+            PermissionResolver { principal ->
+                if (principal == editor || principal == importer) setOf(CommercePermissions.OfferingsManage) else emptySet()
+            }
+        lateinit var editorToken: String
 
         beforeSpec {
             database = TestDatabase.create()
@@ -72,20 +89,29 @@ class OfferingsCapabilitySpec :
                     ApplicationContributions(
                         routes = { supplied ->
                             context = supplied
+                            val writes =
+                                OfferingsHttpAccess.ReadWrite(
+                                    AccessControl(sessionAuthentication(supplied.sessions, BearerSessionToken), permissions),
+                                )
                             val a =
                                 offeringsHttpCapability(
                                     supplied,
-                                    OfferingsHttpBinding(catalogA, "/catalog-a", "catalogA", OfferingsHttpAccess.READ_WRITE),
+                                    OfferingsHttpBinding(catalogA, "/catalog-a", "catalogA", writes),
                                 )
                             val b =
                                 offeringsHttpCapability(
                                     supplied,
-                                    OfferingsHttpBinding(catalogB, "/catalog-b", "catalogB", OfferingsHttpAccess.READ_WRITE),
+                                    OfferingsHttpBinding(catalogB, "/catalog-b", "catalogB", writes),
+                                )
+                            val guarded =
+                                offeringsHttpCapability(
+                                    supplied,
+                                    OfferingsHttpBinding(catalogC, "/catalog-c", "catalogC", writes),
                                 )
                             val readOnly =
                                 offeringsHttpCapability(
                                     supplied,
-                                    OfferingsHttpBinding(catalogA, "/catalog-ro", "catalogRo", OfferingsHttpAccess.READ_ONLY),
+                                    OfferingsHttpBinding(catalogA, "/catalog-ro", "catalogRo", OfferingsHttpAccess.ReadOnly),
                                 )
                             val host =
                                 contract {
@@ -93,6 +119,7 @@ class OfferingsCapabilitySpec :
                                     descriptionPath = "/openapi.json"
                                     routes += a.contractRoutes
                                     routes += b.contractRoutes
+                                    routes += guarded.contractRoutes
                                     routes += readOnly.contractRoutes
                                     routes += "/host" meta {
                                         operationId = "hostPing"
@@ -103,6 +130,10 @@ class OfferingsCapabilitySpec :
                         },
                     ),
                 ).start()
+            editorToken =
+                context.sessions
+                    .create(editor)
+                    .token.value
             val client = JavaHttpClient()
             http = { request ->
                 client(
@@ -121,12 +152,14 @@ class OfferingsCapabilitySpec :
             database.close()
         }
 
+        // Requests carry the editor's session unless a test says otherwise.
         fun request(
             method: Method,
             path: String,
             body: String? = null,
+            token: String? = editorToken,
         ): Response {
-            val message = Request(method, path)
+            val message = Request(method, path).let { if (token == null) it else it.header("Authorization", "Bearer $token") }
             return http(if (body == null) message else message.header("Content-Type", "application/json").body(body))
         }
 
@@ -135,13 +168,79 @@ class OfferingsCapabilitySpec :
         test("bindings reject ambiguous paths and operation ID prefixes") {
             listOf("", "catalog", "/catalog/", "/catalog?x=1", "/catalog/{id}", "/catalog//nested").forEach { path ->
                 shouldThrow<IllegalArgumentException> {
-                    OfferingsHttpBinding(catalogA, path, "catalogA", OfferingsHttpAccess.READ_ONLY)
+                    OfferingsHttpBinding(catalogA, path, "catalogA", OfferingsHttpAccess.ReadOnly)
                 }
             }
             listOf("", "with space", "9prefix", "a-b").forEach { prefix ->
                 shouldThrow<IllegalArgumentException> {
-                    OfferingsHttpBinding(catalogA, "/catalog", prefix, OfferingsHttpAccess.READ_ONLY)
+                    OfferingsHttpBinding(catalogA, "/catalog", prefix, OfferingsHttpAccess.ReadOnly)
                 }
+            }
+        }
+
+        test("writes require an authenticated principal that currently holds the offerings management permission") {
+            val category = """{"key":"sizes","displayName":"Sizes"}"""
+            val viewerToken =
+                context.sessions
+                    .create(viewer)
+                    .token.value
+
+            // No principal: 401, whatever the request body, and nothing is written.
+            listOf(
+                Triple("/catalog-c", null, null),
+                Triple("/catalog-c/categories", category, null),
+                Triple("/catalog-c/offerings", "{", null),
+                Triple("/catalog-c", null, "not-a-token"),
+            ).forEach { (path, body, token) ->
+                request(Method.POST, path, body, token).let {
+                    it.status shouldBe Status.UNAUTHORIZED
+                    it.json()["code"]!!.jsonPrimitive.content shouldBe "unauthenticated"
+                }
+            }
+            // An authenticated principal without the permission: 403, and nothing is written.
+            listOf("/catalog-c" to null, "/catalog-c/categories" to category, "/catalog-c/offerings" to "{").forEach { (path, body) ->
+                request(Method.POST, path, body, viewerToken).let {
+                    it.status shouldBe Status.FORBIDDEN
+                    it.json()["code"]!!.jsonPrimitive.content shouldBe "forbidden"
+                }
+            }
+            request(Method.GET, "/catalog-c", token = null).status shouldBe Status.NOT_FOUND
+
+            // Principals holding the permission reach the handlers, humans and services alike.
+            request(
+                Method.POST,
+                "/catalog-c",
+                token =
+                    context.sessions
+                        .create(importer)
+                        .token.value,
+            ).status shouldBe Status.CREATED
+            request(Method.POST, "/catalog-c/categories", category).status shouldBe Status.CREATED
+            request(Method.GET, "/catalog-c", token = null).json()["revision"]!!.jsonPrimitive.content shouldBe "2"
+        }
+
+        test("reads and read-only bindings keep their exposure and need no principal") {
+            request(Method.POST, "/catalog-ro").status shouldBe Status.NOT_FOUND
+            val viewerToken =
+                context.sessions
+                    .create(viewer)
+                    .token.value
+            listOf(null, viewerToken, "not-a-token").forEach { token ->
+                request(Method.GET, "/catalog-c", token = token).status shouldBe Status.OK
+                request(Method.GET, "/catalog-c/categories", token = token).status shouldBe Status.OK
+                request(Method.GET, "/catalog-c/revisions/1", token = token).status shouldBe Status.OK
+                // Read-only bindings have no write routes to authorize.
+                request(Method.POST, "/catalog-ro", token = token).status shouldBe Status.NOT_FOUND
+            }
+
+            val paths = request(Method.GET, "/openapi.json", token = null).json()["paths"]!!.jsonObject
+            listOf("/catalog-c" to "post", "/catalog-c/categories" to "post", "/catalog-c/offerings" to "post").forEach { (path, method) ->
+                val responses = paths[path]!!.jsonObject[method]!!.jsonObject["responses"]!!.jsonObject
+                responses.keys.containsAll(setOf("401", "403")) shouldBe true
+            }
+            listOf("/catalog-c", "/catalog-c/categories", "/catalog-ro", "/catalog-ro/offerings").forEach { path ->
+                val responses = paths[path]!!.jsonObject["get"]!!.jsonObject["responses"]!!.jsonObject
+                (responses.keys intersect setOf("401", "403")) shouldBe emptySet()
             }
         }
 
@@ -220,7 +319,7 @@ class OfferingsCapabilitySpec :
             request(Method.GET, "/catalog-a/categories/flavors/offerings").status shouldBe Status.OK
             request(Method.GET, "/catalog-a/offerings").status shouldBe Status.OK
             request(Method.GET, "/catalog-a/offerings/vanilla").status shouldBe Status.OK
-            request(Method.GET, "/catalog-ro").status shouldBe Status.OK
+            request(Method.GET, "/catalog-ro", token = null).status shouldBe Status.OK
             request(Method.POST, "/catalog-ro").status shouldBe Status.NOT_FOUND
             request(Method.POST, "/catalog-ro/categories").status shouldBe Status.NOT_FOUND
             request(Method.POST, "/catalog-ro/offerings").status shouldBe Status.NOT_FOUND
@@ -343,7 +442,7 @@ class OfferingsCapabilitySpec :
             paths["/catalog-ro/offerings"]!!.jsonObject.containsKey("post") shouldBe false
             val addOfferingContract = paths["/catalog-a/offerings"]!!.jsonObject["post"]!!.jsonObject
             addOfferingContract["requestBody"]!!.jsonObject.containsKey("content") shouldBe true
-            listOf("201", "400", "422", "404", "409").forEach { code ->
+            listOf("201", "401", "403", "400", "422", "404", "409").forEach { code ->
                 addOfferingContract["responses"]!!.jsonObject.containsKey(code) shouldBe true
             }
             addOfferingContract["responses"]!!

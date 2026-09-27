@@ -34,6 +34,12 @@ enum class ErrorCategory(
     /** The body or a parameter could not be read: invalid JSON, a missing field, an unparsable identifier. */
     MALFORMED_REQUEST(Status.BAD_REQUEST, "malformed_request"),
 
+    /** The request presents no valid authentication, for example a missing, expired, or revoked session. */
+    UNAUTHENTICATED(Status.UNAUTHORIZED, "unauthenticated"),
+
+    /** The authenticated principal does not currently hold a permission the request requires. */
+    FORBIDDEN(Status.FORBIDDEN, "forbidden"),
+
     /** The request was readable, but a value is invalid. */
     VALIDATION_FAILED(Status.UNPROCESSABLE_ENTITY, "validation_failed"),
 
@@ -83,7 +89,9 @@ fun CommerceFailure.category(): ErrorCategory =
 /**
  * Turns every failure into the commerce error contract.
  *
- * - An http4k [LensFailure] becomes `malformed_request`, naming the unreadable inputs.
+ * - Reading [authenticatedPrincipal] on a request that no authentication filter
+ *   authenticated becomes `unauthenticated`, so a handler that lacks protection fails closed.
+ * - Any other http4k [LensFailure] becomes `malformed_request`, naming the unreadable inputs.
  * - An http4k contract parameter failure response becomes `malformed_request` too.
  * - A [CommerceFailure] becomes its [category], carrying its caller-safe message.
  * - Any other exception becomes `internal_failure` with a generic message. It is logged
@@ -104,8 +112,12 @@ val CommerceErrorHandling =
                     response
                 }
             } catch (e: LensFailure) {
-                val inputs = e.failures.joinToString { "${it.meta.location} '${it.meta.name}'" }
-                errorResponse(ErrorCategory.MALFORMED_REQUEST, "Malformed request: $inputs")
+                if (isMissingAuthenticatedPrincipal(e)) {
+                    unauthenticatedResponse()
+                } else {
+                    val inputs = e.failures.joinToString { "${it.meta.location} '${it.meta.name}'" }
+                    errorResponse(ErrorCategory.MALFORMED_REQUEST, "Malformed request: $inputs")
+                }
             } catch (e: CommerceFailure) {
                 errorResponse(e.category(), e.message ?: e.category().code)
             } catch (e: Exception) {

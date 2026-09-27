@@ -134,6 +134,9 @@ object CommercePermissions {
     /** Create a financial document. */
     val FinancialDocumentCreate: PermissionKey = PermissionKey("commerce.financial-document.create")
 
+    /** Create an offerings catalog or append categories and offerings to it. */
+    val OfferingsManage: PermissionKey = PermissionKey("commerce.offerings.manage")
+
     /** Record a payment. */
     val PaymentRecord: PermissionKey = PermissionKey("commerce.payment.record")
 
