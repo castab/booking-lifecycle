@@ -3,6 +3,8 @@ package io.github.castab.commerce.runtime.http
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.core.Filter
 import org.http4k.core.Response
 import org.http4k.core.Status
@@ -54,6 +56,14 @@ enum class ErrorCategory(
 private val errorBody = jsonBody(ErrorResponse.serializer())
 private val logger = KotlinLogging.logger {}
 
+/** http4k contracts turn body lens failures into a response before an outer filter can catch them. */
+private fun Response.isContractLensFailure(): Boolean =
+    status == Status.BAD_REQUEST &&
+        runCatching {
+            val body = CommerceJson.parse(bodyString()).jsonObject
+            body["message"]?.jsonPrimitive?.content == "Missing/invalid parameters" && "params" in body
+        }.getOrDefault(false)
+
 /** Builds the error response for [category]. */
 fun errorResponse(
     category: ErrorCategory,
@@ -74,6 +84,7 @@ fun CommerceFailure.category(): ErrorCategory =
  * Turns every failure into the commerce error contract.
  *
  * - An http4k [LensFailure] becomes `malformed_request`, naming the unreadable inputs.
+ * - An http4k contract parameter failure response becomes `malformed_request` too.
  * - A [CommerceFailure] becomes its [category], carrying its caller-safe message.
  * - Any other exception becomes `internal_failure` with a generic message. It is logged
  *   here and never described to the caller, so SQL, stack traces, and implementation
@@ -85,7 +96,9 @@ val CommerceErrorHandling =
         { request ->
             try {
                 val response = next(request)
-                if (response.status == Status.NOT_FOUND && response.body.length == 0L) {
+                if (response.isContractLensFailure()) {
+                    errorResponse(ErrorCategory.MALFORMED_REQUEST, "Malformed request")
+                } else if (response.status == Status.NOT_FOUND && response.body.length == 0L) {
                     errorResponse(ErrorCategory.NOT_FOUND, "No resource at ${request.uri.path}")
                 } else {
                     response

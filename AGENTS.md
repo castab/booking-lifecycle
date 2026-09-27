@@ -380,11 +380,13 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, PostgreSQL error helpers. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes. |
 | `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline and `V2` offerings tables; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, revision rejection, and cross-schema atomicity. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/offering/OfferingsCapabilitySpec.kt` | Generic operation, real HTTP, historical revision, conflict, multiple catalog, read-only, price, and host OpenAPI composition checks. |
 | `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
@@ -916,10 +918,30 @@ record the resulting commercial fact. Neither concept owns the other.
 Runtime persistence is append-only in the `commerce` schema. The
 `OfferingsSnapshotRepository` takes the caller's `Transaction` first and uses
 `transaction.handle` for inserts and reads. The `CommerceRuntimeContext` exposes it.
-It never starts a transaction, creates a separate pool, or provides HTTP endpoints or a
-generic business engine. Category and offering order and each price subtype round trip
+It never starts a transaction or creates a separate pool. Category and offering order and each price subtype round trip
 through explicit relational columns. Cross-schema transaction tests cover commits and
 rollbacks with application-owned rows.
+
+## Runtime Offerings capability
+
+`commerce-runtime` owns generic catalog commands and queries in `runtime.offering`.
+Adopters supply explicit catalog IDs; they do not need to reimplement generic catalog
+administration. Commands own `Transactor` boundaries, derive immediate immutable
+successors, and call the append-only `OfferingsSnapshotRepository`. Concurrent successor
+collisions surface as `CommerceFailure.Conflict` without automatic retry or merge. Do
+not add update/delete repository methods or generic update/delete HTTP semantics; later
+changes need deliberately designed successor-revision commands.
+
+The Offerings HTTP capability is explicitly mounted and bound to one application-supplied
+catalog ID and base path. Its runtime-owned serializable DTOs translate domain values;
+domain types stay serialization-free. The original http4k contract routes are the single
+source for execution and host OpenAPI metadata. The runtime does not own the host's
+aggregate OpenAPI document, Swagger UI, or route mount. `READ_ONLY` and `READ_WRITE`
+control route existence, not caller authorization. The host protects write surfaces.
+Hosts rendering these routes with http4k OpenAPI use `offeringsOpenApiRenderer` so the
+shared `OfferingPriceDto` definition is the three-branch `kind`-discriminated `oneOf`.
+Application `OfferingsEngine` policy remains outside generic catalog HTTP. Released
+runtime migrations, including `V2__offerings_snapshots.sql`, remain immutable.
 
 # Repository-wide rules
 

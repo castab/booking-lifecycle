@@ -111,6 +111,13 @@ snapshot storage is append-only in the `commerce` schema and joins the caller's
 [domain offerings API](domain/README.md#offerings) and
 [runtime persistence contract](runtime/README.md#offerings-snapshots).
 
+The runtime also supplies generic catalog commands, queries, and an explicitly mounted
+Offerings HTTP capability. Applications select a catalog ID, route path, operation ID
+prefix, and read-only or read-write exposure; the same http4k contract routes execute
+HTTP and contribute to the application's OpenAPI document. Catalog writes append
+successor snapshots and never change historical revisions. HTTP route exposure does not
+authenticate callers. See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
+
 This is conceptual, not a required persistence design: each application chooses its own
 types, tables, and relationships.
 
