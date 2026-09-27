@@ -53,7 +53,7 @@ Anything that makes sense for only one of them belongs to that application.
 > **Status: foundation.** This iteration establishes the architecture and the
 > infrastructure: configuration, persistence and transactions, migrations, HTTP, error
 > handling, health, and the application-contribution seam. It does not yet persist or
-> orchestrate commerce facts (financial documents, payments), and it never owns
+> orchestrate financial documents or payments, and it never owns
 > application entities such as customers or bookings. See
 > [Current limitations](#current-limitations).
 
@@ -399,9 +399,85 @@ The repository maps rows to domain values explicitly through `OfferingsSnapshot.
 It does not open a connection or transaction. A duplicate revision is reported as
 `CommerceFailure.Conflict`.
 
-There are no runtime offering HTTP routes or default pricing engine. A concrete
-application supplies its catalog, `OfferingsEngine` implementation, API representation,
-and access policy.
+### Offerings catalog operations and HTTP
+
+`io.github.castab.commerce.runtime.offering` provides `CreateOfferingsCatalog`,
+`AddOfferingCategory`, `AddOffering`, `GetOfferingsCatalog`,
+`GetOfferingsCatalogRevision`, `ListOfferingCategories`, `GetOfferingCategory`,
+`ListCategoryOfferings`, `ListOfferings`, and `GetOffering`. Every operation accepts an
+explicit `OfferingsCatalogId` (the revision query accepts a reference containing it).
+Commands each open one transaction through `Transactor`, read the latest catalog, derive
+an immutable immediate successor, and append it through `OfferingsSnapshotRepository`.
+Initialization creates an empty revision 1. A missing catalog or item is `NotFound`;
+duplicate keys and duplicate initialization are `Conflict`. Concurrent writers that
+derive the same successor revision receive `Conflict` on the losing insert. The runtime
+does not retry or merge it; the caller may reload and decide what to do.
+
+The HTTP capability is opt-in. A concrete application can bind a catalog and compose its
+original http4k contract routes into its own contract:
+
+```kotlin
+val catalog =
+    offeringsHttpCapability(
+        context,
+        OfferingsHttpBinding(
+            catalogId = myCatalogId,
+            basePath = "/offering-catalog",
+            operationIdPrefix = "primaryOfferings",
+            access = OfferingsHttpAccess.READ_WRITE,
+        ),
+    )
+val api = contract {
+    renderer = OpenApi3(ApiInfo("My application", "1"), Jackson, apiRenderer = offeringsOpenApiRenderer(Jackson))
+    descriptionPath = "/openapi.json"
+    routes += catalog.contractRoutes
+    routes += applicationContractRoutes
+}
+```
+
+The application adds `api` to `ApplicationContributions.routes`. The sample's OpenAPI
+renderer uses `http4k-format-jackson` and the focused `offeringsOpenApiRenderer`
+schema hook; the runtime's HTTP transport remains
+`CommerceJson` with kotlinx.serialization. The public `ContractRoute` API comes from
+`http4k-api-openapi`, declared as an `api` dependency. The runtime does not create the
+host's aggregate OpenAPI document or Swagger UI. It never mounts these routes by default.
+
+At the chosen base path, the capability offers:
+
+| Method | Relative path | Purpose |
+|---|---|---|
+| GET, POST | `/` | Latest catalog; initialize empty catalog |
+| GET | `/revisions/{revision}` | Exact historical catalog |
+| GET, POST | `/categories` | List; append category |
+| GET | `/categories/{categoryKey}` | Category |
+| GET | `/categories/{categoryKey}/offerings` | Ordered category offerings |
+| GET, POST | `/offerings` | List; append offering |
+| GET | `/offerings/{offeringKey}` | Offering |
+
+`READ_ONLY` omits the three POST routes entirely. `READ_WRITE` exposes them. **Route
+exposure is not authorization**: the host application must authenticate and authorize
+the surface it mounts. The binding's catalog ID supplies all write targets; request DTOs
+have no catalog ID or revision fields. The operation ID prefix prevents collisions when
+two catalogs are mounted in one host contract.
+
+The catalog response groups ordered offerings beneath ordered categories and includes
+catalog ID, revision, and predecessor revision. Other reads and create responses include
+the resulting revision. Runtime-owned DTOs explicitly translate domain values. Prices
+form a `kind`-discriminated `oneOf`: `FIXED` has `amount` and `currency`;
+`PER_QUANTITY` also requires an application-named `dimension`; `PER_DURATION` also
+requires an ISO-8601 `interval`. `amount` is an exact decimal string and `currency`
+is an ISO currency code. Each variant excludes the other variant's fields. Unknown
+additive fields are ignored, as for every `CommerceJson` body, so each OpenAPI branch
+forbids only the conflicting variant fields (`not` + `required`), never all additional
+properties. The runtime validates the discriminator's fields and domain values.
+
+Path parameters fail the same way as bodies: a non-integer revision is
+`malformed_request` (400); a revision below 1, or a category or offering key that is
+blank or contains whitespace, is `validation_failed` (422); a well-formed but absent
+revision, category, or offering is `not_found` (404). Each route's OpenAPI metadata lists
+the error statuses among these that the route can actually return. It does not evaluate
+an `OfferingsEngine`, own any application catalog contents, or implement update/delete
+commands. Released `V2__offerings_snapshots.sql` remains unchanged.
 
 ### Transactions
 
@@ -437,6 +513,8 @@ Every error has one shape:
 
 Messages come only from `CommerceFailure`, whose messages are written for callers. SQL
 text, stack traces, and exception details of unexpected failures never reach a response.
+`CommerceErrorHandling` also normalizes the http4k contract router's own parameter
+failure response to `malformed_request`, preserving this shape for mounted contract routes.
 
 ### Logging
 

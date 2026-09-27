@@ -29,6 +29,7 @@ dependencies {
     // Types from these libraries appear in the public runtime API (routes, handlers,
     // JSON lenses, transactions, the connection pool), so consumers compile against them.
     api(libs.http4k.core)
+    api(libs.http4k.api.openapi)
     api(libs.http4k.format.kotlinx.serialization)
     api(libs.kotlinx.serialization.json)
     api(libs.jdbi.core)
@@ -50,6 +51,7 @@ dependencies {
 
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.http4k.format.jackson)
     // The runtime's own tests choose Logback as their SLF4J provider, configured by
     // src/test/resources/logback-test.xml. It never reaches the published dependencies.
     testRuntimeOnly(libs.logback.classic)
