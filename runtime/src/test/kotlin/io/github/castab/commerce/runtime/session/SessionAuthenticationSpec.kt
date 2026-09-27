@@ -244,7 +244,7 @@ class SessionAuthenticationSpec :
             }
         }
 
-        context("access control composition") {
+        context("authentication composition") {
             // Counts real session resolutions and permission evaluations.
             class Counting(
                 private val delegate: SessionManager,
@@ -316,6 +316,104 @@ class SessionAuthenticationSpec :
 
                 application(Request(Method.GET, "/bookings")).shouldBeUnauthenticated()
                 counting.resolutions shouldBe 3
+            }
+
+            test("the principal the outer filter established wins; nested bearer credentials are not consulted") {
+                val (counting, bearerAccess, evaluations) = counted()
+                val application =
+                    CommerceErrorHandling.then(
+                        sessionAuthentication(counting, sessionCookie).then(
+                            bearerAccess.requirePermission(CommercePermissions.BookingRead).then(echoPrincipal),
+                        ),
+                    )
+                val cookieUser = UserId(UUID.randomUUID())
+                val bearerService = ServiceId(UUID.randomUUID())
+                grants[cookieUser] = setOf(CommercePermissions.BookingRead)
+                grants[bearerService] = setOf(CommercePermissions.BookingRead)
+                val cookie = sessionCookie.issue(sessions.create(cookieUser))
+                val bearer = sessions.create(bearerService).token.value
+
+                application(Request(Method.GET, "/").cookie(cookie).bearer(bearer)).bodyString() shouldBe cookieUser.text()
+                counting.resolutions shouldBe 1
+                evaluations() shouldBe 1
+
+                // Authorization evaluates the established principal, not the bearer's.
+                grants[cookieUser] = emptySet()
+                application(Request(Method.GET, "/").cookie(cookie).bearer(bearer)).shouldBeForbidden()
+                // The bearer alone does not satisfy the outer cookie authentication.
+                application(Request(Method.GET, "/").bearer(bearer)).shouldBeUnauthenticated()
+            }
+
+            test("standalone session authentication resolves a valid token once and rejects a missing one without a lookup") {
+                val counting = Counting(sessions)
+                val route = CommerceErrorHandling.then(sessionAuthentication(counting, BearerSessionToken).then(echoPrincipal))
+                val principal = UserId(UUID.randomUUID())
+
+                route(Request(Method.GET, "/").bearer(sessions.create(principal).token.value)).bodyString() shouldBe principal.text()
+                counting.resolutions shouldBe 1
+
+                route(Request(Method.GET, "/")).shouldBeUnauthenticated()
+                counting.resolutions shouldBe 1
+            }
+
+            // Outer cookie authentication around inner bearer authentication, sharing one counter.
+            fun nested(
+                counting: Counting,
+                inner: HttpHandler = echoPrincipal,
+            ): HttpHandler =
+                CommerceErrorHandling.then(
+                    sessionAuthentication(counting, sessionCookie).then(sessionAuthentication(counting, BearerSessionToken).then(inner)),
+                )
+
+            test("nested session authentication reuses the outer principal even without its own transport") {
+                val counting = Counting(sessions)
+                val application = nested(counting)
+                val principal = UserId(UUID.randomUUID())
+                val cookie = sessionCookie.issue(sessions.create(principal))
+
+                // No bearer token at all: the inner filter must not answer 401.
+                application(Request(Method.GET, "/").cookie(cookie)).let {
+                    it.status shouldBe Status.OK
+                    it.bodyString() shouldBe principal.text()
+                }
+                counting.resolutions shouldBe 1
+            }
+
+            test("nested session authentication never replaces the established principal with competing credentials") {
+                val counting = Counting(sessions)
+                val application = nested(counting)
+                val cookieUser = UserId(UUID.randomUUID())
+                val bearerService = ServiceId(UUID.randomUUID())
+                val cookie = sessionCookie.issue(sessions.create(cookieUser))
+                val bearer = sessions.create(bearerService).token.value
+
+                application(Request(Method.GET, "/").cookie(cookie).bearer(bearer)).bodyString() shouldBe cookieUser.text()
+                counting.resolutions shouldBe 1
+
+                // Without the outer transport, the inner filter authenticates as before.
+                application(Request(Method.GET, "/").bearer(bearer)).shouldBeUnauthenticated()
+                counting.resolutions shouldBe 1
+            }
+
+            test("permissions are still evaluated per request after nested session authentication") {
+                val counting = Counting(sessions)
+                var evaluations = 0
+                val resolver =
+                    PermissionResolver {
+                        evaluations++
+                        permissionResolver.permissionsFor(it)
+                    }
+                val application = nested(counting, requirePermission(CommercePermissions.BookingRead, resolver).then(echoPrincipal))
+                val principal = UserId(UUID.randomUUID())
+                grants[principal] = setOf(CommercePermissions.BookingRead)
+                val cookie = sessionCookie.issue(sessions.create(principal))
+
+                application(Request(Method.GET, "/").cookie(cookie)).bodyString() shouldBe principal.text()
+                grants[principal] = emptySet()
+                application(Request(Method.GET, "/").cookie(cookie)).shouldBeForbidden()
+
+                counting.resolutions shouldBe 2
+                evaluations shouldBe 2
             }
         }
 

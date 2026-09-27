@@ -473,8 +473,7 @@ At the chosen base path, the capability offers:
 | GET | `/offerings/{offeringKey}` | Offering |
 
 `OfferingsHttpAccess.ReadOnly` omits the three POST routes entirely and needs no
-authorization dependency; the former `OfferingsHttpAccess.READ_ONLY` remains as a
-deprecated alias for it. There is deliberately no `READ_WRITE` alias. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes them, and
+authorization dependency. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes them, and
 every write requires an authenticated principal that currently holds
 `CommercePermissions.OfferingsManage` (`commerce.offerings.manage`): `401 unauthenticated`
 without a principal and `403 forbidden` without the permission, before the request body is
@@ -605,12 +604,34 @@ val listBookings: HttpHandler = { request ->
 }
 ```
 
-`AccessControl` authenticates only when the request has no principal yet: when an outer
-`sessionAuthentication` already established `authenticatedPrincipal` (for example around a
-whole contract), its `authenticated()` and `requirePermission(...)` reuse that principal
-instead of resolving the session again, and still evaluate the permission on every
-request. Only runtime authentication filters can establish the principal, so no header or
-application flag can trigger this.
+**Authentication precedence follows composition order.** Once a runtime authentication
+filter establishes `authenticatedPrincipal` on a request, nested `AccessControl` instances
+reuse that principal rather than authenticating the request again. An `AccessControl`'s
+own authentication filter is a fallback, used only when no principal is established yet.
+For example:
+
+```text
+outer sessionAuthentication(cookie)  → establishes UserId
+nested AccessControl (bearer)        → reuses UserId; bearer credentials are not inspected
+requirePermission                    → evaluates UserId against the current PermissionResolver
+```
+
+If a request carries credentials for two different principals (a session cookie for one
+and a bearer token for another), the filter responsible for establishing the principal
+wins, nested `AccessControl` never replaces it, and authorization evaluates that
+principal. The runtime does not parse every credential source or try to reconcile them.
+`sessionAuthentication` is idempotent for a request that already has a runtime-authenticated
+principal. The first runtime authentication filter to establish the principal wins; nested
+session-authentication filters reuse it without inspecting their own transport, so they
+neither replace it nor answer `401` because their transport is absent.
+
+Authentication transport is not authorization. If an endpoint ever needs to require a
+particular authentication mechanism or assurance level, that will be modeled explicitly;
+it must not rely on the order in which authentication filters are nested.
+
+Authentication may be reused; authorization never is. The permission is evaluated on every
+request. Only runtime authentication filters can establish the principal, so no header,
+query parameter, request attribute, or application flag can.
 
 Handlers never parse cookies, hash tokens, query sessions, check expiry, or re-check
 permissions. **A session establishes identity, not authority.** Permissions are never

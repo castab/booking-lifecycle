@@ -36,6 +36,10 @@ private fun Request.authenticatedPrincipalOrNull(): PrincipalId? =
         null
     }
 
+/** Whether a runtime authentication filter has already established [authenticatedPrincipal] for this request. */
+@JvmSynthetic
+internal fun Request.hasAuthenticatedPrincipal(): Boolean = authenticatedPrincipalOrNull() != null
+
 /** True when [failure] is a read of [authenticatedPrincipal] on a request that was not authenticated. */
 internal fun isMissingAuthenticatedPrincipal(failure: LensFailure): Boolean =
     failure.failures.isNotEmpty() && failure.failures.all { it.meta == principalKey.meta }
@@ -45,7 +49,7 @@ internal fun unauthenticatedResponse() = errorResponse(ErrorCategory.UNAUTHENTIC
 /** Answers `401 unauthenticated` unless an authentication filter established [authenticatedPrincipal]. */
 val requireAuthenticatedPrincipal: Filter =
     Filter { next ->
-        { request -> if (request.authenticatedPrincipalOrNull() == null) unauthenticatedResponse() else next(request) }
+        { request -> if (request.hasAuthenticatedPrincipal()) next(request) else unauthenticatedResponse() }
     }
 
 /**
@@ -80,12 +84,26 @@ fun requirePermission(
  * Declarative route protection: every route states whether it is [public], merely
  * [authenticated], or requires a permission ([requirePermission]).
  *
- * [authentication] establishes [authenticatedPrincipal], for example
- * `sessionAuthentication(context.sessions, SessionCookie("app_session"))`; the
- * application's [permissionResolver] supplies current authority. Protection fails closed:
- * the protected declarations re-check the principal, so a lenient [authentication] still
- * cannot expose them. When an outer runtime authentication filter already established
- * the principal, [authentication] is not run again; the permission check always is.
+ * **Authentication is conditional.** [authentication] is a fallback: it runs only when no
+ * runtime authentication filter has already established [authenticatedPrincipal] for the
+ * request. Once one has, nested `AccessControl` instances reuse that principal and never
+ * authenticate the request again, whatever transport their own [authentication] uses.
+ * Authentication transport precedence therefore follows request composition order: an
+ * outer `sessionAuthentication(sessions, sessionCookie)` that establishes a `UserId` wins
+ * over a nested `AccessControl` configured for bearer tokens, whose bearer credentials are
+ * not inspected. A request carrying credentials for two different principals is
+ * authenticated as whichever the responsible filter established; nothing reconciles them.
+ *
+ * **Authorization is live.** [permissionResolver], the application's, is consulted through
+ * `PrincipalId.can` on every request, including when the principal was reused. Nothing is
+ * cached.
+ *
+ * Protection fails closed: the protected declarations re-check the principal after
+ * authentication, so a lenient [authentication] still cannot expose them.
+ *
+ * @param authentication Establishes [authenticatedPrincipal] when the request is not yet
+ *   authenticated, for example `sessionAuthentication(context.sessions, SessionCookie("app_session"))`.
+ * @param permissionResolver The application's source of current permissions.
  *
  * ```kotlin
  * val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), permissionResolver)
@@ -101,16 +119,16 @@ class AccessControl(
     private val permissionResolver: PermissionResolver,
 ) {
     /**
-     * Runs [authentication] only when no runtime authentication filter has already
-     * established [authenticatedPrincipal] for this request, so a route protected here
-     * inside an application that already authenticates does not resolve the session twice.
-     * Authorization is never skipped: the permission is evaluated on every request.
+     * [authentication] as a fallback: skipped when the request already carries a
+     * runtime-established [authenticatedPrincipal], so the session is resolved once per
+     * request and an established principal is never replaced. It gates authentication only;
+     * the filters it precedes always run.
      */
-    private val authenticationIfNecessary =
+    private val authenticateUnlessAuthenticated =
         Filter { next ->
             val authenticateThenNext: HttpHandler = authentication.then(next)
             val handler: HttpHandler = { request ->
-                if (request.authenticatedPrincipalOrNull() != null) next(request) else authenticateThenNext(request)
+                if (request.hasAuthenticatedPrincipal()) next(request) else authenticateThenNext(request)
             }
             handler
         }
@@ -119,9 +137,9 @@ class AccessControl(
     fun public(): Filter = Filter.NoOp
 
     /** Any authenticated principal, without a particular permission. */
-    fun authenticated(): Filter = authenticationIfNecessary.then(requireAuthenticatedPrincipal)
+    fun authenticated(): Filter = authenticateUnlessAuthenticated.then(requireAuthenticatedPrincipal)
 
     /** An authenticated principal that currently holds [permission]. */
     fun requirePermission(permission: PermissionKey): Filter =
-        authenticationIfNecessary.then(requirePermission(permission, permissionResolver))
+        authenticateUnlessAuthenticated.then(requirePermission(permission, permissionResolver))
 }

@@ -55,8 +55,6 @@ import java.math.BigDecimal
 import java.time.Duration
 import java.util.Currency
 import java.util.UUID
-import kotlin.reflect.full.findAnnotation
-import kotlin.reflect.full.memberProperties
 
 class OfferingsCapabilitySpec :
     FunSpec({
@@ -244,20 +242,6 @@ class OfferingsCapabilitySpec :
                 val responses = paths[path]!!.jsonObject["get"]!!.jsonObject["responses"]!!.jsonObject
                 (responses.keys intersect setOf("401", "403")) shouldBe emptySet()
             }
-        }
-
-        test("READ_ONLY remains a deprecated alias of ReadOnly, and there is no READ_WRITE without AccessControl") {
-            @Suppress("DEPRECATION")
-            val legacy = OfferingsHttpBinding(catalogA, "/legacy", "legacy", OfferingsHttpAccess.READ_ONLY)
-            legacy.access shouldBe OfferingsHttpAccess.ReadOnly
-
-            val companion = OfferingsHttpAccess.Companion::class.memberProperties.associateBy { it.name }
-            companion.keys shouldBe setOf("READ_ONLY")
-            companion
-                .getValue("READ_ONLY")
-                .findAnnotation<Deprecated>()!!
-                .replaceWith.expression shouldBe
-                "OfferingsHttpAccess.ReadOnly"
         }
 
         test("catalog operations append revisions and preserve exact historical reads") {

@@ -1,5 +1,6 @@
 package io.github.castab.commerce.runtime.session
 
+import io.github.castab.commerce.runtime.http.hasAuthenticatedPrincipal
 import io.github.castab.commerce.runtime.http.unauthenticatedResponse
 import io.github.castab.commerce.runtime.http.withAuthenticatedPrincipal
 import org.http4k.core.Filter
@@ -73,6 +74,10 @@ class SessionCookie(
 /**
  * Authenticates each request through a session, or rejects it.
  *
+ * If a runtime authentication filter has already established the request's
+ * [authenticatedPrincipal][io.github.castab.commerce.runtime.http.authenticatedPrincipal],
+ * this filter reuses it and does nothing else. Otherwise:
+ *
  * 1. [extractor] finds the request's token;
  * 2. [sessions] resolves it to a `PrincipalId`;
  * 3. the principal becomes the request's
@@ -82,6 +87,16 @@ class SessionCookie(
  * A missing, malformed, unknown, expired, or revoked token is answered with
  * `401 unauthenticated` and the same message, never revealing which. Authorization is
  * separate; see `requirePermission` and `AccessControl`.
+ *
+ * `sessionAuthentication` is idempotent for a request that already has a
+ * runtime-authenticated principal. The first runtime authentication filter to establish
+ * the principal wins; nested session-authentication filters reuse it without inspecting
+ * their own transport, so they neither replace it nor answer `401` because their
+ * transport is absent. Competing credentials are not compared or reconciled.
+ *
+ * Authentication transport is not authorization. An endpoint that must require a
+ * particular authentication mechanism or assurance level needs that modeled explicitly;
+ * it must not rely on the order in which authentication filters are nested.
  */
 fun sessionAuthentication(
     sessions: SessionManager,
@@ -89,9 +104,13 @@ fun sessionAuthentication(
 ): Filter =
     Filter { next ->
         { request ->
-            when (val principal = extractor.extract(request)?.let(sessions::resolve)) {
-                null -> unauthenticatedResponse()
-                else -> next(request.withAuthenticatedPrincipal(principal))
+            if (request.hasAuthenticatedPrincipal()) {
+                next(request)
+            } else {
+                when (val principal = extractor.extract(request)?.let(sessions::resolve)) {
+                    null -> unauthenticatedResponse()
+                    else -> next(request.withAuthenticatedPrincipal(principal))
+                }
             }
         }
     }
