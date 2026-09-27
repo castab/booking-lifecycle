@@ -8,9 +8,12 @@ import io.github.castab.commerce.runtime.http.healthRoutes
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
+import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.persistence.isReachable
+import io.github.castab.commerce.runtime.session.PersistentSessionManager
+import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.oshai.kotlinlogging.KotlinLogging
 import org.http4k.core.HttpHandler
 import org.http4k.core.then
@@ -25,9 +28,13 @@ private val logger = KotlinLogging.logger {}
 
 /**
  * The shared runtime pieces an application may build on: configuration, the transaction
- * boundary, and the commerce-owned [offeringsSnapshotRepository]. Application repositories
- * use the same [transactor] and [io.github.castab.commerce.runtime.persistence.Transaction]
- * the runtime uses.
+ * boundary, the commerce-owned [offeringsSnapshotRepository], and authenticated principal
+ * [sessions]. Application repositories use the same [transactor] and
+ * [io.github.castab.commerce.runtime.persistence.Transaction] the runtime uses.
+ *
+ * [sessions] is how an application that has verified its own credentials starts a session
+ * for the resulting `PrincipalId`, and how its routes authenticate later requests (see
+ * `sessionAuthentication`). The runtime never sees the credentials themselves.
  *
  * The repository participates in caller-owned transactions, including transactions that
  * also write application data. The runtime has no customer or other application
@@ -40,6 +47,7 @@ class CommerceRuntimeContext internal constructor(
     val configuration: CommerceRuntimeConfiguration,
     val transactor: Transactor,
     val offeringsSnapshotRepository: OfferingsSnapshotRepository,
+    val sessions: SessionManager,
 )
 
 /**
@@ -113,9 +121,10 @@ class CommerceRuntime internal constructor(
  * not compatible.
  *
  * Every other dependency is then constructed here, in order, with ordinary Kotlin: Jdbi,
- * the transaction boundary, the runtime's infrastructure routes (`/health`, `/ready`) and
- * the [application] routes, the http4k handler, and Jetty. There is no dependency
- * injection container, annotation scanning, or reflection.
+ * the transaction boundary, the session manager, the runtime's infrastructure routes
+ * (`/health`, `/ready`, explicitly public) and the [application] routes, the http4k
+ * handler, and Jetty. There is no dependency injection container, annotation scanning, or
+ * reflection.
  *
  * [application] has no default: the runtime is not an application by itself, and the
  * caller decides what its application contributes. The server is created but not
@@ -135,7 +144,8 @@ fun commerceRuntime(
 
         val jdbi = Jdbi.create(dataSource)
         val transactor = Transactor(jdbi)
-        val context = CommerceRuntimeContext(configuration, transactor, PostgresOfferingsSnapshotRepository())
+        val sessions = PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), configuration.sessions.lifetime)
+        val context = CommerceRuntimeContext(configuration, transactor, PostgresOfferingsSnapshotRepository(), sessions)
 
         val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))
         val http = CommerceErrorHandling.then(routes(*(runtimeRoutes + application.routes(context)).toTypedArray()))

@@ -8,7 +8,8 @@ The opinionated, reusable runtime of the [`commerce`](../README.md) project. Con
 commerce applications are assembled from it. It turns the vocabulary and invariants of
 [`commerce-domain`](../domain/README.md) into working infrastructure: application
 operations, explicit transactions, PostgreSQL persistence, HTTP conventions on http4k and
-Jetty, one error contract, health checks, configuration, and an explicit composition root.
+Jetty, one error contract, health checks, authenticated principal sessions and permission
+enforcement, configuration, and an explicit composition root.
 
 ```text
 commerce-domain
@@ -52,7 +53,8 @@ Anything that makes sense for only one of them belongs to that application.
 
 > **Status: foundation.** This iteration establishes the architecture and the
 > infrastructure: configuration, persistence and transactions, migrations, HTTP, error
-> handling, health, and the application-contribution seam. It does not yet persist or
+> handling, health, principal sessions and authorization, and the application-contribution
+> seam. It does not yet persist or
 > orchestrate financial documents or payments, and it never owns
 > application entities such as customers or bookings. See
 > [Current limitations](#current-limitations).
@@ -126,8 +128,9 @@ commerce-runtime
 `ApplicationContributions` is intentionally small and not booking-specific. An
 application contributes the Flyway locations of its own migrations, never the runtime's,
 and its own routes. The routes are built from the shared `CommerceRuntimeContext`, which
-currently holds the configuration and the `Transactor`. The runtime owns the error
-handling around every route.
+currently holds the configuration, the `Transactor`, the offerings snapshot repository, and
+the `SessionManager` (`context.sessions`). The runtime owns the error handling around every
+route.
 
 ### Application entities and the shared transaction
 
@@ -245,11 +248,12 @@ never open their own transactions.
 
 | Package (`io.github.castab.commerce.runtime...`) | Contents |
 |---|---|
-| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration and `Transactor`). |
+| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, offerings snapshot repository, and `sessions`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
-| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, and PostgreSQL error helpers. |
+| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, the offerings snapshot repository, the internal principal session repository, and PostgreSQL error helpers. |
+| `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
-| `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, and health routes. |
+| `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, health routes, the `authenticatedPrincipal` request lens, and the authorization filters (`requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
 
 Packages for booking, financial, and payment orchestration will appear when they contain
 real code, not before.
@@ -295,6 +299,11 @@ database {
 | `database.connectionTimeoutMs` | `DATABASE_CONNECTION_TIMEOUT_MS` | `500` |
 | `database.validationTimeoutMs` | `DATABASE_VALIDATION_TIMEOUT_MS` | `1000` |
 | `migrations.onStartup` | `MIGRATIONS_ON_STARTUP` (`migrate` or `validate`) | `VALIDATE` |
+| `sessions.lifetimeMinutes` | `SESSIONS_LIFETIME_MINUTES` | `720` (12 hours) |
+
+`sessions.lifetimeMinutes` is the fixed lifetime of every session, between 1 minute and 1
+year; see [Sessions and authorization](#sessions-and-authorization). It is the only session
+setting: cookie names and attributes are chosen in code by the application.
 
 Invalid values fail with a message naming the variable. Secrets come only from the
 environment. The database password is redacted from the configuration's `toString`.
@@ -364,8 +373,15 @@ runtime version and the database shape it requires are one compatibility unit.
 The runtime migration stream starts with `V1__commerce_baseline.sql` and adds the
 offerings tables in `V2__offerings_snapshots.sql`. The latter creates
 `commerce.offerings_snapshots`, `commerce.offering_categories`, and `commerce.offerings`.
-These are runtime-owned published structures; later changes follow the compatibility
-contract above.
+`V3__principal_sessions.sql` creates `commerce.principal_sessions` for
+[sessions](#sessions-and-authorization): the session ID, the principal as a
+runtime-controlled kind (`USER` or `SERVICE`) plus its UUID, the unique SHA-256 token
+digest (never the token), and the creation, expiry, and revocation times, with indexes for
+revoking a principal's sessions and for finding expired ones. Development databases that
+applied an unreleased draft of `V3` (with lowercase principal kinds) fail Flyway validation
+on its changed checksum and must be recreated; repairing the history alone would leave
+the draft's constraint in place. These are runtime-owned
+published structures; later changes follow the compatibility contract above.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
@@ -414,9 +430,11 @@ derive the same successor revision receive `Conflict` on the losing insert. The 
 does not retry or merge it; the caller may reload and decide what to do.
 
 The HTTP capability is opt-in. A concrete application can bind a catalog and compose its
-original http4k contract routes into its own contract:
+original http4k contract routes into its own contract. A write-capable binding carries the
+application's `AccessControl` (its authentication filter and `PermissionResolver`):
 
 ```kotlin
+val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), permissionResolver)
 val catalog =
     offeringsHttpCapability(
         context,
@@ -424,7 +442,7 @@ val catalog =
             catalogId = myCatalogId,
             basePath = "/offering-catalog",
             operationIdPrefix = "primaryOfferings",
-            access = OfferingsHttpAccess.READ_WRITE,
+            access = OfferingsHttpAccess.ReadWrite(access), // or OfferingsHttpAccess.ReadOnly
         ),
     )
 val api = contract {
@@ -454,9 +472,17 @@ At the chosen base path, the capability offers:
 | GET, POST | `/offerings` | List; append offering |
 | GET | `/offerings/{offeringKey}` | Offering |
 
-`READ_ONLY` omits the three POST routes entirely. `READ_WRITE` exposes them. **Route
-exposure is not authorization**: the host application must authenticate and authorize
-the surface it mounts. The binding's catalog ID supplies all write targets; request DTOs
+`OfferingsHttpAccess.ReadOnly` omits the three POST routes entirely and needs no
+authorization dependency. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes them, and
+every write requires an authenticated principal that currently holds
+`CommercePermissions.OfferingsManage` (`commerce.offerings.manage`): `401 unauthenticated`
+without a principal and `403 forbidden` without the permission, before the request body is
+read. The runtime declares that requirement; the application's `AccessControl` supplies the
+authentication and the `PermissionResolver` that evaluates it, so which roles grant the
+permission is the application's decision. A write-capable binding cannot be built without
+one. Reads carry no permission requirement: they are as public as the place the host mounts
+them, and the host may still wrap them in its own filters. The write routes document `401`
+and `403` in OpenAPI. The binding's catalog ID supplies all write targets; request DTOs
 have no catalog ID or revision fields. The operation ID prefix prevents collisions when
 two catalogs are mounted in one host contract.
 
@@ -506,6 +532,8 @@ Every error has one shape:
 | Malformed request | 400 | `malformed_request` | unreadable JSON, missing fields, unparsable path values (http4k `LensFailure`) |
 | Validation failure | 422 | `validation_failed` | `CommerceFailure.ValidationFailed`, typically a domain `require` inside `validating { }` |
 | Not found | 404 | `not_found` | `CommerceFailure.NotFound`, or no matching route |
+| Unauthenticated | 401 | `unauthenticated` | a missing or invalid session in `sessionAuthentication`, `requirePermission` without an authenticated principal, or reading `authenticatedPrincipal` on an unauthenticated request |
+| Forbidden | 403 | `forbidden` | `requirePermission` when the authenticated principal lacks the permission |
 | Conflict | 409 | `conflict` | `CommerceFailure.Conflict`, e.g. a unique-key violation |
 | Illegal transition | 409 | `illegal_transition` | `CommerceFailure.IllegalTransition` |
 | Invariant violation | 422 | `invariant_violated` | `CommerceFailure.InvariantViolated` |
@@ -515,6 +543,176 @@ Messages come only from `CommerceFailure`, whose messages are written for caller
 text, stack traces, and exception details of unexpected failures never reach a response.
 `CommerceErrorHandling` also normalizes the http4k contract router's own parameter
 failure response to `malformed_request`, preserving this shape for mounted contract routes.
+
+### Sessions and authorization
+
+The runtime manages what happens **after** an application has proven who a caller is. It
+never sees credentials.
+
+```text
+commerce-domain        Principal, UserId, ServiceId, roles, permissions,
+                       PermissionResolver, PrincipalId.can
+
+commerce-runtime       authenticated-session lifecycle (SessionManager)
+                       session persistence (commerce.principal_sessions)
+                       token issuance and resolution
+                       HTTP principal context (authenticatedPrincipal)
+                       permission enforcement (requirePermission, AccessControl)
+
+concrete application   credential storage and verification
+                       login and logout endpoints
+                       OAuth, passkeys, or any other identity proof
+                       its PermissionResolver (principals, role assignments, role definitions)
+                       how the token reaches its client, and CSRF protection
+```
+
+Logging in, in the concrete application:
+
+```kotlin
+val userId = applicationAuthenticator.authenticate(credentials) // the application's own check
+    ?: return Response(Status.UNAUTHORIZED)
+
+val issued = context.sessions.create(userId)
+
+// The application chooses how issued.token reaches its client, for example:
+Response(Status.NO_CONTENT).cookie(sessionCookie.issue(issued))
+```
+
+Later requests:
+
+```text
+HTTP request
+    → SessionTokenExtractor          (BearerSessionToken, SessionCookie, or the application's own)
+    → SessionManager.resolve(token)  (digest lookup; unknown, expired, or revoked → 401)
+    → authenticatedPrincipal         (http4k request context)
+    → requirePermission(permission)  (PrincipalId.can with the application's PermissionResolver → 403)
+    → business handler
+```
+
+```kotlin
+val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), permissionResolver)
+
+routes(
+    "/auth/login" bind Method.POST to access.public().then(login),
+    "/auth/logout" bind Method.POST to access.authenticated().then(logout),
+    "/bookings" bind Method.GET to access.requirePermission(CommercePermissions.BookingRead).then(listBookings),
+)
+
+val listBookings: HttpHandler = { request ->
+    val principal: PrincipalId = authenticatedPrincipal(request)
+    // ...
+}
+```
+
+**Authentication precedence follows composition order.** Once a runtime authentication
+filter establishes `authenticatedPrincipal` on a request, nested `AccessControl` instances
+reuse that principal rather than authenticating the request again. An `AccessControl`'s
+own authentication filter is a fallback, used only when no principal is established yet.
+For example:
+
+```text
+outer sessionAuthentication(cookie)  → establishes UserId
+nested AccessControl (bearer)        → reuses UserId; bearer credentials are not inspected
+requirePermission                    → evaluates UserId against the current PermissionResolver
+```
+
+If a request carries credentials for two different principals (a session cookie for one
+and a bearer token for another), the filter responsible for establishing the principal
+wins, nested `AccessControl` never replaces it, and authorization evaluates that
+principal. The runtime does not parse every credential source or try to reconcile them.
+`sessionAuthentication` is idempotent for a request that already has a runtime-authenticated
+principal. The first runtime authentication filter to establish the principal wins; nested
+session-authentication filters reuse it without inspecting their own transport, so they
+neither replace it nor answer `401` because their transport is absent.
+
+Authentication transport is not authorization. If an endpoint ever needs to require a
+particular authentication mechanism or assurance level, that will be modeled explicitly;
+it must not rely on the order in which authentication filters are nested.
+
+Authentication may be reused; authorization never is. The permission is evaluated on every
+request. Only runtime authentication filters can establish the principal, so no header,
+query parameter, request attribute, or application flag can.
+
+Handlers never parse cookies, hash tokens, query sessions, check expiry, or re-check
+permissions. **A session establishes identity, not authority.** Permissions are never
+captured in a session: every `requirePermission` decision asks the current
+`PermissionResolver`, so a changed role assignment or a disabled principal takes effect
+on sessions that are already active.
+
+| API (`runtime.session` unless noted) | Purpose |
+|---|---|
+| `SessionManager` (`context.sessions`) | `create(principalId)`, `resolve(token)`, `revoke(token)`, `revokeAll(principalId)`. Each also has an overload that joins the caller's `Transaction`, so, for example, disabling a principal and revoking its sessions commit together. |
+| `PrincipalSession`, `SessionId` | One session of one `PrincipalId`: creation, expiry, and optional revocation times; `isActive(at)`. No credential material. |
+| `SessionToken` | The opaque secret. `parse(text)` accepts only the runtime's format; `toString()` is redacted and equality is constant-time. |
+| `IssuedSession` | The result of `create`: the session and its token. The only place a raw token is handed out. |
+| `SessionTokenExtractor`, `BearerSessionToken`, `SessionCookie` | Where a request carries its token. Transport only; they decide nothing about validity. |
+| `sessionAuthentication(sessions, extractor)` | The filter that resolves the token and sets `authenticatedPrincipal`, or answers `401`. |
+| `runtime.http`: `authenticatedPrincipal` | The read-only request lens handlers use. Only the runtime's authentication filters set it. |
+| `runtime.http`: `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl` | Authorization filters and the declarative `public()` / `authenticated()` / `requirePermission(...)` route protection. |
+
+Security decisions:
+
+- **Tokens.** 32 bytes from `SecureRandom`, unpadded base64url (43 characters). A token is
+  unrelated to its `SessionId` and to the principal, and neither identifier can be parsed
+  as a token.
+- **Storage.** Only the SHA-256 digest of the token is stored, in a unique column. The
+  token is uniformly random, so a fast digest is sufficient and password hashing (bcrypt,
+  Argon2, PBKDF2) would add nothing. The digest type and the repository are internal, so
+  no public API accepts or returns stored token material. After the indexed lookup, the
+  digest is also compared in constant time.
+- **Expiry.** Fixed, never sliding: a session expires `sessions.lifetimeMinutes` after it
+  was created, and resolving it never extends it. Every timestamp comes from the runtime's
+  clock, never the database clock.
+- **Revocation** is immediate and idempotent. `revokeAll` revokes only that principal's
+  active sessions; a user and a service that share a UUID are different principals.
+- **Failures.** A missing, malformed, unknown, expired, or revoked token all produce the
+  same `401 unauthenticated` response. Tokens never appear in logs, `toString`, or
+  exception messages. Lifecycle logs (`event=session_created`, `event=session_revoked`,
+  `event=sessions_revoked`) name session and principal identifiers only.
+- **Fail closed.** `requirePermission` answers `401` without an authenticated principal,
+  and reading `authenticatedPrincipal` on a request that was not authenticated is reported
+  as `401`, not as a malformed request. `AccessControl` re-checks the principal after its
+  authentication filter.
+- **Cookies are an optional adapter.** `SessionCookie(name)` reads the token from a cookie
+  and builds cookies that are always `Secure` and `HttpOnly`, host-only (no `Domain`),
+  `SameSite=Lax` by default, and expire with the session. The application names the
+  cookie (the `__Host-` prefix is recommended) and decides when to set and clear it. CSRF
+  protection beyond `SameSite` is the application's.
+
+**Runtime capabilities declare permissions; applications supply the resolver.** A
+runtime-provided HTTP capability that exposes protected operations declares the commerce
+permission each one requires and receives the application's `AccessControl` (or, where it
+needs no authentication of its own, its `PermissionResolver`) explicitly when the
+application composes it, as the Offerings write binding does. `commerceRuntime(...)` takes
+no global resolver and `CommerceRuntimeContext` does not carry one: public capabilities need
+no resolver, and a protected capability cannot be composed without one. Evaluation always
+goes through `PrincipalId.can`, and nothing about missing authorization configuration ever
+means "allow".
+
+**Principal persistence contract.** commerce-runtime persists an explicit set of supported
+`PrincipalId` representations: today `UserId` as `USER` and `ServiceId` as `SERVICE`, each
+with its UUID. Adding a `PrincipalId` subtype to commerce-domain does not make it
+session-persistable. Runtime support must deliberately add the encoding and decoding
+mapping (`PrincipalIdColumns`, whose exhaustive `when` over the sealed `PrincipalId` stops
+compiling until it does) and a runtime migration that widens the `principal_kind` check
+constraint. This is intentional, so authentication identities fail closed rather than being
+serialized implicitly: there is no class-name, `toString`, or generic serialization, and no
+registry of principal kinds.
+
+**Session cleanup.** Expired and revoked rows stay in `commerce.principal_sessions`; they
+authenticate nothing. Purging old inactive rows would be a runtime capability (an operation
+over the `expires_at` index); when and how often to run it would be application or
+deployment policy. The runtime provides neither yet, and it will not schedule background
+jobs itself.
+
+Sessions may belong to any `PrincipalId`, human or service, and authorization treats them
+alike. That generality is deliberate, but this is not service authentication: service
+credentials (API keys and the like) are a separate, future capability that would meet
+sessions only at `PrincipalId`.
+
+`/health` and `/ready` stay explicitly public and never authenticate. Application routes are
+protected only where the application applies these filters: the runtime does not
+authenticate globally.
 
 ### Logging
 
@@ -611,11 +809,11 @@ transaction in which the application writes it.
 
 ## Current limitations
 
-- **No authentication or authorization over HTTP.** The staff principals, roles, and
-  permissions exist in `commerce-domain`. Wiring them into requests is a separate
-  iteration. Operations are plain classes with explicit inputs, so a principal can be
-  added to their commands and checked with `PrincipalId.can` without restructuring. Until
-  then, deploy applications built on the runtime only behind a trusted boundary.
+- **Sessions only, and no credentials.** The runtime issues, resolves, and revokes sessions
+  and enforces permissions on the routes an application protects. It verifies no
+  credentials, and has no login endpoints, service credentials (API keys), refresh tokens,
+  JWTs, sliding expiry, or CSRF protection. Expired and revoked session rows are kept;
+  there is no purge operation yet (see [Session cleanup](#sessions-and-authorization)).
 - No booking, financial document, payment, refund, or reconciliation orchestration or
   persistence yet. In particular, a JDBI implementation of the domain's
   `FinancialDocumentHistory` SPI is the natural next persistence step.
@@ -660,6 +858,22 @@ error handling and rollback, and closes it.
 
 `OfferingsSnapshotRepositorySpec` proves append-only round trips, revision constraints,
 price subtype reconstruction, ordering, and atomic commit and rollback of an offering
-snapshot with an application-owned row. Database specs run against a real PostgreSQL 18 that
-the build starts through the Docker CLI. See
-[Building and testing](../README.md#building-and-testing).
+snapshot with an application-owned row.
+
+The session specs cover the security contract. `SessionTokenSpec` proves tokens come from
+the supplied `SecureRandom`, are canonical 256-bit base64url values that identifiers can
+never satisfy, and are redacted from every text form; that the digest is SHA-256; and the
+active-session rule. `PrincipalSessionRepositorySpec` proves the table and indexes, `UserId`
+and `ServiceId` round trips (including a user and a service sharing a UUID), that PostgreSQL
+holds only the digest, digest uniqueness, persisted revocation, and commit and rollback
+with application rows in one caller transaction. `SessionManagerSpec` drives a clock decades
+away from the database clock through fixed expiry, idempotent revocation, `revokeAll`
+isolation, the transaction overloads, and token-free logs. `SessionAuthenticationSpec`
+covers missing, malformed, unknown, expired, and revoked tokens (`401`), permission granted
+and missing (`403`), permissions changing during a session, users and services alike,
+fail-closed handlers, and the cookie adapter. `CommerceRuntimeSpec` shows an application
+authenticating identity itself, issuing a session through `context.sessions`, and
+recovering the principal from the token over real HTTP.
+
+Database specs run against a real PostgreSQL 18 that the build starts through the Docker CLI.
+See [Building and testing](../README.md#building-and-testing).

@@ -3,13 +3,20 @@ package io.github.castab.commerce.runtime
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.runtime.session.BearerSessionToken
+import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.staff.CommercePermissions
+import io.github.castab.commerce.staff.PermissionResolver
+import io.github.castab.commerce.staff.UserId
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldNotContain
@@ -20,6 +27,7 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.then
 import org.http4k.core.with
 import org.http4k.lens.Path
 import org.http4k.lens.uuid
@@ -96,6 +104,75 @@ private fun testApplicationRoutes(context: CommerceRuntimeContext): RoutingHttpH
         },
     )
 
+/** A test application's login request: a username only, because identity proof is the application's concern. */
+@Serializable
+private data class LoginRequest(
+    val username: String,
+)
+
+@Serializable
+private data class LoginResponse(
+    val token: String,
+)
+
+@Serializable
+private data class PrincipalResponse(
+    val userId: String,
+)
+
+private val loginRequest = jsonBody(LoginRequest.serializer())
+private val loginResponse = jsonBody(LoginResponse.serializer())
+private val principalResponse = jsonBody(PrincipalResponse.serializer())
+
+/**
+ * The test application's own identities and grants. A real application verifies credentials
+ * (a password hash, OAuth, a passkey, ...) before it trusts a username; this fake step stands
+ * in for that, so the runtime never sees a credential.
+ */
+private object TestIdentities {
+    val reader = UserId(UUID.randomUUID())
+    val visitor = UserId(UUID.randomUUID())
+
+    fun authenticate(username: String): UserId? =
+        when (username) {
+            "reader" -> reader
+            "visitor" -> visitor
+            else -> null
+        }
+
+    val permissions = PermissionResolver { if (it == reader) setOf(CommercePermissions.BookingRead) else emptySet() }
+}
+
+/**
+ * Authentication routes of the test application, built on the runtime's sessions: the
+ * application proves identity, the runtime issues and resolves the session.
+ */
+private fun testAuthenticationRoutes(context: CommerceRuntimeContext): RoutingHttpHandler {
+    val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), TestIdentities.permissions)
+    val principal = { request: Request ->
+        val userId = authenticatedPrincipal(request) as UserId
+        Response(Status.OK).with(principalResponse of PrincipalResponse(userId.value.toString()))
+    }
+    return routes(
+        "/test-application/login" bind Method.POST to
+            access.public().then { request ->
+                val userId =
+                    TestIdentities.authenticate(loginRequest(request).username)
+                        ?: return@then Response(Status.UNAUTHORIZED)
+                val issued = context.sessions.create(userId)
+                // The application decides how the token reaches its client; here, a JSON body.
+                Response(Status.OK).with(loginResponse of LoginResponse(issued.token.value))
+            },
+        "/test-application/me" bind Method.GET to access.authenticated().then(principal),
+        "/test-application/bookings" bind Method.GET to access.requirePermission(CommercePermissions.BookingRead).then(principal),
+        "/test-application/logout" bind Method.POST to
+            access.authenticated().then { request ->
+                context.sessions.revoke(BearerSessionToken.extract(request)!!)
+                Response(Status.NO_CONTENT)
+            },
+    )
+}
+
 /**
  * The runtime as a concrete application composes it: explicit application contributions
  * (an application migration and application routes), then configuration, pool, the
@@ -125,7 +202,7 @@ class CommerceRuntimeSpec :
                     migrationLocations = listOf("classpath:db/testapp"),
                     routes = { suppliedContext ->
                         context = suppliedContext
-                        listOf(testApplicationRoutes(suppliedContext))
+                        listOf(testApplicationRoutes(suppliedContext), testAuthenticationRoutes(suppliedContext))
                     },
                 )
             runtime = commerceRuntime(configuration, application).start()
@@ -179,6 +256,57 @@ class CommerceRuntimeSpec :
             context.transactor.inTransaction { transaction ->
                 context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, snapshot.catalogId)
             } shouldBe snapshot
+        }
+
+        test("an application authenticates identity itself, then the runtime's session carries it over HTTP") {
+            val login =
+                http(
+                    Request(
+                        Method.POST,
+                        "/test-application/login",
+                    ).header("Content-Type", "application/json").body("""{"username":"reader"}"""),
+                )
+            login.status shouldBe Status.OK
+            val token = CommerceJson.asA(login.bodyString(), LoginResponse.serializer()).token
+
+            fun authenticated(
+                method: Method,
+                path: String,
+            ) = http(Request(method, path).header("Authorization", "Bearer $token"))
+
+            val me = authenticated(Method.GET, "/test-application/me")
+            me.status shouldBe Status.OK
+            CommerceJson.asA(me.bodyString(), PrincipalResponse.serializer()).userId shouldBe TestIdentities.reader.value.toString()
+            authenticated(Method.GET, "/test-application/bookings").status shouldBe Status.OK
+
+            authenticated(Method.POST, "/test-application/logout").status shouldBe Status.NO_CONTENT
+            authenticated(Method.GET, "/test-application/me").let {
+                it.status shouldBe Status.UNAUTHORIZED
+                it.error().code shouldBe "unauthenticated"
+            }
+        }
+
+        test("the application's identities, the runtime's sessions, and the application's permissions stay separate") {
+            http(
+                Request(
+                    Method.POST,
+                    "/test-application/login",
+                ).header("Content-Type", "application/json").body("""{"username":"nobody"}"""),
+            ).status shouldBe Status.UNAUTHORIZED
+
+            val visitor = context.sessions.create(TestIdentities.visitor)
+            http(Request(Method.GET, "/test-application/me").header("Authorization", "Bearer ${visitor.token.value}")).status shouldBe
+                Status.OK
+            http(Request(Method.GET, "/test-application/bookings").header("Authorization", "Bearer ${visitor.token.value}")).let {
+                it.status shouldBe Status.FORBIDDEN
+                it.error().code shouldBe "forbidden"
+            }
+            http(Request(Method.GET, "/test-application/bookings")).status shouldBe Status.UNAUTHORIZED
+        }
+
+        test("health and readiness stay public") {
+            http(Request(Method.GET, "/health")).status shouldBe Status.OK
+            http(Request(Method.GET, "/ready").header("Authorization", "Bearer not-a-token")).status shouldBe Status.OK
         }
 
         test("runtime error handling wraps application routes") {

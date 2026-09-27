@@ -12,4 +12,7 @@
 
   <!-- Unexpected failures are logged deliberately by some specs; they are expected noise. -->
   <logger name="io.github.castab.commerce.runtime.http" level="OFF" />
+
+  <!-- Session lifecycle events; SessionManagerSpec asserts they never contain a token. -->
+  <logger name="io.github.castab.commerce.runtime.session" level="INFO" />
 </configuration>

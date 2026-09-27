@@ -6,10 +6,12 @@ import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
+import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
+import io.github.castab.commerce.staff.CommercePermissions
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.bindContract
@@ -19,6 +21,7 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.then
 import org.http4k.core.with
 import org.http4k.lens.BiDiMapping
 import org.http4k.lens.Invalid
@@ -27,9 +30,37 @@ import org.http4k.lens.ParamMeta
 import org.http4k.lens.Path
 import org.http4k.lens.mapWithNewMeta
 
-enum class OfferingsHttpAccess { READ_ONLY, READ_WRITE }
+/**
+ * Which catalog routes a binding exposes, and how its write routes are authorized.
+ *
+ * The runtime declares the permission a write requires; the application supplies, through
+ * [ReadWrite.accessControl], the authentication filter and the `PermissionResolver` that
+ * evaluate it. A binding without writes needs neither.
+ */
+sealed interface OfferingsHttpAccess {
+    /**
+     * Only the read routes. Reads carry no permission requirement of their own: they are as
+     * public as the place the host mounts them.
+     */
+    data object ReadOnly : OfferingsHttpAccess
 
-/** Application-owned route placement for exactly one catalog. Access controls route exposure only. */
+    /**
+     * The read routes plus the write routes (initialize a catalog, append a category, append
+     * an offering). Every write requires an authenticated principal that currently holds
+     * [CommercePermissions.OfferingsManage], evaluated through [accessControl]: `401` without
+     * a principal, `403` without the permission.
+     */
+    class ReadWrite(
+        val accessControl: AccessControl,
+    ) : OfferingsHttpAccess {
+        override fun toString(): String = "ReadWrite"
+    }
+}
+
+/**
+ * Application-owned route placement for exactly one catalog. [access] decides which routes
+ * exist and, for writes, carries their authorization dependency.
+ */
 data class OfferingsHttpBinding(
     val catalogId: OfferingsCatalogId,
     val basePath: String,
@@ -200,14 +231,17 @@ fun offeringsHttpCapability(
             ),
         )
 
-    if (binding.access == OfferingsHttpAccess.READ_WRITE) {
+    val access = binding.access
+    if (access is OfferingsHttpAccess.ReadWrite) {
+        val manage = access.accessControl.requirePermission(CommercePermissions.OfferingsManage)
         routes +=
             base meta {
                 operationId = "${binding.operationIdPrefix}CreateCatalog"
                 summary = "Initialize an empty offerings catalog"
                 returning(Status.CREATED, catalogBody to initializedCatalog)
-                errors(Status.CONFLICT)
-            } bindContract Method.POST to { _: Request ->
+                errors(Status.UNAUTHORIZED, Status.FORBIDDEN, Status.CONFLICT)
+            } bindContract Method.POST to
+            manage.then { _: Request ->
                 Response(Status.CREATED).with(catalogBody of createCatalog(catalogId).dto())
             }
         routes +=
@@ -217,8 +251,16 @@ fun offeringsHttpCapability(
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
                 receiving(categoryRequest to sampleCategory)
                 returning(Status.CREATED, categoryBody to CategoryDto(2, sampleCategory))
-                errors(Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND, Status.CONFLICT)
-            } bindContract Method.POST to { request: Request ->
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.POST to
+            manage.then { request: Request ->
                 val category = categoryRequest(request).toDomain()
                 Response(Status.CREATED).with(categoryBody of addCategory(catalogId, category).categoryDto())
             }
@@ -229,8 +271,16 @@ fun offeringsHttpCapability(
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
                 receiving(offeringRequest to sampleOffering)
                 returning(Status.CREATED, offeringBody to OfferingResultDto(3, sampleOffering))
-                errors(Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND, Status.CONFLICT)
-            } bindContract Method.POST to { request: Request ->
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.POST to
+            manage.then { request: Request ->
                 val offering = offeringRequest(request).toDomain()
                 Response(Status.CREATED).with(offeringBody of addOffering(catalogId, offering).offeringDto())
             }

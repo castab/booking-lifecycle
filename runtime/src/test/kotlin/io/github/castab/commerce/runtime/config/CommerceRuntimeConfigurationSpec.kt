@@ -5,6 +5,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
+import java.time.Duration
 
 class CommerceRuntimeConfigurationSpec :
     FunSpec({
@@ -21,6 +22,7 @@ class CommerceRuntimeConfigurationSpec :
             // From the application's file (src/test/resources/application.conf).
             configuration.server.port shouldBe 8081
             configuration.database.maximumPoolSize shouldBe 6
+            configuration.sessions.lifetimeMinutes shouldBe 480
             // From the environment.
             configuration.database.jdbcUrl shouldBe "jdbc:postgresql://localhost:5432/commerce"
             configuration.database.username shouldBe "commerce"
@@ -58,6 +60,7 @@ class CommerceRuntimeConfigurationSpec :
                                 "DATABASE_CONNECTION_TIMEOUT_MS" to "750",
                                 "DATABASE_VALIDATION_TIMEOUT_MS" to "1500",
                                 "MIGRATIONS_ON_STARTUP" to "migrate",
+                                "SESSIONS_LIFETIME_MINUTES" to "30",
                             ),
                 )
 
@@ -67,6 +70,27 @@ class CommerceRuntimeConfigurationSpec :
             configuration.database.connectionTimeoutMs shouldBe 750
             configuration.database.validationTimeoutMs shouldBe 1500
             configuration.migrations.onStartup shouldBe CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE
+            configuration.sessions.lifetimeMinutes shouldBe 30
+            configuration.sessions.lifetime shouldBe Duration.ofMinutes(30)
+        }
+
+        test("sessions expire after 12 hours unless the application chooses otherwise") {
+            CommerceRuntimeConfiguration.Sessions().lifetime shouldBe Duration.ofHours(12)
+        }
+
+        test("the session lifetime must be between one minute and one year") {
+            shouldThrow<IllegalArgumentException> {
+                CommerceRuntimeConfiguration.load(environment = database + ("SESSIONS_LIFETIME_MINUTES" to "0"))
+            }.message shouldBe "SESSIONS_LIFETIME_MINUTES must be between 1 and 525600"
+            shouldThrow<IllegalArgumentException> {
+                CommerceRuntimeConfiguration.load(environment = database + ("SESSIONS_LIFETIME_MINUTES" to "525601"))
+            }.message shouldBe "SESSIONS_LIFETIME_MINUTES must be between 1 and 525600"
+            shouldThrow<IllegalArgumentException> {
+                CommerceRuntimeConfiguration.load(environment = database + ("SESSIONS_LIFETIME_MINUTES" to "12h"))
+            }.message shouldBe "SESSIONS_LIFETIME_MINUTES must be an integer"
+            CommerceRuntimeConfiguration
+                .load(environment = database + ("SESSIONS_LIFETIME_MINUTES" to "525600"))
+                .sessions.lifetime shouldBe Duration.ofDays(365)
         }
 
         test("unrelated environment variables are ignored") {

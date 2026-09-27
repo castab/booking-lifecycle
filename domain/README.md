@@ -1854,7 +1854,8 @@ authenticate caller → PrincipalId → resolve Principal → assigned RoleKey
 shared by humans and services. `CommerceRoles` (`Administrator`, `Manager`,
 `Supervisor`, `Employee`) provides conventional keys without built-in grants.
 `CommercePermissions` provides keys for booking read/modify, financial-document
-read/create, payment/refund recording, and user read/manage and role assignment.
+read/create, offerings catalog management, payment/refund recording, and user
+read/manage and role assignment.
 Applications define the actual role bundles and may add their own, for example:
 
 ```kotlin

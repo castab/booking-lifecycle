@@ -2,6 +2,7 @@ package io.github.castab.commerce.runtime.config
 
 import com.sksamuel.hoplite.ConfigLoaderBuilder
 import com.sksamuel.hoplite.PropertySource
+import java.time.Duration
 
 /**
  * The configuration the commerce runtime requires.
@@ -25,11 +26,13 @@ import com.sksamuel.hoplite.PropertySource
  * | `database.connectionTimeoutMs` | `DATABASE_CONNECTION_TIMEOUT_MS` |
  * | `database.validationTimeoutMs` | `DATABASE_VALIDATION_TIMEOUT_MS` |
  * | `migrations.onStartup` | `MIGRATIONS_ON_STARTUP` (`migrate` or `validate`) |
+ * | `sessions.lifetimeMinutes` | `SESSIONS_LIFETIME_MINUTES` |
  */
 data class CommerceRuntimeConfiguration(
     val server: Server = Server(),
     val database: Database,
     val migrations: Migrations = Migrations(),
+    val sessions: Sessions = Sessions(),
 ) {
     data class Server(
         val port: Int = 8080,
@@ -66,6 +69,25 @@ data class CommerceRuntimeConfiguration(
         enum class OnStartup { MIGRATE, VALIDATE }
     }
 
+    /**
+     * Authenticated principal sessions; see `SessionManager`.
+     *
+     * A session expires [lifetimeMinutes] after it is created, whatever happens in between:
+     * expiry is fixed, never sliding. The default is 12 hours. Applications choose the
+     * lifetime that suits their clients; it must be between one minute and one year.
+     */
+    data class Sessions(
+        val lifetimeMinutes: Long = 720,
+    ) {
+        /** [lifetimeMinutes] as a [Duration]. */
+        val lifetime: Duration get() = Duration.ofMinutes(lifetimeMinutes)
+
+        companion object {
+            /** The longest accepted lifetime: one year. Sessions are not long-lived credentials. */
+            const val MAXIMUM_LIFETIME_MINUTES: Long = 525_600
+        }
+    }
+
     /** Fails with [IllegalArgumentException], naming the environment variable, when a value is unusable. */
     fun validate() {
         require(server.port in 0..65535) { "PORT must be between 0 and 65535" }
@@ -79,6 +101,9 @@ data class CommerceRuntimeConfiguration(
         }
         require(database.connectionTimeoutMs > 0) { "DATABASE_CONNECTION_TIMEOUT_MS must be positive" }
         require(database.validationTimeoutMs > 0) { "DATABASE_VALIDATION_TIMEOUT_MS must be positive" }
+        require(sessions.lifetimeMinutes in 1..Sessions.MAXIMUM_LIFETIME_MINUTES) {
+            "SESSIONS_LIFETIME_MINUTES must be between 1 and ${Sessions.MAXIMUM_LIFETIME_MINUTES}"
+        }
     }
 
     companion object {
@@ -129,6 +154,7 @@ private fun CommerceRuntimeConfiguration.withEnvironmentOverrides(environment: E
                 validationTimeoutMs = environment.long("DATABASE_VALIDATION_TIMEOUT_MS", database.validationTimeoutMs),
             ),
         migrations = migrations.copy(onStartup = environment.onStartup("MIGRATIONS_ON_STARTUP", migrations.onStartup)),
+        sessions = sessions.copy(lifetimeMinutes = environment.long("SESSIONS_LIFETIME_MINUTES", sessions.lifetimeMinutes)),
     )
 
 private class Environment(
