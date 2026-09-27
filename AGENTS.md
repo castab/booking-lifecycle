@@ -332,7 +332,9 @@ its own credentials.
 - **HTTP.** `SessionTokenExtractor` (transport) is separate from `SessionManager`
   (resolution). `BearerSessionToken` and `SessionCookie` are adapters; cookies are not the
   session model. `sessionAuthentication` sets the `authenticatedPrincipal` request-context
-  lens, which only runtime authentication filters may write. `requirePermission` answers
+  lens, which only runtime authentication filters may write. `AccessControl` reuses a
+  principal an outer runtime authentication filter already established instead of
+  resolving the session again, and still evaluates permissions per request. `requirePermission` answers
   `401` without a principal and `403` without the permission; `AccessControl` declares each
   route `public()`, `authenticated()`, or `requirePermission(...)`. Keep all of it fail
   closed, and keep `/health` and `/ready` public.
@@ -989,7 +991,8 @@ catalog ID and base path. Its runtime-owned serializable DTOs translate domain v
 domain types stay serialization-free. The original http4k contract routes are the single
 source for execution and host OpenAPI metadata. The runtime does not own the host's
 aggregate OpenAPI document, Swagger UI, or route mount. `ReadOnly` exposes the
-reads only and needs no authorization dependency. `ReadWrite(accessControl)` adds the writes,
+reads only and needs no authorization dependency (`READ_ONLY` remains a deprecated alias;
+never add a `READ_WRITE` alias). `ReadWrite(accessControl)` adds the writes,
 each requiring `CommercePermissions.OfferingsManage` through the application's
 `AccessControl` (`401` without a principal, `403` without the permission). Reads keep no
 permission requirement; the host decides where to mount them.

@@ -5,6 +5,7 @@ import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.can
 import org.http4k.core.Filter
+import org.http4k.core.HttpHandler
 import org.http4k.core.NoOp
 import org.http4k.core.Request
 import org.http4k.core.then
@@ -83,7 +84,8 @@ fun requirePermission(
  * `sessionAuthentication(context.sessions, SessionCookie("app_session"))`; the
  * application's [permissionResolver] supplies current authority. Protection fails closed:
  * the protected declarations re-check the principal, so a lenient [authentication] still
- * cannot expose them.
+ * cannot expose them. When an outer runtime authentication filter already established
+ * the principal, [authentication] is not run again; the permission check always is.
  *
  * ```kotlin
  * val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), permissionResolver)
@@ -98,12 +100,28 @@ class AccessControl(
     private val authentication: Filter,
     private val permissionResolver: PermissionResolver,
 ) {
+    /**
+     * Runs [authentication] only when no runtime authentication filter has already
+     * established [authenticatedPrincipal] for this request, so a route protected here
+     * inside an application that already authenticates does not resolve the session twice.
+     * Authorization is never skipped: the permission is evaluated on every request.
+     */
+    private val authenticationIfNecessary =
+        Filter { next ->
+            val authenticateThenNext: HttpHandler = authentication.then(next)
+            val handler: HttpHandler = { request ->
+                if (request.authenticatedPrincipalOrNull() != null) next(request) else authenticateThenNext(request)
+            }
+            handler
+        }
+
     /** Explicitly public: no authentication and no permission. */
     fun public(): Filter = Filter.NoOp
 
     /** Any authenticated principal, without a particular permission. */
-    fun authenticated(): Filter = authentication.then(requireAuthenticatedPrincipal)
+    fun authenticated(): Filter = authenticationIfNecessary.then(requireAuthenticatedPrincipal)
 
     /** An authenticated principal that currently holds [permission]. */
-    fun requirePermission(permission: PermissionKey): Filter = authentication.then(requirePermission(permission, permissionResolver))
+    fun requirePermission(permission: PermissionKey): Filter =
+        authenticationIfNecessary.then(requirePermission(permission, permissionResolver))
 }

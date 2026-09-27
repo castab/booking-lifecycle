@@ -377,7 +377,10 @@ offerings tables in `V2__offerings_snapshots.sql`. The latter creates
 [sessions](#sessions-and-authorization): the session ID, the principal as a
 runtime-controlled kind (`USER` or `SERVICE`) plus its UUID, the unique SHA-256 token
 digest (never the token), and the creation, expiry, and revocation times, with indexes for
-revoking a principal's sessions and for finding expired ones. These are runtime-owned
+revoking a principal's sessions and for finding expired ones. Development databases that
+applied an unreleased draft of `V3` (with lowercase principal kinds) fail Flyway validation
+on its changed checksum and must be recreated; repairing the history alone would leave
+the draft's constraint in place. These are runtime-owned
 published structures; later changes follow the compatibility contract above.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
@@ -470,7 +473,8 @@ At the chosen base path, the capability offers:
 | GET | `/offerings/{offeringKey}` | Offering |
 
 `OfferingsHttpAccess.ReadOnly` omits the three POST routes entirely and needs no
-authorization dependency. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes them, and
+authorization dependency; the former `OfferingsHttpAccess.READ_ONLY` remains as a
+deprecated alias for it. There is deliberately no `READ_WRITE` alias. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes them, and
 every write requires an authenticated principal that currently holds
 `CommercePermissions.OfferingsManage` (`commerce.offerings.manage`): `401 unauthenticated`
 without a principal and `403 forbidden` without the permission, before the request body is
@@ -600,6 +604,13 @@ val listBookings: HttpHandler = { request ->
     // ...
 }
 ```
+
+`AccessControl` authenticates only when the request has no principal yet: when an outer
+`sessionAuthentication` already established `authenticatedPrincipal` (for example around a
+whole contract), its `authenticated()` and `requirePermission(...)` reuse that principal
+instead of resolving the session again, and still evaluate the permission on every
+request. Only runtime authentication filters can establish the principal, so no header or
+application flag can trigger this.
 
 Handlers never parse cookies, hash tokens, query sessions, check expiry, or re-check
 permissions. **A session establishes identity, not authority.** Permissions are never

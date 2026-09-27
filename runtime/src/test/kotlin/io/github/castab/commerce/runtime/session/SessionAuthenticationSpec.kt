@@ -244,6 +244,81 @@ class SessionAuthenticationSpec :
             }
         }
 
+        context("access control composition") {
+            // Counts real session resolutions and permission evaluations.
+            class Counting(
+                private val delegate: SessionManager,
+            ) : SessionManager by delegate {
+                var resolutions = 0
+
+                override fun resolve(token: SessionToken): PrincipalId? {
+                    resolutions++
+                    return delegate.resolve(token)
+                }
+            }
+
+            fun counted(): Triple<Counting, AccessControl, () -> Int> {
+                val counting = Counting(sessions)
+                var evaluations = 0
+                val resolver =
+                    PermissionResolver {
+                        evaluations++
+                        permissionResolver.permissionsFor(it)
+                    }
+                return Triple(counting, AccessControl(sessionAuthentication(counting, BearerSessionToken), resolver), { evaluations })
+            }
+
+            fun Request.bearer(token: String) = header("Authorization", "Bearer $token")
+
+            test("route-level: AccessControl authenticates once, then evaluates the permission") {
+                val (counting, access, evaluations) = counted()
+                val route = CommerceErrorHandling.then(access.requirePermission(CommercePermissions.BookingRead).then(echoPrincipal))
+                val principal = UserId(UUID.randomUUID())
+                grants[principal] = setOf(CommercePermissions.BookingRead)
+                val token = sessions.create(principal).token.value
+
+                route(Request(Method.GET, "/").bearer(token)).bodyString() shouldBe principal.text()
+                counting.resolutions shouldBe 1
+                evaluations() shouldBe 1
+
+                route(Request(Method.GET, "/")).shouldBeUnauthenticated()
+                grants[principal] = emptySet()
+                route(Request(Method.GET, "/").bearer(token)).shouldBeForbidden()
+            }
+
+            test("outer authentication: AccessControl reuses the established principal and resolves the session once") {
+                val (counting, access, evaluations) = counted()
+                val application =
+                    CommerceErrorHandling.then(
+                        sessionAuthentication(counting, BearerSessionToken).then(
+                            routes(
+                                "/bookings" bind Method.GET to
+                                    access.requirePermission(CommercePermissions.BookingRead).then(echoPrincipal),
+                                "/me" bind Method.GET to access.authenticated().then(echoPrincipal),
+                            ),
+                        ),
+                    )
+                val principal = ServiceId(UUID.randomUUID())
+                grants[principal] = setOf(CommercePermissions.BookingRead)
+                val token = sessions.create(principal).token.value
+
+                application(Request(Method.GET, "/bookings").bearer(token)).bodyString() shouldBe principal.text()
+                counting.resolutions shouldBe 1
+                evaluations() shouldBe 1
+                application(Request(Method.GET, "/me").bearer(token)).bodyString() shouldBe principal.text()
+                counting.resolutions shouldBe 2
+
+                // Permissions are evaluated per request against the existing principal, never cached.
+                grants[principal] = emptySet()
+                application(Request(Method.GET, "/bookings").bearer(token)).shouldBeForbidden()
+                counting.resolutions shouldBe 3
+                evaluations() shouldBe 2
+
+                application(Request(Method.GET, "/bookings")).shouldBeUnauthenticated()
+                counting.resolutions shouldBe 3
+            }
+        }
+
         context("session cookies") {
             test("a session cookie authenticates like any other transport") {
                 val principal = UserId(UUID.randomUUID())

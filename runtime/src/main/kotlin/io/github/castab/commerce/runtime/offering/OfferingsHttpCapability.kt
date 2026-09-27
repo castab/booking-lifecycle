@@ -55,6 +55,16 @@ sealed interface OfferingsHttpAccess {
     ) : OfferingsHttpAccess {
         override fun toString(): String = "ReadWrite"
     }
+
+    companion object {
+        /**
+         * Source compatibility for the former enum constant; read-only access is unchanged.
+         * There is deliberately no `READ_WRITE` counterpart: write routes cannot exist without
+         * an explicit [AccessControl].
+         */
+        @Deprecated(message = "Use ReadOnly", replaceWith = ReplaceWith("OfferingsHttpAccess.ReadOnly"))
+        val READ_ONLY: ReadOnly = ReadOnly
+    }
 }
 
 /**
