@@ -43,7 +43,8 @@ concrete commerce application    (the consuming project)
 ```
 
 1. **Domain.** `commerce-domain` holds independent, reusable commerce concepts, facts,
-   invariants, and protocols: the booking lifecycle topology, estimates, quotes, and
+   invariants, and protocols: revisioned offerings and an application policy seam,
+   the booking lifecycle topology, estimates, quotes, and
    invoices (line items, money, change orders), payments, allocations, refunds,
    reconciliation, the provider-neutral payment adapter contract, and principals, roles,
    and permissions. It defines no customer, booking record, inquiry, contact, or location,
@@ -51,8 +52,8 @@ concrete commerce application    (the consuming project)
 2. **Runtime.** `commerce-runtime` is the opinionated, reusable machinery from which a
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
-   and application contribution points, and later commerce repositories and routes for
-   domain facts. It owns no customer or other application data model. It is a
+   application contribution points, and append-only offerings snapshot persistence.
+   It owns no customer or other application data model. It is a
    library. It is not itself an application, and it provides no default application and
    no `main()`. It defines the configuration it requires but ships no `application.conf`,
    and it emits logs through the SLF4J API but selects no logging backend and ships no
@@ -82,6 +83,33 @@ Booking ────────────────┤
        ▼                 ▼                 ▼
 FinancialDocument   BookingLifecycle    Payments/etc.
 ```
+
+## Offerings to financial documents
+
+`OfferingsSnapshot` describes what may be selected. Candidate `OfferingSelections` plus
+application context go through an application-implemented `OfferingsEngine`. The domain
+checks category membership and min/max cardinality first; the application decides prices,
+bundles, availability, and any other business policy. An accepted `OfferingsEvaluation`
+records the exact snapshot reference, selections, and generic `LineItem`s. The application
+can pass those lines to `FinancialDocument.Estimate.create(...)`; the engine does not create
+the estimate.
+
+```text
+OfferingsSnapshot + OfferingSelections + application context
+                         ↓
+                  OfferingsEngine
+                         ↓
+               OfferingsEvaluation
+                         ↓
+               LineItem[] → Estimate
+```
+
+Dessert catering, taco catering, and mobile detailing are examples of different
+application catalogs and policy engines, not built-in catalog or pricing concepts. Runtime
+snapshot storage is append-only in the `commerce` schema and joins the caller's
+`Transaction`, including transactions that also write application data. See the
+[domain offerings API](domain/README.md#offerings) and
+[runtime persistence contract](runtime/README.md#offerings-snapshots).
 
 This is conceptual, not a required persistence design: each application chooses its own
 types, tables, and relationships.

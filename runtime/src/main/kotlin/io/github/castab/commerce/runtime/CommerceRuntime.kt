@@ -6,6 +6,8 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Mig
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.healthRoutes
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
+import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
+import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.persistence.isReachable
@@ -22,14 +24,13 @@ import org.jdbi.v3.core.Jdbi
 private val logger = KotlinLogging.logger {}
 
 /**
- * The shared runtime pieces an application may build on: the configuration and the
- * transaction boundary. Application repositories use the same [transactor] and
- * [io.github.castab.commerce.runtime.persistence.Transaction] the runtime uses.
+ * The shared runtime pieces an application may build on: configuration, the transaction
+ * boundary, and the commerce-owned [offeringsSnapshotRepository]. Application repositories
+ * use the same [transactor] and [io.github.castab.commerce.runtime.persistence.Transaction]
+ * the runtime uses.
  *
- * The runtime provides the transaction boundary required for future atomic application
- * plus commerce writes. It owns no commerce repository yet, so no such cross-boundary write
- * exists today; commerce repositories join the context only when the runtime gains real
- * persistence for commerce-domain facts. The runtime has no customer or other application
+ * The repository participates in caller-owned transactions, including transactions that
+ * also write application data. The runtime has no customer or other application
  * data model, so relationships between application entities and commerce facts stay in
  * application repositories.
  *
@@ -38,6 +39,7 @@ private val logger = KotlinLogging.logger {}
 class CommerceRuntimeContext internal constructor(
     val configuration: CommerceRuntimeConfiguration,
     val transactor: Transactor,
+    val offeringsSnapshotRepository: OfferingsSnapshotRepository,
 )
 
 /**
@@ -133,7 +135,7 @@ fun commerceRuntime(
 
         val jdbi = Jdbi.create(dataSource)
         val transactor = Transactor(jdbi)
-        val context = CommerceRuntimeContext(configuration, transactor)
+        val context = CommerceRuntimeContext(configuration, transactor, PostgresOfferingsSnapshotRepository())
 
         val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))
         val http = CommerceErrorHandling.then(routes(*(runtimeRoutes + application.routes(context)).toTypedArray()))

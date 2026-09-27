@@ -1,5 +1,7 @@
 package io.github.castab.commerce.runtime
 
+import io.github.castab.commerce.offering.OfferingsCatalogId
+import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
@@ -105,6 +107,7 @@ class CommerceRuntimeSpec :
         lateinit var database: TestDatabase
         lateinit var runtime: CommerceRuntime
         lateinit var http: HttpHandler
+        lateinit var context: CommerceRuntimeContext
 
         beforeSpec {
             database = TestDatabase.create()
@@ -120,7 +123,10 @@ class CommerceRuntimeSpec :
             val application =
                 ApplicationContributions(
                     migrationLocations = listOf("classpath:db/testapp"),
-                    routes = { context -> listOf(testApplicationRoutes(context)) },
+                    routes = { suppliedContext ->
+                        context = suppliedContext
+                        listOf(testApplicationRoutes(suppliedContext))
+                    },
                 )
             runtime = commerceRuntime(configuration, application).start()
             val client = JavaHttpClient()
@@ -165,6 +171,16 @@ class CommerceRuntimeSpec :
             read.record() shouldBe record
         }
 
+        test("application contributions receive the commerce offerings repository in their runtime context") {
+            val snapshot = OfferingsSnapshot.create(OfferingsCatalogId(UUID.randomUUID()))
+            context.transactor.inTransaction { transaction ->
+                context.offeringsSnapshotRepository.insert(transaction, snapshot)
+            }
+            context.transactor.inTransaction { transaction ->
+                context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, snapshot.catalogId)
+            } shouldBe snapshot
+        }
+
         test("runtime error handling wraps application routes") {
             createRecord("""{"value":"  "}""").let {
                 it.status shouldBe Status.UNPROCESSABLE_ENTITY
@@ -200,6 +216,7 @@ class CommerceRuntimeSpec :
             http(Request(Method.POST, "/customers").body("""{"name":"Ada","email":"ada@example.com"}""")).error().code shouldBe
                 "not_found"
             http(Request(Method.GET, "/customers/${UUID.randomUUID()}")).error().code shouldBe "not_found"
+            http(Request(Method.GET, "/offerings")).error().code shouldBe "not_found"
             http(Request(Method.GET, "/no-such-route")).error().code shouldBe "not_found"
         }
     })

@@ -21,13 +21,14 @@ io.github.castab:commerce-domain:<version>
 ```
 
 It contains independent, reusable commerce concepts: the booking lifecycle protocol,
-financial documents, payment reconciliation, a payment adapter contract, and principal
+financial documents, offerings, payment reconciliation, a payment adapter contract, and principal
 authorization:
 
 | Domain | Package | What it provides |
 |---|---|---|
 | [Booking lifecycle](#booking-lifecycle) | `io.github.castab.commerce.booking.lifecycle` | A type-level protocol for the phases of a booking (`InitialRequest → Quote → Booked → Completed`, or `Cancelled`). Your application's own types implement the phases. |
 | [Financial documents](#financial-documents) | `io.github.castab.commerce.financial` | Immutable, versioned commercial documents (`Estimate → Quote → Invoice`) with line items, change orders, derived totals, and persistence-agnostic history lookup. |
+| [Offerings](#offerings) | `io.github.castab.commerce.offering` | Immutable, revisioned catalogs, generic selection constraints, descriptive price metadata, and an application policy evaluation seam producing financial line items. |
 | [Payment reconciliation](#payment-reconciliation) | `io.github.castab.commerce.payment` | Immutable payment records, payment allocations, allocation reversals, refund records, and refund allocations, with derived payment and document reconciliation. |
 | [Principal authorization](#principal-authorization) | `io.github.castab.commerce.staff` | Human and service identities, extensible roles and permissions, resolver ports, and additive role-based authorization. |
 | [Payment adapter contract](#payment-adapter-contract) | `io.github.castab.commerce.payment.adapter` | Provider-neutral payment and refund instructions, observations, capability descriptions, and event decisions. |
@@ -54,6 +55,7 @@ is `kotlin-stdlib`.
 - [Booking lifecycle](#booking-lifecycle)
 - [Application-owned entities and relationships](#application-owned-entities-and-relationships)
 - [Financial documents](#financial-documents)
+- [Offerings](#offerings)
 - [Payment reconciliation](#payment-reconciliation)
 - [Principal authorization](#principal-authorization)
 - [Payment adapter contract](#payment-adapter-contract)
@@ -791,6 +793,61 @@ reference, context, or metadata field on its types to hold such relationships. (
 not concern the library's own document references, `FinancialDocumentReference` and
 `previousReference`, which identify financial-document snapshots.) Business-specific data stays
 strongly typed in the application.
+
+## Offerings
+
+`io.github.castab.commerce.offering` describes selectable commercial choices without
+defining a particular business's catalog or price policy. An `Offering` has a stable
+`OfferingKey`, one `OfferingCategoryKey`, presentation text, and an optional
+`OfferingPrice`. An `OfferingCategory` has a stable key and min/max selection counts:
+`0..1` is optional single selection, `1..1` required single selection, and a null maximum
+is unbounded. The category and offering order supplied to a snapshot is preserved.
+
+Prices are descriptive metadata: `OfferingPrice.Fixed(Money)`,
+`PerQuantity(Money, QuantityDimension)`, and `PerDuration(Money, Duration)`. A quantity
+dimension is an application-named machine value such as `guest`, `vehicle`, or `item`;
+the common library assigns it no business meaning. A price may be absent when a choice
+has no independent charge. Complex pricing, availability, dependencies, and bundles stay
+in the application's engine, with no generic rule language or metadata map.
+
+`OfferingsSnapshot.create(catalogId, categories, offerings)` starts an immutable catalog
+at revision 1. `revise(...)` returns its successor, retaining the catalog ID and recording
+the immediate prior revision. `restore(...)` reconstructs a stored revision. Each
+`OfferingsSnapshotReference(catalogId, revision)` identifies exactly one snapshot.
+Construction rejects duplicate keys, offerings with missing categories, and invalid
+revision lineage. Empty catalogs are allowed. Lookups by key and by category are
+conveniences on the in-memory snapshot; they do not access persistence.
+
+Candidate `OfferingSelections` contain ordered `OfferingCategorySelection` blocks. They
+may be built before a snapshot is known. `OfferingsEngine<C>.evaluate(...)` checks selected
+categories and offerings, category membership, cardinalities, and duplicates before
+calling the application's `evaluateValid(...)`. Problems are typed
+`StructuralOfferingsViolation`s in deterministic order. Applications implement the open
+`OfferingsViolation` interface for their own rejection codes and return either
+`OfferingsPolicyResult.Accepted(lineItems)` or `Rejected(violations)`.
+
+An accepted `OfferingsEvaluation` binds the exact snapshot reference and submitted
+selections to one or more `LineItem`s. Its lines are directly usable in
+`FinancialDocument.Estimate.create(id, evaluation.lineItems)`. The engine does not create
+or persist a financial document: an offering describes what may be selected, while a
+financial document records the resulting commercial fact.
+
+```text
+OfferingsSnapshot + OfferingSelections + application context
+                         ↓
+            application OfferingsEngine
+                         ↓
+              OfferingsEvaluation
+                         ↓
+               LineItem[] → Estimate
+```
+
+For example, dessert catering can define flavors and cones, taco catering can define
+fillings and add-ons, and mobile detailing can define services and add-ons. Those
+categories, their prices, and any rule such as “four included, then charge per selected
+item and guest” are application data and policy. Adding a coffee category or cup sizes
+means changing a stored snapshot and the application's policy where needed, without
+adding a common-domain field.
 
 ## Financial documents
 

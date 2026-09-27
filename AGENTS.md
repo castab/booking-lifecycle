@@ -182,12 +182,11 @@ transaction abstraction; application repositories may use the same `Transactor` 
 `Transaction`. Relationships between application entities and commerce-domain facts are
 application-owned.
 
-The runtime currently owns no commerce repository or table. It provides the transaction
-boundary required for future atomic application plus commerce writes; cross-boundary
-atomicity will be exercised once the runtime owns its first real commerce repository. Do
-not create a placeholder commerce table or fake repository to demonstrate it earlier, and
-do not describe the current tests as proving it. The runtime migration stream is a single
-baseline (`V1__commerce_baseline.sql`) that creates no table.
+The runtime's first commerce-owned repository persists immutable offerings snapshots in
+the `commerce` schema. It uses the caller's `Transaction`; integration tests prove that
+offering snapshots and application-owned rows commit or roll back together. The runtime
+migration stream has the empty `V1__commerce_baseline.sql` and the offerings `V2` migration.
+Do not create placeholder commerce tables or fake repositories.
 
 ## Runtime opinionation
 
@@ -218,8 +217,7 @@ frameworks. The runtime rules are:
 ## Provisional application-extension seam
 
 `ApplicationContributions` (Flyway locations and routes) and `CommerceRuntimeContext` (the
-configuration and `Transactor` handed to contributed routes; commerce repositories join it
-only when the runtime gains real persistence for commerce facts, never placeholders) are
+configuration, `Transactor`, and offerings snapshot repository handed to contributed routes) are
 the **provisional** application-extension seam. They let a concrete application run on
 the shared runtime today, and they are expected to change once the booking extension and
 the other capabilities are designed from real consumer requirements. Whether the seam
@@ -310,6 +308,7 @@ beneath `io.github.castab.commerce`:
 |---|---|---|
 | Booking lifecycle | `io.github.castab.commerce.booking.lifecycle` | A type-level protocol. Adopters' own types implement the phases. The library owns no booking data. |
 | Financial documents | `io.github.castab.commerce.financial` | Concrete, library-owned immutable value types (`Estimate`, `Quote`, `Invoice`) whose invariants the library enforces. |
+| Offerings | `io.github.castab.commerce.offering` | Immutable catalog snapshots, selection constraints, descriptive price metadata, and an application policy evaluation seam. |
 | Payment reconciliation | `io.github.castab.commerce.payment` | Concrete, library-owned immutable records (payments, allocations, allocation reversals, refunds, refund allocations) and reconciliation derived from records the application supplies. |
 | Principal authorization | `io.github.castab.commerce.staff` | Human and service identities, distinct UUID-backed principal IDs, extensible roles and permissions, and additive role-based permission resolution. |
 | Payment adapter contract | `io.github.castab.commerce.payment.adapter` | Provider-neutral instructions, observations, capabilities, event receipts, and pure decisions at the external-provider boundary. |
@@ -317,6 +316,7 @@ beneath `io.github.castab.commerce`:
 The styles are deliberate and not interchangeable. Read the rules for the domain you
 are changing: [Booking lifecycle domain](#booking-lifecycle-domain),
 [Financial document domain](#financial-document-domain),
+[Offerings domain](#offerings-domain),
 [Payment reconciliation domain](#payment-reconciliation-domain) (including the adapter
 contract), and
 [Principal authorization domain](#principal-authorization-domain). The build, dependency,
@@ -327,6 +327,7 @@ Dependencies between domains are fixed:
 ```text
 booking.lifecycle     independent; imports nothing from the other domains, and nothing imports it
 financial             independent; imports nothing from the other domains
+offering ────────────→ financial   (Money and LineItem only)
 payment ────────────→ financial   (FinancialDocument, FinancialDocumentReference, Money)
 payment.adapter ────→ payment, financial   (Money)
 staff                 independent of the other domains
@@ -338,6 +339,8 @@ staff                 independent of the other domains
 - The payment domain references financial documents, one way only. `financial` must never
   import `payment`: a document does not own, hold, or know about its settlement. The
   payment domain never imports the booking lifecycle.
+- Offerings use `Money` as descriptive price metadata and an application engine produces
+  `LineItem`s. Offerings never own or create a `FinancialDocument`.
 - No domain package references a customer, booking record, inquiry, contact, or
   location. There is no `customer` package and no generic `booking` record package; only
   `booking.lifecycle` exists.
@@ -362,11 +365,13 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `domain/src/main/kotlin/io/github/castab/commerce/payment/` | The payment reconciliation API: `PaymentMethod.kt`, `ExternalPaymentReference.kt`, `ExternalRefundReference.kt`, `PaymentRecord.kt`, `PaymentAllocation.kt`, `PaymentAllocationReversal.kt`, `RefundRecord.kt`, `RefundAllocation.kt`, `PaymentReconciliation.kt` (payment-level reconciliation and the shared validation helpers), and `FinancialDocumentReconciliation.kt`. |
 | `domain/src/main/kotlin/io/github/castab/commerce/payment/adapter/` | The transport-neutral payment adapter contract and pure validation of provider observations. |
 | `domain/src/main/kotlin/io/github/castab/commerce/financial/` | The financial document API: `FinancialDocument.kt` (the sealed class, its three stages, and change application), `Version.kt`, `Money.kt`, `LineItem.kt`, `ChangeOrder.kt`, `FinancialDocumentReference.kt`, and `FinancialDocumentHistory.kt` (the history SPI and its lookup extensions). |
+| `domain/src/main/kotlin/io/github/castab/commerce/offering/` | The offerings vocabulary, immutable catalog snapshots and revisions, candidate selections, structural validation, and application engine seam. |
 | `domain/src/main/kotlin/io/github/castab/commerce/staff/` | Human and service principal identity and authorization: `Principal.kt`, `User.kt`, `ServiceIdentity.kt`, and `Authorization.kt`. |
 | `domain/src/test/kotlin/io/github/castab/commerce/booking/lifecycle/BookingLifecycleSpec.kt` | Kotest `FunSpec` for the booking lifecycle contract. |
 | `domain/src/test/kotlin/io/github/castab/commerce/booking/lifecycle/fixtures/TestBookingModels.kt` | Test-only "application-owned" booking models. |
 | `domain/src/test/kotlin/io/github/castab/commerce/financial/*Spec.kt` | Kotest specs for the financial domain: `FinancialDocumentSpec`, `ChangeOrderSpec`, `FinancialDocumentHistorySpec`, `LineItemSpec`, `MoneySpec`, `VersionSpec`. |
 | `domain/src/test/kotlin/io/github/castab/commerce/financial/fixtures/TestFinancialModels.kt` | Test-only money and line item helpers and an in-memory `FinancialDocumentHistory`. |
+| `domain/src/test/kotlin/io/github/castab/commerce/offering/OfferingsSpec.kt` | Catalog, selection, and application-engine portability tests. |
 | `domain/src/test/kotlin/io/github/castab/commerce/payment/*Spec.kt` | Kotest specs for the payment domain: `PaymentRecordSpec`, `PaymentAllocationSpec`, `PaymentAllocationReversalSpec`, `RefundRecordSpec`, `RefundAllocationSpec`, `PaymentReconciliationSpec`, `FinancialDocumentReconciliationSpec`, and `PaymentDomainSpec` (the end-to-end history and the reflection shape tests). |
 | `domain/src/test/kotlin/io/github/castab/commerce/payment/fixtures/TestPaymentModels.kt` | Test-only payment, document, and numeric-comparison helpers. |
 | `domain/src/test/kotlin/io/github/castab/commerce/payment/adapter/PaymentAdapterContractSpec.kt` | Kotest coverage for the provider-neutral adapter contract and processing decisions. |
@@ -374,11 +379,12 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/build.gradle.kts` | The `commerce-runtime` publication (a `java-library`; no `application` plugin), its runtime stack, and the Docker-CLI PostgreSQL build service for tests. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, PostgreSQL error helpers. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes. |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (currently only the `V1__commerce_baseline.sql` baseline; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline and `V2` offerings tables; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, revision rejection, and cross-schema atomicity. |
 | `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
@@ -873,6 +879,48 @@ for `PrincipalStatus` for source compatibility.
   service performed the action. Existing commerce records do not gain actor fields as
   part of this domain.
 
+# Offerings domain
+
+`io.github.castab.commerce.offering` is a reusable vocabulary for commercial choices.
+An `Offering` is an available item, service, or choice in exactly one `OfferingCategory`.
+The category groups offerings and expresses only generic selection cardinality through a
+minimum and optional maximum. Machine keys are distinct from presentation text.
+
+`OfferingsSnapshot` is an immutable, ordered catalog revision. It has a stable
+`OfferingsCatalogId`, an independent `OfferingsRevision`, and an immediate predecessor
+reference. `OfferingsSnapshotReference` identifies exactly one revision. Snapshots enforce
+unique category and offering keys, valid category references, and revision sequence.
+Empty catalogs are permitted. An application may change its catalog by storing a new
+snapshot; prior revisions remain historical facts.
+
+`OfferingPrice` has only `Fixed`, `PerQuantity` with an application-named
+`QuantityDimension`, and `PerDuration` with a positive `Duration`. It is descriptive
+price metadata, not a pricing rules system. Do not add business-specific rates such as
+`PER_GUEST`, metadata maps, or a general expression/rule DSL. A new common pricing
+primitive needs evidence from more than one concrete business. A direct price may be
+absent.
+
+`OfferingSelections` are ordered candidate choices. `OfferingsEngine<C>` first checks
+snapshot-dependent structural validity (known categories and offerings, category
+membership, min/max cardinality, duplicate blocks and offerings). Only then does it call
+the application's policy implementation. The open `OfferingsViolation` interface permits
+application-defined rejection codes. Applications own contexts, pricing calculations,
+bundles, dependencies, and availability policy.
+
+An accepted `OfferingsEvaluation` records the exact snapshot reference, submitted
+selections, and one or more generic financial `LineItem`s. The application may give these
+lines directly to `FinancialDocument.Estimate.create`. The engine does not create or
+persist that estimate. Offerings describe what may be selected; financial documents
+record the resulting commercial fact. Neither concept owns the other.
+
+Runtime persistence is append-only in the `commerce` schema. The
+`OfferingsSnapshotRepository` takes the caller's `Transaction` first and uses
+`transaction.handle` for inserts and reads. The `CommerceRuntimeContext` exposes it.
+It never starts a transaction, creates a separate pool, or provides HTTP endpoints or a
+generic business engine. Category and offering order and each price subtype round trip
+through explicit relational columns. Cross-schema transaction tests cover commits and
+rollbacks with application-owned rows.
+
 # Repository-wide rules
 
 These sections apply to every domain and to the build.
@@ -1181,26 +1229,21 @@ dependency just to support CI or publishing.
   [Migration contract](#migration-contract) against PostgreSQL: internal runtime
   discovery, runtime-before-application ordering proven by a real dependency, independent
   version spaces, idempotent and concurrent migration, validation, and startup gating on
-  runtime and application failures. Never replace them with Flyway mocks. Because the
-  runtime owns no table an application could reference, the dependency tests run a
-  test-only stand-in runtime stream (`src/test/resources/db/testruntime`, selected through
-  `RuntimeMigrations`' internal `location` parameter). It is never published and is not a
-  placeholder commerce table; applications can never select a runtime location.
+  runtime and application failures. Never replace them with Flyway mocks. The dependency
+  tests retain a test-only stand-in runtime stream (`src/test/resources/db/testruntime`,
+  selected through `RuntimeMigrations`' internal `location` parameter). It is never
+  published; applications can never select a runtime location.
 - The tests are the runtime's only executable consumer in this repository.
   `CommerceRuntimeSpec` composes the runtime the way a concrete application does: explicit
   `ApplicationContributions`, `commerceRuntime(...)`, `start()`, real HTTP and
   PostgreSQL, then `close()`. Keep the transaction coverage: contributed routes receive
   `CommerceRuntimeContext`, use `context.transactor`, and persist a contributed migration's
   table; several application-owned writes sharing one `Transaction` commit and roll back
-  together; an application route's failure rolls back its writes. These tests prove the
-  shared transaction boundary, not atomicity across application and commerce persistence.
-  Do not add a fake commerce capability just to give runtime tests something
-  domain-specific to exercise.
-- **Future test requirement.** When the first legitimate commerce repository is added (a
-  likely candidate is financial-document persistence or history, but no API is decided),
-  add an integration test that (1) writes an application-owned row, (2) writes a
-  commerce-owned row, (3) fails intentionally before commit, and (4) verifies both writes
-  rolled back.
+  together; an application route's failure rolls back its writes.
+- `OfferingsSnapshotRepositorySpec` covers the first real commerce repository against
+  PostgreSQL, including price and order round trips, duplicate and predecessor rejection,
+  and a single transaction spanning an application row and commerce snapshot. It proves
+  both commit and rollback from a later transaction.
 
 Run:
 
