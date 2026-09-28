@@ -21,6 +21,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import org.jdbi.v3.core.Jdbi
+import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.math.BigDecimal
 import java.time.Instant
 import java.util.Currency
@@ -49,7 +50,7 @@ class FinancialLedgerSpec :
         lateinit var dataSource: com.zaxxer.hikari.HikariDataSource
         lateinit var transactor: Transactor
         val documents = PostgresFinancialDocumentRepository()
-        val payments = PostgresPaymentRepository()
+        val payments = PostgresPaymentRepository(documents)
         lateinit var ledger: FinancialLedger
 
         beforeSpec {
@@ -235,6 +236,138 @@ class FinancialLedgerSpec :
                 transactor.inTransaction { payments.allocationsForPayment(it, payment.id) }.size shouldBe 1
             } finally {
                 executor.shutdownNow()
+            }
+        }
+
+        test("a quote transition and application write commit or roll back together") {
+            val estimate = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
+            val rolledBackRow = UUID.randomUUID()
+            shouldThrow<IllegalStateException> {
+                transactor.inTransaction { transaction ->
+                    val quote = ledger.issueQuote(transaction, estimate.id)
+                    ledger.get(transaction, quote.reference) shouldBe quote
+                    ledger.latest(transaction, estimate.id) shouldBe quote
+                    ledger.history(transaction, estimate.id).shouldContainExactly(estimate, quote)
+                    transaction.handle
+                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .bind("id", rolledBackRow)
+                        .bind("value", "quote issued")
+                        .execute()
+                    error("abort")
+                }
+            }
+            ledger.latest(estimate.id) shouldBe estimate
+            transactor.inTransaction { transaction ->
+                transaction.handle
+                    .createQuery("SELECT count(*) FROM public.test_application_records WHERE id = :id")
+                    .bind("id", rolledBackRow)
+                    .mapTo(Int::class.java)
+                    .one()
+            } shouldBe 0
+
+            val committedRow = UUID.randomUUID()
+            val quote =
+                transactor.inTransaction { transaction ->
+                    ledger.issueQuote(transaction, estimate.id).also {
+                        transaction.handle
+                            .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                            .bind("id", committedRow)
+                            .bind("value", "quote issued")
+                            .execute()
+                    }
+                }
+            ledger.latest(estimate.id) shouldBe quote
+            transactor.inTransaction { transaction ->
+                transaction.handle
+                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .bind("id", committedRow)
+                    .mapTo(String::class.java)
+                    .one()
+            } shouldBe "quote issued"
+        }
+
+        test("a payment, allocation, and application receipt commit or roll back together") {
+            val document = ledger.create(FinancialDocument.Invoice.create(UUID.randomUUID(), listOf(line())))
+            val rolledBackPayment = PaymentRecord(UUID.randomUUID(), money("20.00"), PaymentMethod.CARD, Instant.EPOCH)
+            val rolledBackAllocation = UUID.randomUUID()
+            val rolledBackRow = UUID.randomUUID()
+            shouldThrow<IllegalStateException> {
+                transactor.inTransaction { transaction ->
+                    ledger.recordPaymentAgainstDocument(
+                        transaction,
+                        rolledBackPayment,
+                        rolledBackAllocation,
+                        document.reference,
+                        money("20.00"),
+                        Instant.EPOCH,
+                    )
+                    transaction.handle
+                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .bind("id", rolledBackRow)
+                        .bind("value", "provider receipt")
+                        .execute()
+                    error("abort")
+                }
+            }
+            transactor.inTransaction { transaction ->
+                payments.retrievePayment(transaction, rolledBackPayment.id) shouldBe null
+                payments.retrieveAllocation(transaction, rolledBackAllocation) shouldBe null
+                transaction.handle
+                    .createQuery("SELECT count(*) FROM public.test_application_records WHERE id = :id")
+                    .bind("id", rolledBackRow)
+                    .mapTo(Int::class.java)
+                    .one() shouldBe 0
+            }
+
+            val committedPayment = PaymentRecord(UUID.randomUUID(), money("30.00"), PaymentMethod.CARD, Instant.EPOCH)
+            val committedRow = UUID.randomUUID()
+            val allocation =
+                transactor.inTransaction { transaction ->
+                    ledger
+                        .recordPaymentAgainstDocument(
+                            transaction,
+                            committedPayment,
+                            UUID.randomUUID(),
+                            document.reference,
+                            money("30.00"),
+                            Instant.EPOCH,
+                        ).also {
+                            transaction.handle
+                                .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                                .bind("id", committedRow)
+                                .bind("value", "provider receipt")
+                                .execute()
+                        }
+                }
+            transactor.inTransaction { transaction ->
+                payments.retrievePayment(transaction, committedPayment.id) shouldBe committedPayment
+                payments.retrieveAllocation(transaction, allocation.id) shouldBe allocation
+                ledger.reconcileLatest(transaction, document.id).netApplied shouldBe money("30.00")
+                ledger.reconcile(transaction, document.reference).netApplied shouldBe money("30.00")
+                transaction.handle
+                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .bind("id", committedRow)
+                    .mapTo(String::class.java)
+                    .one() shouldBe "provider receipt"
+            }
+        }
+
+        test("the database rejects an unsupported payment method") {
+            shouldThrow<UnableToExecuteStatementException> {
+                transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createUpdate(
+                            """INSERT INTO commerce.payment_records
+                               (payment_id, amount, currency, method, received_at_seconds, received_at_nanos)
+                               VALUES (:id, :amount, :currency, :method, :seconds, :nanos)""",
+                        ).bind("id", UUID.randomUUID())
+                        .bind("amount", BigDecimal("1.00"))
+                        .bind("currency", "USD")
+                        .bind("method", "UNSUPPORTED")
+                        .bind("seconds", 0L)
+                        .bind("nanos", 0)
+                        .execute()
+                }
             }
         }
 

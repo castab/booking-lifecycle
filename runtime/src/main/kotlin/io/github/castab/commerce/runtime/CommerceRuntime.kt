@@ -174,7 +174,7 @@ fun commerceRuntime(
             )
         val authorization = AuthorizationDirectory(transactor, authorizationRepository, sessions, permissionCatalog)
         val financialDocuments = PostgresFinancialDocumentRepository()
-        val payments = PostgresPaymentRepository()
+        val payments = PostgresPaymentRepository(financialDocuments)
         val context =
             CommerceRuntimeContext(
                 configuration,

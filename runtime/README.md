@@ -396,6 +396,9 @@ items, payment records, and allocations. The snapshot key is `(document_id, vers
 the predecessor reference and unique `(document_id, previous_version)` reject gaps and
 competing successors. Allocations have foreign keys to their payment and the exact
 document snapshot. `(external_provider, external_reference)` is unique for payments.
+The payment method check allows exactly `CASH`, `CHECK`, `CARD`, `BANK_TRANSFER`,
+`DIGITAL_WALLET`, and `OTHER`, matching `PaymentMethod`; adding a method requires a
+migration that widens the check constraint.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
@@ -530,6 +533,10 @@ commands. Released `V2__offerings_snapshots.sql` remains unchanged.
 
 `CommerceRuntimeContext` supplies `financialDocumentRepository`, `paymentRepository`, and
 `financialLedger`. Repositories take the caller's `Transaction` and do not commit it.
+Every ledger operation also has a `Transaction` overload for application-owned writes
+that must commit or roll back with it. Convenience overloads open a transaction and
+delegate; a caller already inside `Transactor.inTransaction` passes its transaction to
+the ledger operation.
 `FinancialDocumentRepository.asHistory(transaction)` implements the domain
 `FinancialDocumentHistory` SPI for reads within that transaction. It also exposes exact,
 latest, and ordered history reads. The ledger provides `create`, `get`, `latest`,
@@ -1002,9 +1009,10 @@ transaction in which the application writes it.
   credentials, and has no login endpoints, service credentials (API keys), refresh tokens,
   JWTs, sliding expiry, or CSRF protection. Expired and revoked session rows are kept;
   there is no purge operation yet (see [Session cleanup](#sessions-and-authorization)).
-- No booking, financial document, payment, refund, or reconciliation orchestration or
-  persistence yet. In particular, a JDBI implementation of the domain's
-  `FinancialDocumentHistory` SPI is the natural next persistence step.
+- No booking persistence or orchestration yet. Financial-document snapshots, payment
+  records, and payment allocations are persisted and orchestrated by the ledger;
+  financial-document reconciliation is derived from those facts.
+- Refund and payment-allocation-reversal persistence and orchestration are deferred.
 - No idempotency keys, outbox or events, Server-Sent Events, or scheduled jobs yet.
 - No payment provider integration. Providers (e.g. a future `stripe-adapter`) sit
   behind the provider-neutral contract in `commerce-domain`. This module will never

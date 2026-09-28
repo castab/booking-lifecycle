@@ -54,9 +54,9 @@ interface PaymentRepository {
     ): List<PaymentAllocation>
 }
 
-internal class PostgresPaymentRepository : PaymentRepository {
-    private val documents = PostgresFinancialDocumentRepository()
-
+internal class PostgresPaymentRepository(
+    private val documents: FinancialDocumentRepository,
+) : PaymentRepository {
     override fun insertPayment(
         transaction: Transaction,
         payment: PaymentRecord,

@@ -34,7 +34,7 @@ CREATE TABLE commerce.payment_records (
     payment_id uuid PRIMARY KEY,
     amount numeric NOT NULL CHECK (amount > 0),
     currency char(3) NOT NULL,
-    method text NOT NULL,
+    method text NOT NULL CHECK (method IN ('CASH', 'CHECK', 'CARD', 'BANK_TRANSFER', 'DIGITAL_WALLET', 'OTHER')),
     received_at_seconds bigint NOT NULL,
     received_at_nanos integer NOT NULL CHECK (received_at_nanos BETWEEN 0 AND 999999999),
     external_provider text,
