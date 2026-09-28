@@ -22,7 +22,7 @@ value class PermissionKey(
     }
 }
 
-/** A named, application-supplied bundle of permissions. Permissions are copied on creation. */
+/** A named bundle of permissions, supplied or persisted by the application or runtime. Permissions are copied on creation. */
 class RoleDefinition(
     val key: RoleKey,
     val displayName: String,
@@ -55,7 +55,18 @@ class RoleDefinition(
         "RoleDefinition(key=$key, displayName=$displayName, description=$description, permissions=$permissions)"
 }
 
-/** Resolves the current commerce user after the application has authenticated a [UserId]. */
+/** Human-readable metadata for a permission implemented by runtime or application code. */
+data class PermissionDefinition(
+    val key: PermissionKey,
+    val displayName: String,
+    val description: String?,
+) {
+    init {
+        require(displayName.isNotBlank()) { "Permission display name must not be blank" }
+    }
+}
+
+/** Resolves the current commerce user after authentication established a [UserId]. */
 fun interface UserResolver {
     fun resolve(userId: UserId): User?
 }
@@ -79,7 +90,7 @@ fun interface PermissionResolver {
  * Additive, default-deny role resolution for humans and services. Missing or disabled
  * principals, mismatched identities, and missing or mismatched role definitions grant
  * nothing. An unresolved role is skipped; other resolved roles may still grant
- * permissions. Resolvers are supplied by the consuming application.
+ * permissions. Resolvers may be supplied by a consuming application or its runtime.
  */
 class RoleBasedPermissionResolver(
     private val principalResolver: PrincipalResolver,
@@ -143,12 +154,18 @@ object CommercePermissions {
     /** Record a refund. */
     val RefundRecord: PermissionKey = PermissionKey("commerce.refund.record")
 
-    /** Read a staff user. */
+    /** Read a human or service principal. */
     val UserRead: PermissionKey = PermissionKey("commerce.user.read")
 
-    /** Manage staff users. */
+    /** Manage human or service principal identity and status. */
     val UserManage: PermissionKey = PermissionKey("commerce.user.manage")
 
-    /** Assign roles to staff users. */
+    /** Inspect role definitions and the software-defined permission catalog. */
+    val RoleRead: PermissionKey = PermissionKey("commerce.role.read")
+
+    /** Create, change, or remove role definitions and their permission sets. */
+    val RoleManage: PermissionKey = PermissionKey("commerce.role.manage")
+
+    /** Assign existing roles to human or service principals. */
     val RoleAssign: PermissionKey = PermissionKey("commerce.role.assign")
 }

@@ -248,9 +248,10 @@ never open their own transactions.
 
 | Package (`io.github.castab.commerce.runtime...`) | Contents |
 |---|---|
-| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, offerings snapshot repository, and `sessions`). |
+| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, offerings snapshot repository, `sessions`, and `authorization`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
-| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, the offerings snapshot repository, the internal principal session repository, and PostgreSQL error helpers. |
+| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, the offerings snapshot repository, internal session and authorization repositories, and PostgreSQL error helpers. |
+| `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
 | `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
 | `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, health routes, the `authenticatedPrincipal` request lens, and the authorization filters (`requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
@@ -383,6 +384,11 @@ on its changed checksum and must be recreated; repairing the history alone would
 the draft's constraint in place. These are runtime-owned
 published structures; later changes follow the compatibility contract above.
 
+`V4__authorization_directory.sql` adds principals, users, service identities, roles,
+role permissions, and principal-role assignments. It leaves released migrations intact.
+The principal kind uses the same explicit `USER`/`SERVICE` mapping as sessions. Foreign
+keys reject assignments to missing principals or roles. Role deletion never cascades.
+
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
 > baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
@@ -431,7 +437,7 @@ does not retry or merge it; the caller may reload and decide what to do.
 
 The HTTP capability is opt-in. A concrete application can bind a catalog and compose its
 original http4k contract routes into its own contract. A write-capable binding carries the
-application's `AccessControl` (its authentication filter and `PermissionResolver`):
+application's `AccessControl` (its authentication filter and live `PermissionResolver`):
 
 ```kotlin
 val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), permissionResolver)
@@ -555,6 +561,9 @@ commerce-domain        Principal, UserId, ServiceId, roles, permissions,
 
 commerce-runtime       authenticated-session lifecycle (SessionManager)
                        session persistence (commerce.principal_sessions)
+                       principal and RBAC persistence (commerce authorization tables)
+                       live PrincipalResolver, RoleResolver, PermissionResolver
+                       administration operations and HTTP capability
                        token issuance and resolution
                        HTTP principal context (authenticatedPrincipal)
                        permission enforcement (requirePermission, AccessControl)
@@ -562,7 +571,8 @@ commerce-runtime       authenticated-session lifecycle (SessionManager)
 concrete application   credential storage and verification
                        login and logout endpoints
                        OAuth, passkeys, or any other identity proof
-                       its PermissionResolver (principals, role assignments, role definitions)
+                       bootstrap policy and application permission definitions
+                       vertical staff profiles
                        how the token reaches its client, and CSRF protection
 ```
 
@@ -585,12 +595,12 @@ HTTP request
     → SessionTokenExtractor          (BearerSessionToken, SessionCookie, or the application's own)
     → SessionManager.resolve(token)  (digest lookup; unknown, expired, or revoked → 401)
     → authenticatedPrincipal         (http4k request context)
-    → requirePermission(permission)  (PrincipalId.can with the application's PermissionResolver → 403)
+    → requirePermission(permission)  (PrincipalId.can with the live runtime PermissionResolver → 403)
     → business handler
 ```
 
 ```kotlin
-val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), permissionResolver)
+val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), context.authorization.permissionResolver)
 
 routes(
     "/auth/login" bind Method.POST to access.public().then(login),
@@ -679,13 +689,13 @@ Security decisions:
   cookie (the `__Host-` prefix is recommended) and decides when to set and clear it. CSRF
   protection beyond `SameSite` is the application's.
 
-**Runtime capabilities declare permissions; applications supply the resolver.** A
+**Runtime capabilities declare permissions; applications supply `AccessControl`.** A
 runtime-provided HTTP capability that exposes protected operations declares the commerce
-permission each one requires and receives the application's `AccessControl` (or, where it
-needs no authentication of its own, its `PermissionResolver`) explicitly when the
-application composes it, as the Offerings write binding does. `commerceRuntime(...)` takes
-no global resolver and `CommerceRuntimeContext` does not carry one: public capabilities need
-no resolver, and a protected capability cannot be composed without one. Evaluation always
+permission each one requires and receives the application's `AccessControl` explicitly
+when composed. The application chooses its authentication transport and may use
+`context.authorization.permissionResolver` for persistent RBAC. `commerceRuntime(...)`
+takes no global resolver: public capabilities need none, and a protected capability
+cannot be composed without `AccessControl`. Evaluation always
 goes through `PrincipalId.can`, and nothing about missing authorization configuration ever
 means "allow".
 
@@ -698,6 +708,106 @@ compiling until it does) and a runtime migration that widens the `principal_kind
 constraint. This is intentional, so authentication identities fail closed rather than being
 serialized implicitly: there is no class-name, `toString`, or generic serialization, and no
 registry of principal kinds.
+
+### Authorization directory and administration
+
+| State | Owner |
+|---|---|
+| Authentication credentials (password hashes, OAuth identities, API keys) | Concrete application |
+| Authenticated session | commerce-runtime |
+| Principal and RBAC state | commerce-runtime |
+| Vertical profile data (phone, payroll, store assignment) | Concrete application |
+
+`context.authorization` provides `principalResolver`, `roleResolver`, the live
+`permissionResolver`, the read-only `permissionCatalog`, and principal/role administration
+methods. It persists human `User` and `ServiceIdentity` values and their statuses, role
+definitions and permission sets, and principal-role assignments. `RoleBasedPermissionResolver`
+combines the live resolvers. Missing or disabled principals grant nothing. Assigning or
+removing a role, or replacing a role's permissions, affects the next request without a
+new session. Disabling either principal kind changes its status and calls
+`sessions.revokeAll` in the same transaction, so authenticated-only routes also reject
+old tokens. Re-enabling does not restore revoked sessions.
+
+Usernames are trimmed on storage and lookup and normalized for uniqueness as ASCII
+lowercase with `Locale.ROOT`: `" Brayan "` and `"BRAYAN"` both identify `brayan`. Allowed
+characters are ASCII letters, digits, period, underscore, and hyphen. The display form
+is stored separately. A duplicate normalized name is `409 conflict`.
+
+Built-in permission definitions are listed explicitly in
+`commercePermissionDefinitions`. An application contributes its own code-backed keys via
+`ApplicationContributions(permissionDefinitions = listOf(...))`. Duplicate keys fail
+runtime composition; unknown keys fail role creation or permission replacement with
+`422 validation_failed`. Permissions cannot be created by an administration route.
+`CommercePermissions.RoleRead` inspects roles and the catalog; `RoleManage` changes role
+definitions and grants; `RoleAssign` changes assignments. `UserRead` and `UserManage`
+also cover service identities. All conventional role keys, including `Administrator`,
+have only the grants explicitly stored by the application. There is no bypass or wildcard.
+
+The administration methods have overloads taking the caller's `Transaction`. This lets
+application credential rows and runtime principal/role rows commit or roll back together.
+Creation requires an empty initial role set; use `assignRole` afterward. Assignment is
+idempotent and removal of an absent assignment is a no-op. Deleting an assigned role
+returns `409 conflict`; it never silently removes grants from principals. Principals
+are disabled rather than deleted.
+
+```kotlin
+// Bootstrap policy and the password hash come from this application.
+context.transactor.inTransaction { transaction ->
+    val role = RoleDefinition(CommerceRoles.Administrator, "Administrator", null,
+        setOf(CommercePermissions.UserRead, CommercePermissions.UserManage,
+            CommercePermissions.RoleRead, CommercePermissions.RoleManage,
+            CommercePermissions.RoleAssign))
+    context.authorization.createRole(transaction, role)
+    val administrator = context.authorization.createUser(transaction,
+        User(UserId(UUID.randomUUID()), "admin", null, null, "Administrator",
+            PrincipalStatus.ACTIVE, emptySet()))
+    applicationCredentials.insertPasswordHash(transaction, administrator.id, argon2Hash)
+    context.authorization.assignRole(transaction, administrator.id, role.key)
+}
+```
+
+The host mounts the opt-in contract routes and its own session transport:
+
+```kotlin
+val access = AccessControl(
+    sessionAuthentication(context.sessions, appSessionCookie),
+    context.authorization.permissionResolver,
+)
+val admin = authorizationAdministrationHttpCapability(
+    context = context,
+    accessControl = access,
+    basePath = "/admin/access",
+)
+val api = contract {
+    renderer = OpenApi3(ApiInfo("My application", "1"), Jackson)
+    descriptionPath = "/openapi.json"
+    routes += admin.contractRoutes
+}
+```
+
+At that base path, the capability exposes:
+
+| Method | Path | Required permission |
+|---|---|---|
+| GET, POST | `/users` | `UserRead`, `UserManage` respectively |
+| GET, PATCH | `/users/{userId}` | `UserRead`, `UserManage` |
+| PUT | `/users/{userId}/status` | `UserManage` |
+| GET | `/users/{userId}/roles` | `UserRead` |
+| PUT, DELETE | `/users/{userId}/roles/{roleKey}` | `RoleAssign` |
+| GET, POST | `/services` | `UserRead`, `UserManage` respectively |
+| GET, PATCH | `/services/{serviceId}` | `UserRead`, `UserManage` |
+| PUT | `/services/{serviceId}/status` | `UserManage` |
+| GET | `/services/{serviceId}/roles` | `UserRead` |
+| PUT, DELETE | `/services/{serviceId}/roles/{roleKey}` | `RoleAssign` |
+| GET, POST | `/roles` | `RoleRead`, `RoleManage` respectively |
+| GET, PATCH, DELETE | `/roles/{roleKey}` | `RoleRead`, `RoleManage`, `RoleManage` |
+| PUT | `/roles/{roleKey}/permissions` | `RoleManage` |
+| GET | `/permissions` | `RoleRead` |
+
+The runtime handles `401` for no valid session and `403` for a principal lacking the
+required permission before reading mutation bodies. OpenAPI lists these responses and
+the standard commerce errors. The host owns the aggregate OpenAPI document and Swagger
+UI. This capability has no login, credentials, cookies, or default administrator.
 
 **Session cleanup.** Expired and revoked rows stay in `commerce.principal_sessions`; they
 authenticate nothing. Purging old inactive rows would be a runtime capability (an operation

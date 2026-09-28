@@ -53,8 +53,9 @@ concrete commerce application    (the consuming project)
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
    application contribution points, append-only offerings snapshot persistence, and
-   authenticated principal sessions with permission enforcement over HTTP. It manages a
-   session only after the application has proven identity; it never sees credentials.
+   authenticated principal sessions, persistent principal and RBAC state, live permission
+   resolution, and authorization administration over HTTP. It manages a session only after
+   the application has proven identity; it never sees credentials.
    It owns no customer or other application data model. It is a
    library. It is not itself an application, and it provides no default application and
    no `main()`. It defines the configuration it requires but ships no `application.conf`,
@@ -66,8 +67,8 @@ concrete commerce application    (the consuming project)
    through explicit `ApplicationContributions`. It owns its business entities (customers,
    inquiries, concrete bookings that implement lifecycle phases, contacts, locations) and
    their relationships to commerce facts, which it can persist in the runtime's shared
-   transaction. It owns credentials, their verification, and its login endpoints, and
-   hands the resulting `PrincipalId` to the runtime's sessions. It owns `main()` and its process
+   transaction. It owns credentials, their verification, login endpoints, bootstrap policy,
+   and vertical staff profiles, and hands the resulting `PrincipalId` to the runtime's sessions. It owns `main()` and its process
    lifecycle, its deployment configuration (`application.conf` and environment), and its
    logging backend (an SLF4J provider such as Logback) and logging configuration, and it
    creates and starts the runtime.
@@ -119,7 +120,8 @@ Offerings HTTP capability. Applications select a catalog ID, route path, operati
 prefix, and read-only or read-write exposure; the same http4k contract routes execute
 HTTP and contribute to the application's OpenAPI document. Catalog writes append
 successor snapshots and never change historical revisions. Writes require the
-`commerce.offerings.manage` permission, evaluated with the application's `PermissionResolver`;
+`commerce.offerings.manage` permission, evaluated with the supplied `PermissionResolver`
+(normally `context.authorization.permissionResolver`);
 reads are as public as the host mounts them. See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
 
 This is conceptual, not a required persistence design: each application chooses its own

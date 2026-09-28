@@ -186,7 +186,7 @@ The runtime's first commerce-owned repository persists immutable offerings snaps
 the `commerce` schema. It uses the caller's `Transaction`; integration tests prove that
 offering snapshots and application-owned rows commit or roll back together. The runtime
 migration stream has the empty `V1__commerce_baseline.sql`, the offerings `V2` migration,
-and the principal sessions `V3` migration. Do not create placeholder commerce tables or fake
+the principal sessions `V3` migration, and the authorization directory `V4` migration. Do not create placeholder commerce tables or fake
 repositories.
 
 ## Runtime opinionation
@@ -217,8 +217,8 @@ frameworks. The runtime rules are:
 
 ## Provisional application-extension seam
 
-`ApplicationContributions` (Flyway locations and routes) and `CommerceRuntimeContext` (the
-configuration, `Transactor`, offerings snapshot repository, and `SessionManager` handed to
+`ApplicationContributions` (Flyway locations, routes, and permission definitions) and `CommerceRuntimeContext` (the
+configuration, `Transactor`, offerings snapshot repository, `SessionManager`, and authorization directory handed to
 contributed routes) are
 the **provisional** application-extension seam. They let a concrete application run on
 the shared runtime today, and they are expected to change once the booking extension and
@@ -302,8 +302,20 @@ runtime owns everything after that. `CommerceRuntimeContext.sessions` was added 
 first consuming application (`fionas-commerce`), which must issue sessions after verifying
 its own credentials.
 
+`CommerceRuntimeContext.authorization` is the reusable principal and RBAC directory
+needed by `fionas-commerce` and other staff-based consumers. Its PostgreSQL repositories
+remain internal. The runtime persists human users, service identities, statuses, role
+definitions, permission mappings, and assignments; it provides live resolver ports and
+transaction-aware administration. Credentials, login and bootstrap policy, and vertical
+staff profiles remain application-owned. `ApplicationContributions.permissionDefinitions`
+adds code-backed permission metadata; runtime composition rejects duplicate keys, and
+role mutations reject unknown keys. `UserRead` and `UserManage` cover both principal
+kinds; `RoleRead`, `RoleManage`, and `RoleAssign` are distinct. Disabling either kind
+revokes all its sessions in the same transaction. An assigned role cannot be deleted.
+No conventional role, including `Administrator`, has implicit grants.
+
 - **A session establishes identity, not authority.** Never store permissions, roles, or
-  principal status in a session. Authorization always asks the application's current
+  principal status in a session. Authorization always asks the current
   `PermissionResolver` through `PrincipalId.can`, on every request.
 - **Tokens are secrets.** A `SessionToken` comes from `SecureRandom` (32 bytes, base64url)
   and is unrelated to the `SessionId` and the principal. Only its SHA-256 digest is
@@ -322,12 +334,13 @@ its own credentials.
   runtime migration widening the `principal_kind` check constraint. Never replace this
   with class names, `toString`, generic serialization, or a registry, and do not change
   the domain to accommodate hypothetical non-UUID principals.
-- **Runtime capabilities declare permissions; applications supply the resolver.** A
+- **Runtime capabilities declare permissions; applications supply `AccessControl`.** A
   runtime HTTP capability that exposes protected operations declares the commerce
-  permission each requires and receives the application's `AccessControl` (or
-  `PermissionResolver`) explicitly at composition, as `OfferingsHttpAccess.ReadWrite` does
-  for `CommercePermissions.OfferingsManage`. Never add a global resolver to
-  `commerceRuntime(...)` or `CommerceRuntimeContext`, never let missing authorization mean
+  permission each requires and receives the application's `AccessControl` explicitly at
+  composition, as `OfferingsHttpAccess.ReadWrite` does for
+  `CommercePermissions.OfferingsManage`. The application can use
+  `context.authorization.permissionResolver`. Never add a global resolver to
+  `commerceRuntime(...)`, never let missing authorization mean
   "allow", and keep public capabilities free of an irrelevant resolver.
 - **HTTP.** `SessionTokenExtractor` (transport) is separate from `SessionManager`
   (resolution). `BearerSessionToken` and `SessionCookie` are adapters; cookies are not the
@@ -434,17 +447,19 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/build.gradle.kts` | The `commerce-runtime` publication (a `java-library`; no `application` plugin), its runtime stack, and the Docker-CLI PostgreSQL build service for tests. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, the internal principal session repository and `PrincipalIdColumns`, PostgreSQL error helpers. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, the internal principal session and authorization repositories and `PrincipalIdColumns`, PostgreSQL error helpers. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/authorization/` | Live authorization directory, permission catalog, administration DTOs and HTTP capability. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/session/` | `PrincipalSession`, `SessionId`, `IssuedSession`, `SessionToken` (and the internal `SessionTokenDigest`), `SessionManager` and its internal PostgreSQL implementation, and `SessionAuthentication.kt` (token extractors, `SessionCookie`, `sessionAuthentication`). |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes, and `Authorization.kt` (the `authenticatedPrincipal` lens, `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, and `V3` principal sessions; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, and `V4` authorization directory; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, revision rejection, and cross-schema atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/offering/OfferingsCapabilitySpec.kt` | Generic operation, real HTTP, historical revision, conflict, multiple catalog, read-only, price, and host OpenAPI composition checks. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/PrincipalSessionRepositorySpec.kt` | Session table and indexes, `UserId` and `ServiceId` round trips, digest-only storage and uniqueness, revocation, and caller-transaction atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/session/` | `SessionTokenSpec` (token generation, format, redaction, digest, activity), `SessionManagerSpec` (lifecycle on PostgreSQL with a hand-driven clock), and `SessionAuthenticationSpec` (401/403 behavior, current permissions, cookies). `testing/Sessions.kt` holds the test clock and output capture. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/authorization/` | PostgreSQL schema, live resolver, cross-schema transaction, session revocation, HTTP permission, and OpenAPI tests. |
 | `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
@@ -923,11 +938,11 @@ before supplying a `PrincipalId` to authorization. `UserStatus` remains a Kotlin
 for `PrincipalStatus` for source compatibility.
 
 - `RoleKey` and `PermissionKey` are open-ended values, never enums. Commerce-defined
-  role keys are conventions, not hard-coded grants. Applications supply role definitions.
+  role keys are conventions, not hard-coded grants. Applications or runtime persistence supply role definitions.
 - Operations ordinarily check permissions, not role names or principal types.
   `PrincipalId.can` takes an explicit `PermissionResolver`; do not hide resolver state
   in a singleton or locator.
-- `PrincipalResolver` and `RoleResolver` are application-implemented ports.
+- `PrincipalResolver` and `RoleResolver` are ports implemented by the runtime directory or another consumer.
   `UserResolver` remains a human-specific port, but authorization uses
   `PrincipalResolver`. The standard `RoleBasedPermissionResolver` unions grants from
   matching resolved role definitions. It returns no permissions for missing or disabled

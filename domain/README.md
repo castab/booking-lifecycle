@@ -1855,8 +1855,10 @@ shared by humans and services. `CommerceRoles` (`Administrator`, `Manager`,
 `Supervisor`, `Employee`) provides conventional keys without built-in grants.
 `CommercePermissions` provides keys for booking read/modify, financial-document
 read/create, offerings catalog management, payment/refund recording, and user
-read/manage and role assignment.
-Applications define the actual role bundles and may add their own, for example:
+read/manage, role read/manage, and role assignment. `PermissionDefinition` supplies
+human-readable metadata for a code-backed `PermissionKey`; it does not make permissions
+database-created resources. Applications choose actual role bundles and may add their
+own permissions, for example:
 
 ```kotlin
 import io.github.castab.commerce.staff.*
@@ -1901,8 +1903,9 @@ stripeAdapter.id.can(CommercePermissions.UserManage, permissionResolver)    // f
 userId.can(MessageRespond, permissionResolver)                              // same API for a human
 ```
 
-Here `usersById`, `servicesById`, and `rolesByKey` represent application-owned sources,
-with `rolesByKey` containing the example definitions. The resolver ports specify no
+Here `usersById`, `servicesById`, and `rolesByKey` represent sources chosen by the
+consumer; `commerce-runtime` now provides PostgreSQL-backed live implementations and
+an administration capability. The domain resolver ports specify no
 database, protocol, or cache. `UserResolver` remains available for human-specific
 lookups; authorization uses `PrincipalResolver` and `PermissionResolver`, both of which
 operate on `PrincipalId`. A business operation checks a `PermissionKey`, not a role or
