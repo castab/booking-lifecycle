@@ -200,6 +200,15 @@ its Fiona-owned inquiry relationship together. No inquiry relationship or pricin
 belongs in this runtime slice. Refunds and allocation reversals remain domain concepts;
 their runtime persistence is a later capability.
 
+The `Transactor` owns transaction isolation. `Transactor.inTransaction(isolation, block)`
+accepts a runtime-owned `TransactionIsolation` (`READ_COMMITTED`, the default, and
+`REPEATABLE_READ`); the runtime owns the JDBC/PostgreSQL translation and connection
+restoration, and the application chooses the semantics an operation needs. Isolation belongs
+to the outer transaction: repositories and operations take the caller's `Transaction` and
+never an isolation argument, and no isolation level becomes a global default. Do not add
+levels without a consumer that needs them, and do not turn isolation into row-locking or
+aggregate-locking abstractions.
+
 ## Runtime opinionation
 
 It is acceptable, and intended, for `commerce-runtime` to establish conventions around

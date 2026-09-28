@@ -6,7 +6,14 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import java.sql.SQLException
 import javax.sql.DataSource
 
-/** Creates the runtime's single HikariCP connection pool. The caller owns and closes it. */
+/**
+ * Creates the runtime's single HikariCP connection pool. The caller owns and closes it.
+ *
+ * Every pooled connection is `READ COMMITTED`, the PostgreSQL default made explicit. Hikari
+ * also restores that level when a connection whose level changed is returned, so a
+ * transaction that requested another [TransactionIsolation] cannot leak it to the next
+ * borrower.
+ */
 fun createDataSource(
     configuration: CommerceRuntimeConfiguration.Database,
     poolName: String = "commerce-runtime",
@@ -20,6 +27,7 @@ fun createDataSource(
             minimumIdle = configuration.minimumIdle
             connectionTimeout = configuration.connectionTimeoutMs
             validationTimeout = configuration.validationTimeoutMs
+            transactionIsolation = "TRANSACTION_READ_COMMITTED"
             this.poolName = poolName
         },
     )
