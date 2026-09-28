@@ -52,7 +52,8 @@ concrete commerce application    (the consuming project)
 2. **Runtime.** `commerce-runtime` is the opinionated, reusable machinery from which a
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
-   application contribution points, append-only offerings snapshot persistence, and
+   application contribution points, append-only offerings and financial-document snapshot
+   persistence, payment records and allocations, derived ledger reconciliation, and
    authenticated principal sessions, persistent principal and RBAC state, live permission
    resolution, and authorization administration over HTTP. It manages a session only after
    the application has proven identity and the runtime confirms a known, active principal;
@@ -127,6 +128,31 @@ reads are as public as the host mounts them. See [runtime Offerings operations a
 
 This is conceptual, not a required persistence design: each application chooses its own
 types, tables, and relationships.
+
+## Durable financial ledger
+
+`commerce-runtime` persists immutable `Estimate`, `Quote`, and `Invoice` snapshots in
+`commerce.financial_document_snapshots` with ordered lines. Stage transitions and change
+orders append a new version; previous versions remain available. A lineage may begin at
+any of the three stages. The runtime stores exact decimal line facts and derives document
+totals from the domain model when restoring them.
+
+`PaymentRecord` describes money received. A separate `PaymentAllocation` connects part of
+that money to an exact `(document id, version)` snapshot. An allocation stays attached to
+its original version as later snapshots are issued. `FinancialLedger.reconcileLatest` uses
+the domain's `FinancialDocumentReconciliation` across the whole lineage; gross allocated,
+net applied, and balance are derived and never stored on the document. External payment
+references are unique by provider and reference. The database rejects two successors of
+the same snapshot, and allocation operations lock the payment while checking available
+funds.
+
+Applications create documents from their own authoritative pricing and pass them to
+`context.financialLedger.create(...)`. For an application-owned association, use
+`context.transactor.inTransaction { transaction -> ... }` and
+`context.financialLedger.create(transaction, document)` with the application's repository
+write in that same transaction. The runtime provides no generic document-creation HTTP
+endpoint; the application owns its route, authorization, relationships, and pricing.
+See [the runtime ledger API](runtime/README.md#financial-ledger).
 
 The module dependency points one way: `:runtime` → `:domain`, never the reverse. The build
 enforces it. `:domain`'s `check` fails if its runtime classpath ever contains anything

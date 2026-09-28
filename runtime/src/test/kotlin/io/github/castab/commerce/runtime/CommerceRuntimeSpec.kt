@@ -1,5 +1,8 @@
 package io.github.castab.commerce.runtime
 
+import io.github.castab.commerce.financial.FinancialDocument
+import io.github.castab.commerce.financial.LineItem
+import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
@@ -35,6 +38,8 @@ import org.http4k.lens.uuid
 import org.http4k.routing.RoutingHttpHandler
 import org.http4k.routing.bind
 import org.http4k.routing.routes
+import java.math.BigDecimal
+import java.util.Currency
 import java.util.UUID
 
 /** A test application's own request body. */
@@ -259,6 +264,30 @@ class CommerceRuntimeSpec :
             context.transactor.inTransaction { transaction ->
                 context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, snapshot.catalogId)
             } shouldBe snapshot
+        }
+
+        test("application contributions can atomically write a financial snapshot and their own relationship") {
+            val usd = Currency.getInstance("USD")
+            val estimate =
+                FinancialDocument.Estimate.create(
+                    UUID.randomUUID(),
+                    listOf(
+                        LineItem(
+                            UUID.randomUUID(),
+                            "Service",
+                            quantity = null,
+                            price = Money(BigDecimal("25.00"), usd),
+                            taxAmount = Money(BigDecimal("0.00"), usd),
+                        ),
+                    ),
+                )
+            val relationshipId =
+                context.transactor.inTransaction { transaction ->
+                    context.financialLedger.create(transaction, estimate)
+                    insertRecord(transaction, estimate.id.toString())
+                }
+            context.financialLedger.get(estimate.reference) shouldBe estimate
+            context.transactor.inTransaction { transaction -> findRecord(transaction, relationshipId) } shouldBe estimate.id.toString()
         }
 
         test("an application authenticates identity itself, then the runtime's session carries it over HTTP") {

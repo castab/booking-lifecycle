@@ -6,12 +6,17 @@ import io.github.castab.commerce.runtime.authorization.PermissionCatalog
 import io.github.castab.commerce.runtime.authorization.commercePermissionDefinitions
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Migrations.OnStartup
+import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.healthRoutes
 import io.github.castab.commerce.runtime.persistence.AuthorizationRepository
+import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
+import io.github.castab.commerce.runtime.persistence.PaymentRepository
+import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
+import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
@@ -33,15 +38,16 @@ private val logger = KotlinLogging.logger {}
 
 /**
  * The shared runtime pieces an application may build on: configuration, the transaction
- * boundary, the commerce-owned [offeringsSnapshotRepository], authenticated principal
- * [sessions], and live [authorization] directory. Application repositories use the same [transactor] and
+ * boundary, commerce-owned [offeringsSnapshotRepository], [financialDocumentRepository],
+ * [paymentRepository], [financialLedger] operations, authenticated principal [sessions],
+ * and live [authorization] directory. Application repositories use the same [transactor] and
  * [io.github.castab.commerce.runtime.persistence.Transaction] the runtime uses.
  *
  * [sessions] is how an application that has verified its own credentials starts a session
  * for the resulting `PrincipalId`, and how its routes authenticate later requests (see
  * `sessionAuthentication`). The runtime never sees the credentials themselves.
  *
- * The repository participates in caller-owned transactions, including transactions that
+ * The repositories participate in caller-owned transactions, including transactions that
  * also write application data. The runtime has no customer or other application
  * data model, so relationships between application entities and commerce facts stay in
  * application repositories.
@@ -52,6 +58,9 @@ class CommerceRuntimeContext internal constructor(
     val configuration: CommerceRuntimeConfiguration,
     val transactor: Transactor,
     val offeringsSnapshotRepository: OfferingsSnapshotRepository,
+    val financialDocumentRepository: FinancialDocumentRepository,
+    val paymentRepository: PaymentRepository,
+    val financialLedger: FinancialLedger,
     val sessions: SessionManager,
     val authorization: AuthorizationDirectory,
 )
@@ -164,7 +173,19 @@ fun commerceRuntime(
                 configuration.sessions.lifetime,
             )
         val authorization = AuthorizationDirectory(transactor, authorizationRepository, sessions, permissionCatalog)
-        val context = CommerceRuntimeContext(configuration, transactor, PostgresOfferingsSnapshotRepository(), sessions, authorization)
+        val financialDocuments = PostgresFinancialDocumentRepository()
+        val payments = PostgresPaymentRepository(financialDocuments)
+        val context =
+            CommerceRuntimeContext(
+                configuration,
+                transactor,
+                PostgresOfferingsSnapshotRepository(),
+                financialDocuments,
+                payments,
+                FinancialLedger(transactor, financialDocuments, payments),
+                sessions,
+                authorization,
+            )
 
         val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))
         val http = CommerceErrorHandling.then(routes(*(runtimeRoutes + application.routes(context)).toTypedArray()))

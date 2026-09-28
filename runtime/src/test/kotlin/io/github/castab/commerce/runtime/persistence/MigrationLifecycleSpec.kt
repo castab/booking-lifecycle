@@ -77,7 +77,7 @@ class MigrationLifecycleSpec :
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
                 // Runtime V1 to V4 coexist with application V1 in separate version spaces.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5")
                 dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
             }
         }

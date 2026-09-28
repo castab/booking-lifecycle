@@ -186,8 +186,19 @@ The runtime's first commerce-owned repository persists immutable offerings snaps
 the `commerce` schema. It uses the caller's `Transaction`; integration tests prove that
 offering snapshots and application-owned rows commit or roll back together. The runtime
 migration stream has the empty `V1__commerce_baseline.sql`, the offerings `V2` migration,
-the principal sessions `V3` migration, and the authorization directory `V4` migration. Do not create placeholder commerce tables or fake
+the principal sessions `V3` migration, the authorization directory `V4` migration, and
+the financial ledger `V5` migration. Do not create placeholder commerce tables or fake
 repositories.
+
+The first financial-ledger slice persists immutable financial-document snapshots,
+payment records, and payment allocations in the runtime-owned `commerce` schema. The
+document's line items remain the source of its derived totals; payment allocations
+reference the exact snapshot and remain attached to it. Reconciliation derives balances
+across a document lineage. `fionas-commerce` needs the transaction-aware repository and
+`FinancialLedger` in `CommerceRuntimeContext` to persist an authoritative estimate and
+its Fiona-owned inquiry relationship together. No inquiry relationship or pricing policy
+belongs in this runtime slice. Refunds and allocation reversals remain domain concepts;
+their runtime persistence is a later capability.
 
 ## Runtime opinionation
 
@@ -218,7 +229,8 @@ frameworks. The runtime rules are:
 ## Provisional application-extension seam
 
 `ApplicationContributions` (Flyway locations, routes, and permission definitions) and `CommerceRuntimeContext` (the
-configuration, `Transactor`, offerings snapshot repository, `SessionManager`, and authorization directory handed to
+configuration, `Transactor`, offerings, financial-document, and payment repositories,
+`FinancialLedger`, `SessionManager`, and authorization directory handed to
 contributed routes) are
 the **provisional** application-extension seam. They let a concrete application run on
 the shared runtime today, and they are expected to change once the booking extension and
@@ -458,6 +470,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `domain/src/test/kotlin/io/github/castab/commerce/staff/AuthorizationSpec.kt` | Kotest coverage for staff values, resolver behavior, and fail-closed authorization. |
 | `runtime/build.gradle.kts` | The `commerce-runtime` publication (a `java-library`; no `application` plugin), its runtime stack, and the Docker-CLI PostgreSQL build service for tests. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/financial/` | `FinancialLedger`: transaction-owning document and payment operations and lineage reconciliation. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, the internal principal session and authorization repositories and `PrincipalIdColumns`, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/authorization/` | Live authorization directory, permission catalog, administration DTOs and HTTP capability. |
@@ -465,7 +478,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes, and `Authorization.kt` (the `authenticatedPrincipal` lens, `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, and `V4` authorization directory; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, and `V5` financial ledger; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, revision rejection, and cross-schema atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/offering/OfferingsCapabilitySpec.kt` | Generic operation, real HTTP, historical revision, conflict, multiple catalog, read-only, price, and host OpenAPI composition checks. |
