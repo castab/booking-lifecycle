@@ -21,6 +21,7 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.insertTestPrincipal
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.ServiceId
@@ -130,6 +131,9 @@ class OfferingsCapabilitySpec :
                         },
                     ),
                 ).start()
+            context.transactor.insertTestPrincipal(editor)
+            context.transactor.insertTestPrincipal(viewer)
+            context.transactor.insertTestPrincipal(importer)
             editorToken =
                 context.sessions
                     .create(editor)

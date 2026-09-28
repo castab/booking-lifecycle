@@ -1,10 +1,13 @@
 package io.github.castab.commerce.runtime.session
 
+import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.AuthorizationRepository
 import io.github.castab.commerce.runtime.persistence.PrincipalIdColumns
 import io.github.castab.commerce.runtime.persistence.PrincipalSessionRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.staff.PrincipalId
+import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.security.SecureRandom
 import java.time.Clock
@@ -31,6 +34,7 @@ private val logger = KotlinLogging.logger {}
 interface SessionManager {
     /**
      * Starts a session for [principalId], which the application has already authenticated.
+     * The principal must exist in the runtime directory and be ACTIVE.
      * The session expires after the configured lifetime. The returned token is the only
      * copy of the secret; only its digest is stored.
      */
@@ -44,7 +48,7 @@ interface SessionManager {
 
     /**
      * The principal [token] authenticates, or `null` when there is no such session, or it
-     * has expired or been revoked. Resolution never extends a session.
+     * has expired or been revoked, or the principal is missing or disabled. Resolution never extends a session.
      */
     fun resolve(token: SessionToken): PrincipalId?
 
@@ -75,6 +79,7 @@ interface SessionManager {
 internal class PersistentSessionManager(
     private val transactor: Transactor,
     private val repository: PrincipalSessionRepository,
+    private val principals: AuthorizationRepository,
     private val lifetime: Duration,
     private val clock: Clock = Clock.systemUTC(),
     private val random: SecureRandom = SecureRandom(),
@@ -89,6 +94,11 @@ internal class PersistentSessionManager(
         transaction: Transaction,
         principalId: PrincipalId,
     ): IssuedSession {
+        when (principals.principalStatus(transaction, principalId, lock = true)) {
+            null -> throw CommerceFailure.NotFound("Principal does not exist")
+            PrincipalStatus.DISABLED -> throw CommerceFailure.Conflict("Principal is disabled")
+            PrincipalStatus.ACTIVE -> Unit
+        }
         val createdAt = now()
         val token = SessionToken.generate(random)
         val session = PrincipalSession(SessionId(UUID.randomUUID()), principalId, createdAt, createdAt.plus(lifetime), revokedAt = null)
@@ -97,10 +107,13 @@ internal class PersistentSessionManager(
         return IssuedSession(session, token)
     }
 
-    override fun resolve(token: SessionToken): PrincipalId? {
-        val session = transactor.inTransaction { repository.findByDigest(it, SessionTokenDigest.of(token)) } ?: return null
-        return session.principalId.takeIf { session.isActive(now()) }
-    }
+    override fun resolve(token: SessionToken): PrincipalId? =
+        transactor.inTransaction { transaction ->
+            val session = repository.findByDigest(transaction, SessionTokenDigest.of(token)) ?: return@inTransaction null
+            session.principalId.takeIf {
+                session.isActive(now()) && principals.principalStatus(transaction, it) == PrincipalStatus.ACTIVE
+            }
+        }
 
     override fun revoke(token: SessionToken) = transactor.inTransaction { revoke(it, token) }
 

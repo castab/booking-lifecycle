@@ -201,7 +201,7 @@ class AuthorizationSpec :
 
             serviceId.can(CommercePermissions.PaymentRecord, resolver) shouldBe true
             serviceId.can(CommercePermissions.RefundRecord, resolver) shouldBe true
-            serviceId.can(CommercePermissions.UserManage, resolver) shouldBe false
+            serviceId.can(CommercePermissions.PrincipalManage, resolver) shouldBe false
         }
 
         test("the same role definition grants permissions to humans and services") {

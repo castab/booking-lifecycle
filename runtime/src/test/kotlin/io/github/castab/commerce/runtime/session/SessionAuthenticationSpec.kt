@@ -7,12 +7,14 @@ import io.github.castab.commerce.runtime.http.CommerceJson
 import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.authenticatedPrincipal
 import io.github.castab.commerce.runtime.http.requirePermission
+import io.github.castab.commerce.runtime.persistence.AuthorizationRepository
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.testing.MutableClock
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.insertTestPrincipal
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PermissionResolver
@@ -58,6 +60,7 @@ class SessionAuthenticationSpec :
         lateinit var database: TestDatabase
         lateinit var dataSource: HikariDataSource
         lateinit var sessions: SessionManager
+        lateinit var transactor: Transactor
         lateinit var http: HttpHandler
         val clock = MutableClock(Instant.parse("2026-09-26T12:00:00Z"))
         val lifetime = Duration.ofHours(1)
@@ -69,7 +72,9 @@ class SessionAuthenticationSpec :
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "session-authentication-spec")
             MigrationLifecycle(dataSource, emptyList()).migrate()
-            sessions = PersistentSessionManager(Transactor(Jdbi.create(dataSource)), PostgresPrincipalSessionRepository(), lifetime, clock)
+            transactor = Transactor(Jdbi.create(dataSource))
+            sessions =
+                PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), AuthorizationRepository(), lifetime, clock)
 
             val access = AccessControl(sessionAuthentication(sessions, BearerSessionToken), permissionResolver)
             val cookieAccess = AccessControl(sessionAuthentication(sessions, sessionCookie), permissionResolver)
@@ -99,6 +104,10 @@ class SessionAuthenticationSpec :
             dataSource.close()
             database.close()
         }
+
+        fun persistedUser() = UserId(UUID.randomUUID()).also { transactor.insertTestPrincipal(it) }
+
+        fun persistedService() = ServiceId(UUID.randomUUID()).also { transactor.insertTestPrincipal(it) }
 
         fun get(
             path: String,
@@ -130,7 +139,7 @@ class SessionAuthenticationSpec :
             }
 
             test("a valid token makes its principal available to the handler") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 val issued = sessions.create(principal)
 
                 get("/me", issued.token.value).let {
@@ -141,14 +150,14 @@ class SessionAuthenticationSpec :
             }
 
             test("the principal survives routing when authentication wraps a nested router") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
 
                 get("/nested/me", sessions.create(principal).token.value).bodyString() shouldBe principal.text()
                 get("/nested/me").shouldBeUnauthenticated()
             }
 
             test("an expired session is unauthenticated") {
-                val issued = sessions.create(UserId(UUID.randomUUID()))
+                val issued = sessions.create(persistedUser())
                 val start = clock.now
 
                 clock.advance(lifetime)
@@ -158,7 +167,7 @@ class SessionAuthenticationSpec :
             }
 
             test("a revoked session is unauthenticated, and other sessions of the principal still work") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 val revoked = sessions.create(principal)
                 val kept = sessions.create(principal)
 
@@ -169,7 +178,7 @@ class SessionAuthenticationSpec :
             }
 
             test("session and principal identifiers cannot be used as tokens") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 val issued = sessions.create(principal)
 
                 get(
@@ -190,13 +199,13 @@ class SessionAuthenticationSpec :
             test("a handler that reads the principal without protection fails closed") {
                 get("/unprotected").shouldBeUnauthenticated()
                 // Even with a valid token: nothing authenticated this route.
-                get("/unprotected", sessions.create(UserId(UUID.randomUUID())).token.value).shouldBeUnauthenticated()
+                get("/unprotected", sessions.create(persistedUser()).token.value).shouldBeUnauthenticated()
             }
         }
 
         context("authorization") {
             test("a principal holding the permission reaches the handler") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 grants[principal] = setOf(CommercePermissions.BookingRead)
 
                 get("/bookings", sessions.create(principal).token.value).let {
@@ -206,7 +215,7 @@ class SessionAuthenticationSpec :
             }
 
             test("a principal without the permission is forbidden") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 grants[principal] = setOf(CommercePermissions.BookingModify)
 
                 get("/bookings", sessions.create(principal).token.value).shouldBeForbidden()
@@ -218,7 +227,7 @@ class SessionAuthenticationSpec :
             }
 
             test("authorization uses current permissions, not those held when the session began") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 grants[principal] = setOf(CommercePermissions.BookingRead)
                 val token = sessions.create(principal).token.value
                 get("/bookings", token).status shouldBe Status.OK
@@ -231,8 +240,9 @@ class SessionAuthenticationSpec :
             }
 
             test("users and services are authorized alike through their PrincipalId") {
-                val service = ServiceId(UUID.randomUUID())
+                val service = persistedService()
                 val user = UserId(service.value)
+                transactor.insertTestPrincipal(user)
                 grants[service] = setOf(CommercePermissions.BookingRead)
 
                 get("/bookings", sessions.create(service).token.value).let {
@@ -273,7 +283,7 @@ class SessionAuthenticationSpec :
             test("route-level: AccessControl authenticates once, then evaluates the permission") {
                 val (counting, access, evaluations) = counted()
                 val route = CommerceErrorHandling.then(access.requirePermission(CommercePermissions.BookingRead).then(echoPrincipal))
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 grants[principal] = setOf(CommercePermissions.BookingRead)
                 val token = sessions.create(principal).token.value
 
@@ -298,7 +308,7 @@ class SessionAuthenticationSpec :
                             ),
                         ),
                     )
-                val principal = ServiceId(UUID.randomUUID())
+                val principal = persistedService()
                 grants[principal] = setOf(CommercePermissions.BookingRead)
                 val token = sessions.create(principal).token.value
 
@@ -326,8 +336,8 @@ class SessionAuthenticationSpec :
                             bearerAccess.requirePermission(CommercePermissions.BookingRead).then(echoPrincipal),
                         ),
                     )
-                val cookieUser = UserId(UUID.randomUUID())
-                val bearerService = ServiceId(UUID.randomUUID())
+                val cookieUser = persistedUser()
+                val bearerService = persistedService()
                 grants[cookieUser] = setOf(CommercePermissions.BookingRead)
                 grants[bearerService] = setOf(CommercePermissions.BookingRead)
                 val cookie = sessionCookie.issue(sessions.create(cookieUser))
@@ -347,7 +357,7 @@ class SessionAuthenticationSpec :
             test("standalone session authentication resolves a valid token once and rejects a missing one without a lookup") {
                 val counting = Counting(sessions)
                 val route = CommerceErrorHandling.then(sessionAuthentication(counting, BearerSessionToken).then(echoPrincipal))
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
 
                 route(Request(Method.GET, "/").bearer(sessions.create(principal).token.value)).bodyString() shouldBe principal.text()
                 counting.resolutions shouldBe 1
@@ -368,7 +378,7 @@ class SessionAuthenticationSpec :
             test("nested session authentication reuses the outer principal even without its own transport") {
                 val counting = Counting(sessions)
                 val application = nested(counting)
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 val cookie = sessionCookie.issue(sessions.create(principal))
 
                 // No bearer token at all: the inner filter must not answer 401.
@@ -382,8 +392,8 @@ class SessionAuthenticationSpec :
             test("nested session authentication never replaces the established principal with competing credentials") {
                 val counting = Counting(sessions)
                 val application = nested(counting)
-                val cookieUser = UserId(UUID.randomUUID())
-                val bearerService = ServiceId(UUID.randomUUID())
+                val cookieUser = persistedUser()
+                val bearerService = persistedService()
                 val cookie = sessionCookie.issue(sessions.create(cookieUser))
                 val bearer = sessions.create(bearerService).token.value
 
@@ -404,7 +414,7 @@ class SessionAuthenticationSpec :
                         permissionResolver.permissionsFor(it)
                     }
                 val application = nested(counting, requirePermission(CommercePermissions.BookingRead, resolver).then(echoPrincipal))
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 grants[principal] = setOf(CommercePermissions.BookingRead)
                 val cookie = sessionCookie.issue(sessions.create(principal))
 
@@ -419,7 +429,7 @@ class SessionAuthenticationSpec :
 
         context("session cookies") {
             test("a session cookie authenticates like any other transport") {
-                val principal = UserId(UUID.randomUUID())
+                val principal = persistedUser()
                 val issued = sessions.create(principal)
 
                 http(Request(Method.GET, "/cookie/me").cookie(sessionCookie.issue(issued))).bodyString() shouldBe principal.text()
@@ -430,7 +440,7 @@ class SessionAuthenticationSpec :
             }
 
             test("the issued cookie is secure, HTTP-only, host-only, and expires with the session") {
-                val issued = sessions.create(UserId(UUID.randomUUID()))
+                val issued = sessions.create(persistedUser())
 
                 val cookie = sessionCookie.issue(issued)
 
