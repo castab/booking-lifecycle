@@ -41,6 +41,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.http4k.client.JavaHttpClient
+import org.http4k.contract.Tag
 import org.http4k.contract.bindContract
 import org.http4k.contract.contract
 import org.http4k.contract.meta
@@ -97,12 +98,18 @@ class OfferingsCapabilitySpec :
                             val a =
                                 offeringsHttpCapability(
                                     supplied,
-                                    OfferingsHttpBinding(catalogA, "/catalog-a", "catalogA", writes),
+                                    OfferingsHttpBinding(
+                                        catalogA,
+                                        "/catalog-a",
+                                        "catalogA",
+                                        writes,
+                                        setOf(Tag("Catalog A", "Primary catalog")),
+                                    ),
                                 )
                             val b =
                                 offeringsHttpCapability(
                                     supplied,
-                                    OfferingsHttpBinding(catalogB, "/catalog-b", "catalogB", writes),
+                                    OfferingsHttpBinding(catalogB, "/catalog-b", "catalogB", writes, setOf(Tag("Catalog B"))),
                                 )
                             val guarded =
                                 offeringsHttpCapability(
@@ -169,7 +176,7 @@ class OfferingsCapabilitySpec :
 
         fun Response.json(): JsonObject = CommerceJson.parse(bodyString()).jsonObject
 
-        test("bindings reject ambiguous paths and operation ID prefixes") {
+        test("bindings reject ambiguous paths, operation ID prefixes, and blank OpenAPI tags") {
             listOf("", "catalog", "/catalog/", "/catalog?x=1", "/catalog/{id}", "/catalog//nested").forEach { path ->
                 shouldThrow<IllegalArgumentException> {
                     OfferingsHttpBinding(catalogA, path, "catalogA", OfferingsHttpAccess.ReadOnly)
@@ -178,6 +185,11 @@ class OfferingsCapabilitySpec :
             listOf("", "with space", "9prefix", "a-b").forEach { prefix ->
                 shouldThrow<IllegalArgumentException> {
                     OfferingsHttpBinding(catalogA, "/catalog", prefix, OfferingsHttpAccess.ReadOnly)
+                }
+            }
+            listOf("", " ").forEach { name ->
+                shouldThrow<IllegalArgumentException> {
+                    OfferingsHttpBinding(catalogA, "/catalog", "catalogA", OfferingsHttpAccess.ReadOnly, setOf(Tag(name)))
                 }
             }
         }
@@ -464,6 +476,26 @@ class OfferingsCapabilitySpec :
                 .jsonObject["get"]!!
                 .jsonObject["operationId"]!!
                 .jsonPrimitive.content shouldBe "catalogBGetCatalog"
+
+            // Each binding's host-supplied tags group all of its operations; untagged bindings keep http4k's default.
+            fun operationTags(prefix: String) =
+                paths
+                    .filterKeys { it == prefix || it.startsWith("$prefix/") }
+                    .values
+                    .flatMap { it.jsonObject.values }
+                    .map { operation -> operation.jsonObject["tags"]!!.jsonArray.map { it.jsonPrimitive.content } }
+            operationTags("/catalog-a").size shouldBe 10
+            operationTags("/catalog-a").forEach { it shouldContainExactly listOf("Catalog A") }
+            operationTags("/catalog-b").size shouldBe 10
+            operationTags("/catalog-b").forEach { it shouldContainExactly listOf("Catalog B") }
+            (operationTags("/catalog-c") + operationTags("/catalog-ro")).forEach { tags ->
+                tags.none { it == "Catalog A" || it == "Catalog B" } shouldBe true
+            }
+            val documentTags = openapi["tags"]!!.jsonArray.map { it.jsonObject }
+            documentTags
+                .single { it["name"]!!.jsonPrimitive.content == "Catalog A" }["description"]!!
+                .jsonPrimitive.content shouldBe "Primary catalog"
+            documentTags.count { it["name"]!!.jsonPrimitive.content == "Catalog B" } shouldBe 1
         }
 
         test("OpenAPI price union and every request and response reference match runtime validation") {

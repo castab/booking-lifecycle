@@ -14,6 +14,8 @@ import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
+import org.http4k.contract.RouteMetaDsl
+import org.http4k.contract.Tag
 import org.http4k.contract.bindContract
 import org.http4k.contract.div
 import org.http4k.contract.meta
@@ -59,13 +61,16 @@ sealed interface OfferingsHttpAccess {
 
 /**
  * Application-owned route placement for exactly one catalog. [access] decides which routes
- * exist and, for writes, carries their authorization dependency.
+ * exist and, for writes, carries their authorization dependency. [tags] are the host's
+ * OpenAPI grouping for every route of this binding; when empty, http4k's default grouping
+ * applies.
  */
 data class OfferingsHttpBinding(
     val catalogId: OfferingsCatalogId,
     val basePath: String,
     val operationIdPrefix: String,
     val access: OfferingsHttpAccess,
+    val tags: Set<Tag> = emptySet(),
 ) {
     init {
         require(
@@ -80,6 +85,7 @@ data class OfferingsHttpBinding(
         require(
             operationIdPrefix.matches(Regex("[A-Za-z][A-Za-z0-9]*")),
         ) { "Operation ID prefix must be alphanumeric and begin with a letter" }
+        require(tags.none { it.name.isBlank() }) { "OpenAPI tag names cannot be blank" }
     }
 }
 
@@ -135,19 +141,27 @@ fun offeringsHttpCapability(
             listOf(CatalogCategoryDto("choice", "Choice", "An optional choice", 0, 2, listOf(sampleOffering))),
         )
 
-    fun org.http4k.contract.RouteMetaDsl.errors(vararg statuses: Status) {
+    fun RouteMetaDsl.errors(vararg statuses: Status) {
         statuses.forEach { status ->
             val category = ErrorCategory.entries.first { it.status == status }
             returning(status, errorBody to ErrorResponse(category.code, "Request failed"))
         }
     }
 
+    fun RouteMetaDsl.describe(
+        id: String,
+        title: String,
+    ) {
+        operationId = "${binding.operationIdPrefix}$id"
+        summary = title
+        tags += binding.tags
+    }
+
     val routes =
         mutableListOf<ContractRoute>(
             (
                 base meta {
-                    operationId = "${binding.operationIdPrefix}GetCatalog"
-                    summary = "Get the latest offerings catalog"
+                    describe("GetCatalog", "Get the latest offerings catalog")
                     returning(Status.OK, catalogBody to sampleCatalog)
                     errors(Status.NOT_FOUND)
                 } bindContract Method.GET to { _: Request ->
@@ -156,8 +170,7 @@ fun offeringsHttpCapability(
             ),
             (
                 "$base/revisions" / revisionPath meta {
-                    operationId = "${binding.operationIdPrefix}GetCatalogRevision"
-                    summary = "Get an exact historical catalog revision"
+                    describe("GetCatalogRevision", "Get an exact historical catalog revision")
                     returning(Status.OK, catalogBody to sampleCatalog)
                     errors(Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { text: String ->
@@ -170,8 +183,7 @@ fun offeringsHttpCapability(
             ),
             (
                 "$base/categories" meta {
-                    operationId = "${binding.operationIdPrefix}ListCategories"
-                    summary = "List categories in snapshot order"
+                    describe("ListCategories", "List categories in snapshot order")
                     returning(Status.OK, categoriesBody to CategoriesDto(3, listOf(sampleCategory)))
                     errors(Status.NOT_FOUND)
                 } bindContract Method.GET to { _: Request ->
@@ -180,8 +192,7 @@ fun offeringsHttpCapability(
             ),
             (
                 "$base/categories" / categoryPath meta {
-                    operationId = "${binding.operationIdPrefix}GetCategory"
-                    summary = "Get a category from the latest catalog"
+                    describe("GetCategory", "Get a category from the latest catalog")
                     returning(Status.OK, categoryBody to CategoryDto(3, sampleCategory))
                     errors(Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { key: String ->
@@ -193,8 +204,7 @@ fun offeringsHttpCapability(
             ),
             (
                 "$base/categories" / categoryPath / "offerings" meta {
-                    operationId = "${binding.operationIdPrefix}ListCategoryOfferings"
-                    summary = "List a category's offerings in snapshot order"
+                    describe("ListCategoryOfferings", "List a category's offerings in snapshot order")
                     returning(Status.OK, categoryOfferingsBody to CategoryOfferingsDto(3, sampleCategory, listOf(sampleOffering)))
                     errors(Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { key: String, _: String ->
@@ -208,8 +218,7 @@ fun offeringsHttpCapability(
             ),
             (
                 "$base/offerings" meta {
-                    operationId = "${binding.operationIdPrefix}ListOfferings"
-                    summary = "List offerings in snapshot order"
+                    describe("ListOfferings", "List offerings in snapshot order")
                     returning(Status.OK, offeringsBody to OfferingsDto(3, listOf(sampleOffering)))
                     errors(Status.NOT_FOUND)
                 } bindContract Method.GET to { _: Request ->
@@ -218,8 +227,7 @@ fun offeringsHttpCapability(
             ),
             (
                 "$base/offerings" / offeringPath meta {
-                    operationId = "${binding.operationIdPrefix}GetOffering"
-                    summary = "Get an offering from the latest catalog"
+                    describe("GetOffering", "Get an offering from the latest catalog")
                     returning(Status.OK, offeringBody to OfferingResultDto(3, sampleOffering))
                     errors(Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
                 } bindContract Method.GET to { key: String ->
@@ -236,8 +244,7 @@ fun offeringsHttpCapability(
         val manage = access.accessControl.requirePermission(CommercePermissions.OfferingsManage)
         routes +=
             base meta {
-                operationId = "${binding.operationIdPrefix}CreateCatalog"
-                summary = "Initialize an empty offerings catalog"
+                describe("CreateCatalog", "Initialize an empty offerings catalog")
                 returning(Status.CREATED, catalogBody to initializedCatalog)
                 errors(Status.UNAUTHORIZED, Status.FORBIDDEN, Status.CONFLICT)
             } bindContract Method.POST to
@@ -246,8 +253,7 @@ fun offeringsHttpCapability(
             }
         routes +=
             "$base/categories" meta {
-                operationId = "${binding.operationIdPrefix}AddCategory"
-                summary = "Append a category in a successor catalog revision"
+                describe("AddCategory", "Append a category in a successor catalog revision")
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
                 receiving(categoryRequest to sampleCategory)
                 returning(Status.CREATED, categoryBody to CategoryDto(2, sampleCategory))
@@ -266,8 +272,7 @@ fun offeringsHttpCapability(
             }
         routes +=
             "$base/offerings" meta {
-                operationId = "${binding.operationIdPrefix}AddOffering"
-                summary = "Append an offering in a successor catalog revision"
+                describe("AddOffering", "Append an offering in a successor catalog revision")
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
                 receiving(offeringRequest to sampleOffering)
                 returning(Status.CREATED, offeringBody to OfferingResultDto(3, sampleOffering))

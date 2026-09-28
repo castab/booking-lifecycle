@@ -14,6 +14,7 @@ import io.github.castab.commerce.staff.UserId
 import org.http4k.contract.ContractRoute
 import org.http4k.contract.PreFlightExtraction
 import org.http4k.contract.RouteMetaDsl
+import org.http4k.contract.Tag
 import org.http4k.contract.bindContract
 import org.http4k.contract.div
 import org.http4k.contract.meta
@@ -34,12 +35,14 @@ class AuthorizationAdministrationHttpCapability internal constructor(
 /**
  * Runtime-owned principal/RBAC administration. The host chooses placement and supplies
  * authentication through [accessControl]; each route declares its own commerce permission.
- * No credential, cookie, login, or bootstrap policy is included.
+ * [tags] are the host's OpenAPI grouping for every route; when empty, http4k's default
+ * grouping applies. No credential, cookie, login, or bootstrap policy is included.
  */
 fun authorizationAdministrationHttpCapability(
     context: CommerceRuntimeContext,
     accessControl: AccessControl,
     basePath: String,
+    tags: Set<Tag> = emptySet(),
 ): AuthorizationAdministrationHttpCapability {
     require(
         basePath.startsWith('/') &&
@@ -48,6 +51,8 @@ fun authorizationAdministrationHttpCapability(
             basePath.split('/').drop(1).all { it.isNotBlank() } &&
             basePath.none { it in "?{}#" },
     ) { "Invalid administration base path" }
+    require(tags.none { it.name.isBlank() }) { "OpenAPI tag names cannot be blank" }
+    val routeTags = tags
     val directory = context.authorization
     val userPath = Path.of("userId")
     val servicePath = Path.of("serviceId")
@@ -85,6 +90,7 @@ fun authorizationAdministrationHttpCapability(
     ) {
         operationId = "authorization$id"
         summary = title
+        this.tags += routeTags
         errors(Status.UNAUTHORIZED, Status.FORBIDDEN, Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND, Status.CONFLICT)
     }
 
