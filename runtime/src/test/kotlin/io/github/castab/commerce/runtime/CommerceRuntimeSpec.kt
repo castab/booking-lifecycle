@@ -14,6 +14,7 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.insertTestPrincipal
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.UserId
@@ -206,6 +207,8 @@ class CommerceRuntimeSpec :
                     },
                 )
             runtime = commerceRuntime(configuration, application).start()
+            context.transactor.insertTestPrincipal(TestIdentities.reader)
+            context.transactor.insertTestPrincipal(TestIdentities.visitor)
             val client = JavaHttpClient()
             http = { request ->
                 client(

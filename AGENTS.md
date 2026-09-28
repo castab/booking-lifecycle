@@ -309,10 +309,22 @@ definitions, permission mappings, and assignments; it provides live resolver por
 transaction-aware administration. Credentials, login and bootstrap policy, and vertical
 staff profiles remain application-owned. `ApplicationContributions.permissionDefinitions`
 adds code-backed permission metadata; runtime composition rejects duplicate keys, and
-role mutations reject unknown keys. `UserRead` and `UserManage` cover both principal
+role mutations reject unknown keys. `PrincipalRead` and `PrincipalManage` cover both principal
 kinds; `RoleRead`, `RoleManage`, and `RoleAssign` are distinct. Disabling either kind
 revokes all its sessions in the same transaction. An assigned role cannot be deleted.
 No conventional role, including `Administrator`, has implicit grants.
+
+Sessions may be created only for known, ACTIVE runtime principals. Resolution also checks
+current principal existence and status; an otherwise valid token for a missing or
+disabled principal does not authenticate. Sessions and the directory share internal
+principal persistence to avoid a construction cycle. After both migration streams and
+before HTTP composition, every stored role-permission grant must exist in the current
+`PermissionCatalog`; unknown keys fail startup with their names. Live resolution checks
+again and fails closed if a grant changes after startup. An application removing one of
+its software-defined permissions must remove the stale grants in its application
+migration before startup validation. This is permitted data maintenance in the runtime
+table, not ownership of its DDL or schema. `RoleAssign` has no grant ceiling or role
+hierarchy in this version.
 
 - **A session establishes identity, not authority.** Never store permissions, roles, or
   principal status in a session. Authorization always asks the current
@@ -1069,8 +1081,10 @@ commerceRuntime(...) composes Jdbi, repositories, routes, Jetty    →    start(
   concrete application owns its schemas and objects. Sharing a database is not shared
   ownership. A runtime migration creates, alters, or drops runtime-owned objects only and
   never touches an application-owned table, index, constraint, sequence, view, or other
-  object. Application migrations never alter runtime-owned objects. This is enforced by
-  review, not SQL analysis: do not add SQL parsing or schema policing.
+  object. Application migrations never alter runtime-owned DDL. They may remove stale
+  application-defined grants from `commerce.role_permissions` before startup catalog
+  validation. This narrow data cleanup does not grant schema ownership. The boundary is
+  enforced by review, not SQL analysis: do not add SQL parsing or schema policing.
 - **Discovery.** `RuntimeMigrations` discovers the runtime's migrations internally, at
   `classpath:db/commerce` in the runtime jar. Applications never list that location;
   `ApplicationContributions.migrationLocations` names application migrations only, and a

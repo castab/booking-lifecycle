@@ -127,10 +127,10 @@ commerce-runtime
 
 `ApplicationContributions` is intentionally small and not booking-specific. An
 application contributes the Flyway locations of its own migrations, never the runtime's,
-and its own routes. The routes are built from the shared `CommerceRuntimeContext`, which
-currently holds the configuration, the `Transactor`, the offerings snapshot repository, and
-the `SessionManager` (`context.sessions`). The runtime owns the error handling around every
-route.
+its own routes, and software-defined `permissionDefinitions`. The routes are built from
+the shared `CommerceRuntimeContext`, which holds configuration, the `Transactor`, the
+offerings snapshot repository, `context.sessions`, and `context.authorization`. The
+runtime owns the error handling around every route.
 
 ### Application entities and the shared transaction
 
@@ -330,8 +330,10 @@ runtime version and the database shape it requires are one compatibility unit.
 - **Ownership.** Sharing one database is not shared ownership. Runtime migrations change
   only runtime-owned objects and never touch application tables, indexes, constraints,
   sequences, or views. Application migrations may *reference* runtime-owned objects (for
-  example a foreign key to the key of a `commerce` table) but never alter them. This is an
-  architectural contract enforced by review, not by inspecting SQL.
+  example a foreign key to the key of a `commerce` table) but never alter their DDL. They
+  may remove stale grants for an application-defined permission from
+  `commerce.role_permissions` before startup catalog validation. This narrow data cleanup
+  does not grant schema ownership. The boundary is enforced by review, not SQL inspection.
 - **Explicit ordering.** `MigrationLifecycle.migrate()` validates and migrates the runtime
   stream, then validates and migrates the application stream, so application migrations
   may depend on objects the runtime migrations just created.
@@ -593,7 +595,7 @@ Later requests:
 ```text
 HTTP request
     → SessionTokenExtractor          (BearerSessionToken, SessionCookie, or the application's own)
-    → SessionManager.resolve(token)  (digest lookup; unknown, expired, or revoked → 401)
+    → SessionManager.resolve(token)  (digest lookup plus current principal status; invalid → 401)
     → authenticatedPrincipal         (http4k request context)
     → requirePermission(permission)  (PrincipalId.can with the live runtime PermissionResolver → 403)
     → business handler
@@ -659,6 +661,14 @@ on sessions that are already active.
 | `sessionAuthentication(sessions, extractor)` | The filter that resolves the token and sets `authenticatedPrincipal`, or answers `401`. |
 | `runtime.http`: `authenticatedPrincipal` | The read-only request lens handlers use. Only the runtime's authentication filters set it. |
 | `runtime.http`: `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl` | Authorization filters and the declarative `public()` / `authenticated()` / `requirePermission(...)` route protection. |
+
+**Sessions authenticate only known, ACTIVE runtime principals.** `create` checks the
+runtime directory in its transaction: an unknown principal raises `NotFound`, and a
+disabled one raises `Conflict`. `resolve` checks current principal existence and status
+alongside session state, returning `null` if the principal is missing or disabled. The
+session manager and authorization directory share an internal repository; neither
+depends on the other to resolve principal status. Disabling still atomically revokes
+existing sessions. Re-enabling permits a new session but never revives a revoked token.
 
 Security decisions:
 
@@ -738,9 +748,16 @@ Built-in permission definitions are listed explicitly in
 `ApplicationContributions(permissionDefinitions = listOf(...))`. Duplicate keys fail
 runtime composition; unknown keys fail role creation or permission replacement with
 `422 validation_failed`. Permissions cannot be created by an administration route.
+After runtime and application migrations, before HTTP composition, the runtime rejects
+any persisted `commerce.role_permissions` key missing from the running catalog and names
+the unknown keys. An application release removing a permission must migrate away its
+stored grants first. Live resolution checks the same catalog again and fails closed if
+an unknown grant appears after startup; the startup failure is never silently filtered.
 `CommercePermissions.RoleRead` inspects roles and the catalog; `RoleManage` changes role
-definitions and grants; `RoleAssign` changes assignments. `UserRead` and `UserManage`
-also cover service identities. All conventional role keys, including `Administrator`,
+definitions and grants; `RoleAssign` changes assignments. `PrincipalRead` and `PrincipalManage`
+(`commerce.principal.read` and `commerce.principal.manage`) cover both human and service
+identities. `RoleAssign` can attach any existing role to a principal; it has no grant
+ceiling in this version. All conventional role keys, including `Administrator`,
 have only the grants explicitly stored by the application. There is no bypass or wildcard.
 
 The administration methods have overloads taking the caller's `Transaction`. This lets
@@ -754,7 +771,7 @@ are disabled rather than deleted.
 // Bootstrap policy and the password hash come from this application.
 context.transactor.inTransaction { transaction ->
     val role = RoleDefinition(CommerceRoles.Administrator, "Administrator", null,
-        setOf(CommercePermissions.UserRead, CommercePermissions.UserManage,
+        setOf(CommercePermissions.PrincipalRead, CommercePermissions.PrincipalManage,
             CommercePermissions.RoleRead, CommercePermissions.RoleManage,
             CommercePermissions.RoleAssign))
     context.authorization.createRole(transaction, role)
@@ -789,15 +806,15 @@ At that base path, the capability exposes:
 
 | Method | Path | Required permission |
 |---|---|---|
-| GET, POST | `/users` | `UserRead`, `UserManage` respectively |
-| GET, PATCH | `/users/{userId}` | `UserRead`, `UserManage` |
-| PUT | `/users/{userId}/status` | `UserManage` |
-| GET | `/users/{userId}/roles` | `UserRead` |
+| GET, POST | `/users` | `PrincipalRead`, `PrincipalManage` respectively |
+| GET, PATCH | `/users/{userId}` | `PrincipalRead`, `PrincipalManage` |
+| PUT | `/users/{userId}/status` | `PrincipalManage` |
+| GET | `/users/{userId}/roles` | `PrincipalRead` |
 | PUT, DELETE | `/users/{userId}/roles/{roleKey}` | `RoleAssign` |
-| GET, POST | `/services` | `UserRead`, `UserManage` respectively |
-| GET, PATCH | `/services/{serviceId}` | `UserRead`, `UserManage` |
-| PUT | `/services/{serviceId}/status` | `UserManage` |
-| GET | `/services/{serviceId}/roles` | `UserRead` |
+| GET, POST | `/services` | `PrincipalRead`, `PrincipalManage` respectively |
+| GET, PATCH | `/services/{serviceId}` | `PrincipalRead`, `PrincipalManage` |
+| PUT | `/services/{serviceId}/status` | `PrincipalManage` |
+| GET | `/services/{serviceId}/roles` | `PrincipalRead` |
 | PUT, DELETE | `/services/{serviceId}/roles/{roleKey}` | `RoleAssign` |
 | GET, POST | `/roles` | `RoleRead`, `RoleManage` respectively |
 | GET, PATCH, DELETE | `/roles/{roleKey}` | `RoleRead`, `RoleManage`, `RoleManage` |
@@ -934,7 +951,7 @@ transaction in which the application writes it.
 - No executable or deployable packaging, by design. Concrete applications own `main()`,
   build their own runnable jar (for example with the Shadow plugin) and image. This
   library publishes a plain jar.
-- `ApplicationContributions` covers routes and migrations only, and together with
+- `ApplicationContributions` covers routes, migrations, and permission definitions, and together with
   `CommerceRuntimeContext` it is provisional (see
   [Provisional extension seam](#provisional-extension-seam)). Other contribution points
   will be added when a concrete consumer needs them.

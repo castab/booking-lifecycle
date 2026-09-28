@@ -75,6 +75,36 @@ internal class AuthorizationRepository {
             is ServiceId -> service(tx, id)
         }
 
+    /** Identity-only lookup shared by sessions; an orphan principal row is not an identity. */
+    fun principalStatus(
+        tx: Transaction,
+        id: PrincipalId,
+        lock: Boolean = false,
+    ): PrincipalStatus? =
+        tx.handle
+            .createQuery(
+                """SELECT p.status FROM commerce.principals p
+               WHERE p.principal_kind = :kind AND p.principal_id = :id
+                 AND ((p.principal_kind = 'USER' AND EXISTS
+                     (SELECT 1 FROM commerce.users u WHERE u.principal_kind = p.principal_kind AND u.principal_id = p.principal_id))
+                   OR (p.principal_kind = 'SERVICE' AND EXISTS
+                     (SELECT 1 FROM commerce.service_identities s WHERE s.principal_kind = p.principal_kind AND s.principal_id = p.principal_id)))
+               ${if (lock) "FOR SHARE OF p" else ""}""",
+            ).bind("kind", PrincipalIdColumns.kind(id))
+            .bind("id", PrincipalIdColumns.value(id))
+            .mapTo(String::class.java)
+            .findOne()
+            .orElse(null)
+            ?.let(PrincipalStatus::valueOf)
+
+    fun storedPermissionKeys(tx: Transaction): Set<PermissionKey> =
+        tx.handle
+            .createQuery("SELECT DISTINCT permission_key FROM commerce.role_permissions")
+            .mapTo(String::class.java)
+            .list()
+            .map(::PermissionKey)
+            .toSet()
+
     fun insertUser(
         tx: Transaction,
         user: User,

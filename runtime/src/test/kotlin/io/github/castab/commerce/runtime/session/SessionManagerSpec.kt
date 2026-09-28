@@ -1,6 +1,8 @@
 package io.github.castab.commerce.runtime.session
 
 import com.zaxxer.hikari.HikariDataSource
+import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.persistence.AuthorizationRepository
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
@@ -8,6 +10,8 @@ import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.testing.MutableClock
 import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.github.castab.commerce.runtime.testing.capturingStandardOutput
+import io.github.castab.commerce.runtime.testing.insertTestPrincipal
+import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.kotest.assertions.throwables.shouldThrow
@@ -40,7 +44,8 @@ class SessionManagerSpec :
             dataSource = createDataSource(database.configuration, "session-manager-spec")
             MigrationLifecycle(dataSource, listOf("classpath:db/testapp")).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
-            sessions = PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), lifetime, clock)
+            sessions =
+                PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), AuthorizationRepository(), lifetime, clock)
         }
 
         afterSpec {
@@ -48,7 +53,42 @@ class SessionManagerSpec :
             database.close()
         }
 
-        fun user() = UserId(UUID.randomUUID())
+        fun user() = UserId(UUID.randomUUID()).also { transactor.insertTestPrincipal(it) }
+
+        test("unknown and disabled users and services cannot receive sessions") {
+            val unknownUser = UserId(UUID.randomUUID())
+            val unknownService = ServiceId(UUID.randomUUID())
+            shouldThrow<CommerceFailure.NotFound> { sessions.create(unknownUser) }
+            shouldThrow<CommerceFailure.NotFound> { sessions.create(unknownService) }
+
+            val disabledUser = UserId(UUID.randomUUID()).also { transactor.insertTestPrincipal(it, PrincipalStatus.DISABLED) }
+            val disabledService = ServiceId(UUID.randomUUID()).also { transactor.insertTestPrincipal(it, PrincipalStatus.DISABLED) }
+            shouldThrow<CommerceFailure.Conflict> { sessions.create(disabledUser) }
+            shouldThrow<CommerceFailure.Conflict> { sessions.create(disabledService) }
+        }
+
+        test("resolution rejects a principal disabled outside the directory's revoke operation") {
+            val principal = user()
+            val token = sessions.create(principal).token
+            transactor.inTransaction { AuthorizationRepository().updateStatus(it, principal, PrincipalStatus.DISABLED) }
+            sessions.resolve(token).shouldBeNull()
+        }
+
+        test("resolution rejects a session whose principal no longer exists") {
+            val principal = user()
+            val token = sessions.create(principal).token
+            transactor.inTransaction { transaction ->
+                transaction.handle
+                    .createUpdate("DELETE FROM commerce.users WHERE principal_id = :id")
+                    .bind("id", principal.value)
+                    .execute()
+                transaction.handle
+                    .createUpdate("DELETE FROM commerce.principals WHERE principal_kind = 'USER' AND principal_id = :id")
+                    .bind("id", principal.value)
+                    .execute()
+            }
+            sessions.resolve(token).shouldBeNull()
+        }
 
         test("create issues a fixed-lifetime session for an already authenticated principal") {
             val principal = user()
@@ -74,6 +114,7 @@ class SessionManagerSpec :
 
         test("a service principal's session resolves to its ServiceId") {
             val service = ServiceId(UUID.randomUUID())
+            transactor.insertTestPrincipal(service)
 
             sessions.resolve(sessions.create(service).token) shouldBe service
         }
@@ -115,7 +156,8 @@ class SessionManagerSpec :
             val second = sessions.create(principal)
             val otherUser = sessions.create(user())
             // Same UUID, different kind of principal.
-            val sameUuidService = sessions.create(ServiceId(principal.value))
+            val sameUuidId = ServiceId(principal.value).also { transactor.insertTestPrincipal(it) }
+            val sameUuidService = sessions.create(sameUuidId)
 
             sessions.revokeAll(principal)
             sessions.revokeAll(principal)
@@ -179,7 +221,7 @@ class SessionManagerSpec :
 
         test("the lifetime must be positive") {
             shouldThrow<IllegalArgumentException> {
-                PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), Duration.ZERO, clock)
+                PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), AuthorizationRepository(), Duration.ZERO, clock)
             }
         }
     })

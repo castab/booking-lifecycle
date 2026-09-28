@@ -200,6 +200,9 @@ class AuthorizationDirectorySpec :
                     }
                     auth.getUser(staff.id)!!.status shouldBe PrincipalStatus.DISABLED
                     context.sessions.resolve(token).shouldBeNull()
+                    auth.setStatus(staff.id, PrincipalStatus.ACTIVE)
+                    context.sessions.resolve(token).shouldBeNull()
+                    context.sessions.resolve(context.sessions.create(staff.id).token) shouldBe staff.id
                 }
             } finally {
                 database.close()
@@ -221,7 +224,7 @@ class AuthorizationDirectorySpec :
                     ),
                 ).use {
                     val initial = user("bootstrap")
-                    val admin = role(CommerceRoles.Administrator.value, setOf(CommercePermissions.UserManage))
+                    val admin = role(CommerceRoles.Administrator.value, setOf(CommercePermissions.PrincipalManage))
                     context.transactor.inTransaction { tx ->
                         context.authorization.createRole(tx, admin)
                         context.authorization.createUser(tx, initial)
@@ -231,7 +234,7 @@ class AuthorizationDirectorySpec :
                             .execute()
                         context.authorization.assignRole(tx, initial.id, admin.key)
                     }
-                    context.authorization.permissionResolver.permissionsFor(initial.id) shouldBe setOf(CommercePermissions.UserManage)
+                    context.authorization.permissionResolver.permissionsFor(initial.id) shouldBe setOf(CommercePermissions.PrincipalManage)
                     context.transactor.inTransaction { tx ->
                         tx.handle
                             .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
@@ -281,8 +284,8 @@ class AuthorizationDirectorySpec :
                         role(
                             "example.admin",
                             setOf(
-                                CommercePermissions.UserRead,
-                                CommercePermissions.UserManage,
+                                CommercePermissions.PrincipalRead,
+                                CommercePermissions.PrincipalManage,
                                 CommercePermissions.RoleRead,
                                 CommercePermissions.RoleManage,
                                 CommercePermissions.RoleAssign,
@@ -314,6 +317,8 @@ class AuthorizationDirectorySpec :
                         listOf(
                             Method.GET to "$base/users",
                             Method.POST to "$base/users",
+                            Method.GET to "$base/services",
+                            Method.POST to "$base/services",
                             Method.GET to "$base/roles",
                             Method.POST to "$base/roles",
                             Method.PUT to "$base/users/${viewer.id.value}/roles/${adminRole.key.value}",
@@ -323,6 +328,7 @@ class AuthorizationDirectorySpec :
                         request(method, path, viewerToken).status shouldBe Status.FORBIDDEN
                     }
                     request(Method.GET, "$base/users", adminToken).status shouldBe Status.OK
+                    request(Method.GET, "$base/services", adminToken).status shouldBe Status.OK
                     request(Method.GET, "$base/permissions", adminToken).bodyString().contains(customPermission.key.value) shouldBe true
                     request(
                         Method.POST,
@@ -335,9 +341,9 @@ class AuthorizationDirectorySpec :
                         Method.PUT,
                         "$base/roles/example.custom/permissions",
                         adminToken,
-                        """{"permissions":["commerce.user.read"]}""",
+                        """{"permissions":["commerce.principal.read"]}""",
                     ).status shouldBe Status.OK
-                    auth.getRole(RoleKey("example.custom"))!!.permissions shouldBe setOf(CommercePermissions.UserRead)
+                    auth.getRole(RoleKey("example.custom"))!!.permissions shouldBe setOf(CommercePermissions.PrincipalRead)
                     request(Method.POST, "$base/services", adminToken, """{"name":"worker"}""").status shouldBe Status.CREATED
                     auth.listServices().size shouldBe 1
                     request(
@@ -373,9 +379,86 @@ class AuthorizationDirectorySpec :
                     commerceRuntime(
                         database.configuration(),
                         ApplicationContributions(
-                            permissionDefinitions = listOf(PermissionDefinition(CommercePermissions.UserRead, "Duplicate", null)),
+                            permissionDefinitions = listOf(PermissionDefinition(CommercePermissions.PrincipalRead, "Duplicate", null)),
                         ),
                     )
+                }
+            } finally {
+                database.close()
+            }
+        }
+
+        test("stored grants must remain in the running permission catalog") {
+            val database = TestDatabase.create()
+            try {
+                lateinit var context: CommerceRuntimeContext
+                val withCustomPermission =
+                    ApplicationContributions(
+                        permissionDefinitions = listOf(customPermission),
+                        routes = {
+                            context = it
+                            emptyList()
+                        },
+                    )
+                val operator = user("operator")
+                commerceRuntime(database.configuration(), withCustomPermission).use {
+                    context.authorization.createUser(operator)
+                    context.authorization.createRole(role("example.operator", setOf(customPermission.key)))
+                    context.authorization.assignRole(operator.id, RoleKey("example.operator"))
+                }
+                commerceRuntime(database.configuration(), withCustomPermission).use {
+                    context.authorization.permissionResolver.permissionsFor(operator.id) shouldBe setOf(customPermission.key)
+                }
+                val failure =
+                    shouldThrow<IllegalStateException> {
+                        commerceRuntime(database.configuration(), ApplicationContributions())
+                    }
+                failure.message!!.contains(customPermission.key.value) shouldBe true
+
+                commerceRuntime(
+                    database.configuration(),
+                    ApplicationContributions(
+                        migrationLocations = listOf("classpath:db/testapp-remove-stale-permission"),
+                        routes = {
+                            context = it
+                            emptyList()
+                        },
+                    ),
+                ).use {
+                    context.authorization.permissionResolver.permissionsFor(operator.id) shouldBe emptySet()
+                    context.authorization.getRole(RoleKey("example.operator"))!!.permissions shouldBe emptySet()
+                }
+            } finally {
+                database.close()
+            }
+        }
+
+        test("a grant inserted after startup fails closed during live permission resolution") {
+            val database = TestDatabase.create()
+            try {
+                lateinit var context: CommerceRuntimeContext
+                commerceRuntime(
+                    database.configuration(),
+                    ApplicationContributions(routes = {
+                        context = it
+                        emptyList()
+                    }),
+                ).use {
+                    val staff = context.authorization.createUser(user("operator"))
+                    val key = RoleKey("example.operator")
+                    context.authorization.createRole(role(key.value, emptySet()))
+                    context.authorization.assignRole(staff.id, key)
+                    context.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES (:role, :permission)",
+                            ).bind("role", key.value)
+                            .bind("permission", "unknown.permission")
+                            .execute()
+                    }
+                    shouldThrow<IllegalStateException> {
+                        context.authorization.permissionResolver.permissionsFor(staff.id)
+                    }
                 }
             } finally {
                 database.close()

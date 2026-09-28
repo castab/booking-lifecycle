@@ -1854,7 +1854,7 @@ authenticate caller → PrincipalId → resolve Principal → assigned RoleKey
 shared by humans and services. `CommerceRoles` (`Administrator`, `Manager`,
 `Supervisor`, `Employee`) provides conventional keys without built-in grants.
 `CommercePermissions` provides keys for booking read/modify, financial-document
-read/create, offerings catalog management, payment/refund recording, and user
+read/create, offerings catalog management, payment/refund recording, and principal
 read/manage, role read/manage, and role assignment. `PermissionDefinition` supplies
 human-readable metadata for a code-backed `PermissionKey`; it does not make permissions
 database-created resources. Applications choose actual role bundles and may add their
@@ -1899,7 +1899,7 @@ val roleResolver = RoleResolver { key -> rolesByKey[key] }
 val permissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
 
 stripeAdapter.id.can(CommercePermissions.PaymentRecord, permissionResolver) // true
-stripeAdapter.id.can(CommercePermissions.UserManage, permissionResolver)    // false
+stripeAdapter.id.can(CommercePermissions.PrincipalManage, permissionResolver)    // false
 userId.can(MessageRespond, permissionResolver)                              // same API for a human
 ```
 

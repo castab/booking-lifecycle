@@ -46,6 +46,11 @@ class PermissionCatalog(
         val unknown = keys.filterNot { it in byKey }
         if (unknown.isNotEmpty()) throw CommerceFailure.ValidationFailed("Unknown permissions: ${unknown.joinToString { it.value }}")
     }
+
+    internal fun validatePersisted(keys: Set<PermissionKey>) {
+        val unknown = keys.filterNot { it in byKey }.sortedBy { it.value }
+        if (unknown.isNotEmpty()) error("Stored role permissions missing from PermissionCatalog: ${unknown.joinToString { it.value }}")
+    }
 }
 
 /** Explicit catalog. These keys denote code capabilities, never database-created permissions. */
@@ -58,8 +63,8 @@ val commercePermissionDefinitions: List<PermissionDefinition> =
         PermissionDefinition(CommercePermissions.OfferingsManage, "Manage offerings", null),
         PermissionDefinition(CommercePermissions.PaymentRecord, "Record payments", null),
         PermissionDefinition(CommercePermissions.RefundRecord, "Record refunds", null),
-        PermissionDefinition(CommercePermissions.UserRead, "Read principals", null),
-        PermissionDefinition(CommercePermissions.UserManage, "Manage principals", null),
+        PermissionDefinition(CommercePermissions.PrincipalRead, "Read principals", null),
+        PermissionDefinition(CommercePermissions.PrincipalManage, "Manage principals", null),
         PermissionDefinition(CommercePermissions.RoleRead, "Read roles and permissions", null),
         PermissionDefinition(CommercePermissions.RoleManage, "Manage role definitions", null),
         PermissionDefinition(CommercePermissions.RoleAssign, "Assign roles", null),
@@ -78,7 +83,11 @@ class AuthorizationDirectory internal constructor(
 ) {
     val principalResolver = PrincipalResolver { id -> transactor.inTransaction { repository.principal(it, id) } }
     val roleResolver = RoleResolver { key -> transactor.inTransaction { repository.role(it, key) } }
-    val permissionResolver: PermissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
+    private val roleBasedPermissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
+    val permissionResolver: PermissionResolver =
+        PermissionResolver { id ->
+            roleBasedPermissionResolver.permissionsFor(id).also(permissionCatalog::validatePersisted)
+        }
 
     fun listUsers(): List<User> = transactor.inTransaction { repository.users(it) }
 

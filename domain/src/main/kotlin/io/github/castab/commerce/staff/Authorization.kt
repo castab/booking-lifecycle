@@ -155,10 +155,10 @@ object CommercePermissions {
     val RefundRecord: PermissionKey = PermissionKey("commerce.refund.record")
 
     /** Read a human or service principal. */
-    val UserRead: PermissionKey = PermissionKey("commerce.user.read")
+    val PrincipalRead: PermissionKey = PermissionKey("commerce.principal.read")
 
     /** Manage human or service principal identity and status. */
-    val UserManage: PermissionKey = PermissionKey("commerce.user.manage")
+    val PrincipalManage: PermissionKey = PermissionKey("commerce.principal.manage")
 
     /** Inspect role definitions and the software-defined permission catalog. */
     val RoleRead: PermissionKey = PermissionKey("commerce.role.read")

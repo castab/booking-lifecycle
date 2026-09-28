@@ -69,8 +69,8 @@ fun authorizationAdministrationHttpCapability(
     val errorBody = jsonBody(ErrorResponse.serializer())
     val sampleUser = UserDto(UUID(0, 1).toString(), "staff", "Staff", "Member", "Staff Member", "ACTIVE", listOf("commerce.manager"))
     val sampleService = ServiceDto(UUID(0, 2).toString(), "worker", "ACTIVE", listOf("commerce.manager"))
-    val sampleRole = RoleDto("commerce.manager", "Manager", "Manages staff", listOf(CommercePermissions.UserRead.value))
-    val samplePermission = PermissionDto(CommercePermissions.UserRead.value, "Read principals", "Read principal identities")
+    val sampleRole = RoleDto("commerce.manager", "Manager", "Manages staff", listOf(CommercePermissions.PrincipalRead.value))
+    val samplePermission = PermissionDto(CommercePermissions.PrincipalRead.value, "Read principals", "Read principal identities")
 
     fun RouteMetaDsl.errors(vararg statuses: Status) {
         statuses.forEach { status ->
@@ -89,8 +89,8 @@ fun authorizationAdministrationHttpCapability(
     }
 
     fun guard(permission: PermissionKey) = accessControl.requirePermission(permission)
-    val readUser = guard(CommercePermissions.UserRead)
-    val manageUser = guard(CommercePermissions.UserManage)
+    val readPrincipal = guard(CommercePermissions.PrincipalRead)
+    val managePrincipal = guard(CommercePermissions.PrincipalManage)
     val readRole = guard(CommercePermissions.RoleRead)
     val manageRole = guard(CommercePermissions.RoleManage)
     val assignRole = guard(CommercePermissions.RoleAssign)
@@ -100,7 +100,7 @@ fun authorizationAdministrationHttpCapability(
         protected("ListUsers", "List users")
         returning(Status.OK, usersBody to UsersDto(listOf(sampleUser)))
     } bindContract Method.GET to
-        readUser.then { _: Request ->
+        readPrincipal.then { _: Request ->
             Response(Status.OK).with(usersBody of UsersDto(directory.listUsers().map { it.dto() }))
         }
     routes += "$basePath/users" meta {
@@ -109,7 +109,7 @@ fun authorizationAdministrationHttpCapability(
         receiving(userWrite to UserWriteDto("staff", "Staff", "Member", "Staff Member"))
         returning(Status.CREATED, userBody to sampleUser)
     } bindContract Method.POST to
-        manageUser.then { request: Request ->
+        managePrincipal.then { request: Request ->
             val created = directory.createUser(userWrite(request).user(UserId(UUID.randomUUID())))
             Response(Status.CREATED).with(userBody of created.dto())
         }
@@ -117,7 +117,7 @@ fun authorizationAdministrationHttpCapability(
         protected("GetUser", "Get a user")
         returning(Status.OK, userBody to sampleUser)
     } bindContract Method.GET to { id: String ->
-        readUser.then { _: Request ->
+        readPrincipal.then { _: Request ->
             val user = directory.getUser(id.userId()) ?: throw CommerceFailure.NotFound("User does not exist")
             Response(Status.OK).with(userBody of user.dto())
         }
@@ -128,7 +128,7 @@ fun authorizationAdministrationHttpCapability(
         receiving(userWrite to UserWriteDto("staff", "Staff", "Member", "Staff Member"))
         returning(Status.OK, userBody to sampleUser)
     } bindContract Method.PATCH to { id: String ->
-        manageUser.then { request: Request ->
+        managePrincipal.then { request: Request ->
             val fields = userWrite(request)
             Response(Status.OK).with(
                 userBody of
@@ -142,7 +142,7 @@ fun authorizationAdministrationHttpCapability(
         receiving(statusBody to StatusDto("DISABLED"))
         returning(Status.OK, userBody to sampleUser)
     } bindContract Method.PUT to { id: String, _: String ->
-        manageUser.then { request: Request ->
+        managePrincipal.then { request: Request ->
             Response(Status.OK).with(
                 userBody of
                     (directory.setStatus(id.userId(), statusBody(request).status.status()) as io.github.castab.commerce.staff.User).dto(),
@@ -153,7 +153,7 @@ fun authorizationAdministrationHttpCapability(
         protected("UserRoles", "List a user's assigned roles")
         returning(Status.OK, assignmentsBody to AssignmentsDto(listOf("commerce.manager")))
     } bindContract Method.GET to { id: String, _: String ->
-        readUser.then { _: Request ->
+        readPrincipal.then { _: Request ->
             Response(Status.OK).with(assignmentsBody of AssignmentsDto(directory.assignedRoles(id.userId()).map { it.role.value }.sorted()))
         }
     }
@@ -180,7 +180,7 @@ fun authorizationAdministrationHttpCapability(
         protected("ListServices", "List service identities")
         returning(Status.OK, servicesBody to ServicesDto(listOf(sampleService)))
     } bindContract Method.GET to
-        readUser.then { _: Request ->
+        readPrincipal.then { _: Request ->
             Response(Status.OK).with(servicesBody of ServicesDto(directory.listServices().map { it.dto() }))
         }
     routes += "$basePath/services" meta {
@@ -189,7 +189,7 @@ fun authorizationAdministrationHttpCapability(
         receiving(serviceWrite to ServiceWriteDto("worker"))
         returning(Status.CREATED, serviceBody to sampleService)
     } bindContract Method.POST to
-        manageUser.then { request: Request ->
+        managePrincipal.then { request: Request ->
             Response(Status.CREATED).with(
                 serviceBody of directory.createService(serviceWrite(request).service(ServiceId(UUID.randomUUID()))).dto(),
             )
@@ -198,7 +198,7 @@ fun authorizationAdministrationHttpCapability(
         protected("GetService", "Get a service identity")
         returning(Status.OK, serviceBody to sampleService)
     } bindContract Method.GET to { id: String ->
-        readUser.then { _: Request ->
+        readPrincipal.then { _: Request ->
             Response(Status.OK).with(
                 serviceBody of (directory.getService(id.serviceId()) ?: throw CommerceFailure.NotFound("Service does not exist")).dto(),
             )
@@ -210,7 +210,7 @@ fun authorizationAdministrationHttpCapability(
         receiving(serviceWrite to ServiceWriteDto("worker"))
         returning(Status.OK, serviceBody to sampleService)
     } bindContract Method.PATCH to { id: String ->
-        manageUser.then { request: Request ->
+        managePrincipal.then { request: Request ->
             Response(Status.OK).with(serviceBody of directory.renameService(id.serviceId(), serviceWrite(request).name).dto())
         }
     }
@@ -220,7 +220,7 @@ fun authorizationAdministrationHttpCapability(
         receiving(statusBody to StatusDto("DISABLED"))
         returning(Status.OK, serviceBody to sampleService)
     } bindContract Method.PUT to { id: String, _: String ->
-        manageUser.then { request: Request ->
+        managePrincipal.then { request: Request ->
             Response(Status.OK).with(
                 serviceBody of
                     (
@@ -236,7 +236,7 @@ fun authorizationAdministrationHttpCapability(
         protected("ServiceRoles", "List a service identity's roles")
         returning(Status.OK, assignmentsBody to AssignmentsDto(listOf("commerce.manager")))
     } bindContract Method.GET to { id: String, _: String ->
-        readUser.then { _: Request ->
+        readPrincipal.then { _: Request ->
             Response(Status.OK).with(
                 assignmentsBody of AssignmentsDto(directory.assignedRoles(id.serviceId()).map { it.role.value }.sorted()),
             )

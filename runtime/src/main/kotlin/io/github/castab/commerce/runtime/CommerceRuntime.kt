@@ -154,8 +154,16 @@ fun commerceRuntime(
 
         val jdbi = Jdbi.create(dataSource)
         val transactor = Transactor(jdbi)
-        val sessions = PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), configuration.sessions.lifetime)
-        val authorization = AuthorizationDirectory(transactor, AuthorizationRepository(), sessions, permissionCatalog)
+        val authorizationRepository = AuthorizationRepository()
+        transactor.inTransaction { permissionCatalog.validatePersisted(authorizationRepository.storedPermissionKeys(it)) }
+        val sessions =
+            PersistentSessionManager(
+                transactor,
+                PostgresPrincipalSessionRepository(),
+                authorizationRepository,
+                configuration.sessions.lifetime,
+            )
+        val authorization = AuthorizationDirectory(transactor, authorizationRepository, sessions, permissionCatalog)
         val context = CommerceRuntimeContext(configuration, transactor, PostgresOfferingsSnapshotRepository(), sessions, authorization)
 
         val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))
