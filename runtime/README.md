@@ -250,7 +250,7 @@ never open their own transactions.
 |---|---|
 | `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, commerce repositories, `financialLedger`, `sessions`, and `authorization`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
-| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
+| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor`, `Transaction` and `TransactionIsolation`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
 | `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, and derived reconciliation. |
 | `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
 | `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
@@ -580,12 +580,61 @@ for an application that exposes its own protected routes.
 ### Transactions
 
 `Transactor.inTransaction { transaction -> ... }` commits when the block returns and rolls
-back when it throws, rethrowing the original exception. Repository methods take the
-`Transaction` as their first parameter. An operation that coordinates several persistent
-concepts does everything inside one `inTransaction` call. For example: payment recorded,
-allocation recorded, reconciliation derived, booking policy evaluated, booking and
-document transitioned. A nested `inTransaction` call opens a separate transaction, so pass
-the existing `Transaction` down instead.
+back when it throws, rethrowing the original exception. An operation that coordinates
+several persistent concepts does everything inside one `inTransaction` call, opens it once,
+and passes the caller-owned `Transaction` to repositories and services. For example:
+payment recorded, allocation recorded, reconciliation derived, booking policy evaluated,
+booking and document transitioned. Repository methods take the `Transaction` as their
+first parameter and all of them participate in that one transaction.
+
+#### Transaction isolation
+
+```kotlin
+transactor.inTransaction { transaction -> ... }                                       // runtime default
+transactor.inTransaction(TransactionIsolation.READ_COMMITTED) { transaction -> ... }  // explicit READ COMMITTED
+transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction -> ... } // explicit REPEATABLE READ
+```
+
+```kotlin
+val result =
+    transactor.inTransaction(
+        isolation = TransactionIsolation.REPEATABLE_READ,
+    ) { transaction ->
+        // Multiple SELECTs in this block observe one PostgreSQL snapshot.
+        repositoryA.find(transaction, ...)
+        repositoryB.find(transaction, ...)
+    }
+```
+
+- Without an isolation, the transaction uses the runtime's default: the pool baseline,
+  which `createDataSource` sets to `READ COMMITTED`. Passing a `TransactionIsolation`
+  requests exactly that level, whatever the connection's baseline, so
+  `REPEATABLE_READ` must always be requested explicitly.
+- Isolation applies to the whole transaction and is in effect before its first statement.
+  The runtime owns the translation to JDBC and PostgreSQL; `TransactionIsolation` is the
+  only type callers use.
+- Choose isolation at the outer transaction boundary. Repositories and operations that
+  receive the `Transaction` inherit it through the caller-owned `Transaction`; they take no
+  isolation parameter and never open a transaction of their own.
+- The level is scoped to that one call. When a connection returns to the pool it is back
+  at its baseline: JDBI restores the previous level when the transaction ends, and
+  `createDataSource` sets the `READ COMMITTED` baseline that Hikari also restores.
+- Readers at `REPEATABLE_READ` do not block writers. It gives coherent multi-query reads;
+  it does not serialize writes. Explicit row locking (`SELECT ... FOR UPDATE`) and
+  expected-version checks remain the tools for that. Other levels, and `SERIALIZABLE`
+  retry handling, are not supported.
+
+#### Nested `inTransaction`
+
+Prefer passing the `Transaction` down; it makes transaction ownership and isolation
+explicit. Calling `inTransaction` again on the same thread from inside a block does not open
+a separate transaction. JDBI joins the managed handle, so the inner block uses the same
+connection and commits or rolls back with the outer transaction, and an outer failure rolls
+back the inner block's writes too. An inner call without an isolation inherits the outer
+transaction's, and one that repeats it is accepted. An inner call requesting a different
+isolation fails with JDBI's `TransactionException`, because the level of an open
+transaction cannot change; the outer transaction rolls back if that exception escapes its
+block. Only the outer call chooses the isolation.
 
 ### HTTP and errors
 
