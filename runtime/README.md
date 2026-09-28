@@ -451,6 +451,7 @@ val catalog =
             basePath = "/offering-catalog",
             operationIdPrefix = "primaryOfferings",
             access = OfferingsHttpAccess.ReadWrite(access), // or OfferingsHttpAccess.ReadOnly
+            tags = setOf(Tag("Catalog", "Offerings catalog")), // optional OpenAPI grouping
         ),
     )
 val api = contract {
@@ -467,6 +468,12 @@ schema hook; the runtime's HTTP transport remains
 `CommerceJson` with kotlinx.serialization. The public `ContractRoute` API comes from
 `http4k-api-openapi`, declared as an `api` dependency. The runtime does not create the
 host's aggregate OpenAPI document or Swagger UI. It never mounts these routes by default.
+
+The host also chooses OpenAPI grouping. `OfferingsHttpBinding.tags` (http4k's
+`org.http4k.contract.Tag`, with an optional description) is applied to every route of
+that binding, so Swagger UI can show each catalog under its own heading. Without tags,
+http4k's default applies: an untagged route is grouped under its contract root, which is
+blank for a contract mounted at `/`. Blank tag names are rejected.
 
 At the chosen base path, the capability offers:
 
@@ -794,6 +801,7 @@ val admin = authorizationAdministrationHttpCapability(
     context = context,
     accessControl = access,
     basePath = "/admin/access",
+    tags = setOf(Tag("Staff administration")), // optional OpenAPI grouping
 )
 val api = contract {
     renderer = OpenApi3(ApiInfo("My application", "1"), Jackson)
@@ -801,6 +809,9 @@ val api = contract {
     routes += admin.contractRoutes
 }
 ```
+
+As with Offerings, the optional `tags` are the host's OpenAPI grouping and apply to every
+administration route. Blank names are rejected.
 
 At that base path, the capability exposes:
 

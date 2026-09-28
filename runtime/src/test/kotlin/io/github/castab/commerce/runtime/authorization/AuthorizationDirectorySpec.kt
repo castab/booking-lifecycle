@@ -27,9 +27,15 @@ import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.flywaydb.core.Flyway
+import org.http4k.contract.Tag
 import org.http4k.contract.contract
 import org.http4k.contract.openapi.ApiInfo
 import org.http4k.contract.openapi.v3.OpenApi3
@@ -270,7 +276,12 @@ class AuthorizationDirectorySpec :
                                         renderer = OpenApi3(ApiInfo("Authorization", "1"), Jackson)
                                         descriptionPath = "/openapi.json"
                                         routes +=
-                                            authorizationAdministrationHttpCapability(supplied, access, "/admin/access").contractRoutes
+                                            authorizationAdministrationHttpCapability(
+                                                supplied,
+                                                access,
+                                                "/admin/access",
+                                                setOf(Tag("Staff administration", "Principals and roles")),
+                                            ).contractRoutes
                                     }
                                 listOf(host)
                             },
@@ -363,6 +374,29 @@ class AuthorizationDirectorySpec :
                     val spec = host(Request(Method.GET, "/openapi.json")).bodyString()
                     spec.contains("401") shouldBe true
                     spec.contains("403") shouldBe true
+                    val document = Json.parseToJsonElement(spec).jsonObject
+                    val operations =
+                        document["paths"]!!
+                            .jsonObject
+                            .filterKeys { it.startsWith("$base/") }
+                            .values
+                            .flatMap { it.jsonObject.values }
+                    operations.size shouldBe 23
+                    operations.forEach { operation ->
+                        operation.jsonObject["tags"]!!.jsonArray.map { it.jsonPrimitive.content } shouldContainExactly
+                            listOf("Staff administration")
+                    }
+                    document["tags"]!!
+                        .jsonArray
+                        .single()
+                        .jsonObject["description"]!!
+                        .jsonPrimitive.content shouldBe "Principals and roles"
+                    val blankTagAccess = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), auth.permissionResolver)
+                    listOf("", " ").forEach { name ->
+                        shouldThrow<IllegalArgumentException> {
+                            authorizationAdministrationHttpCapability(context, blankTagAccess, "/admin/other", setOf(Tag(name)))
+                        }
+                    }
                     request(Method.PUT, "$base/users/${viewer.id.value}/status", adminToken, """{"status":"DISABLED"}""").status shouldBe
                         Status.OK
                     request(Method.GET, "$base/users", viewerToken).status shouldBe Status.UNAUTHORIZED

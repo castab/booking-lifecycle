@@ -1028,6 +1028,9 @@ each requiring `CommercePermissions.OfferingsManage` through the application's
 permission requirement; the host decides where to mount them.
 Hosts rendering these routes with http4k OpenAPI use `offeringsOpenApiRenderer` so the
 shared `OfferingPriceDto` definition is the three-branch `kind`-discriminated `oneOf`.
+OpenAPI tags are host-supplied per capability instance (`OfferingsHttpBinding.tags`, and
+the `tags` parameter of `authorizationAdministrationHttpCapability`) and applied to every
+route of that instance. The runtime chooses no default grouping and rejects blank tag names.
 Application `OfferingsEngine` policy remains outside generic catalog HTTP. Released
 runtime migrations, including `V2__offerings_snapshots.sql`, remain immutable.
 
