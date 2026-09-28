@@ -248,16 +248,16 @@ never open their own transactions.
 
 | Package (`io.github.castab.commerce.runtime...`) | Contents |
 |---|---|
-| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, offerings snapshot repository, `sessions`, and `authorization`). |
+| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, commerce repositories, `financialLedger`, `sessions`, and `authorization`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
-| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, the offerings snapshot repository, internal session and authorization repositories, and PostgreSQL error helpers. |
+| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor` and `Transaction`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
+| `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, and derived reconciliation. |
 | `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
 | `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
 | `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, health routes, the `authenticatedPrincipal` request lens, and the authorization filters (`requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
 
-Packages for booking, financial, and payment orchestration will appear when they contain
-real code, not before.
+Booking orchestration will appear when it has a concrete generic use case.
 
 ## Runtime conventions
 
@@ -391,6 +391,12 @@ role permissions, and principal-role assignments. It leaves released migrations 
 The principal kind uses the same explicit `USER`/`SERVICE` mapping as sessions. Foreign
 keys reject assignments to missing principals or roles. Role deletion never cascades.
 
+`V5__financial_ledger.sql` adds immutable financial-document snapshots and ordered line
+items, payment records, and allocations. The snapshot key is `(document_id, version)`;
+the predecessor reference and unique `(document_id, previous_version)` reject gaps and
+competing successors. Allocations have foreign keys to their payment and the exact
+document snapshot. `(external_provider, external_reference)` is unique for payments.
+
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
 > baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
@@ -519,6 +525,50 @@ revision, category, or offering is `not_found` (404). Each route's OpenAPI metad
 the error statuses among these that the route can actually return. It does not evaluate
 an `OfferingsEngine`, own any application catalog contents, or implement update/delete
 commands. Released `V2__offerings_snapshots.sql` remains unchanged.
+
+### Financial ledger
+
+`CommerceRuntimeContext` supplies `financialDocumentRepository`, `paymentRepository`, and
+`financialLedger`. Repositories take the caller's `Transaction` and do not commit it.
+`FinancialDocumentRepository.asHistory(transaction)` implements the domain
+`FinancialDocumentHistory` SPI for reads within that transaction. It also exposes exact,
+latest, and ordered history reads. The ledger provides `create`, `get`, `latest`,
+`history`, `changeOrder`, `issueQuote`, and `issueInvoice`. It calls domain transition
+methods and appends successors; it never rewrites a stage. First snapshots may be
+Estimates, Quotes, or Invoices. An invalid stage transition raises
+`CommerceFailure.IllegalTransition`; a competing successor raises `Conflict`.
+
+The database stores line identity, order, description, optional sub-description and
+quantity, exact decimal price and tax, and currency. It stores no derived total or
+balance. On retrieval the repository rebuilds the domain snapshot, which recalculates
+all totals. PostgreSQL `numeric` preserves decimal values; timestamps store epoch
+seconds plus nanoseconds.
+
+`PaymentRecord` remains separate from `PaymentAllocation`. The ledger's `recordPayment`
+can leave money unapplied. `allocatePayment` loads an exact document snapshot, locks the
+payment row, checks all of that payment's allocations through
+`PaymentReconciliation`, and appends an allocation. `recordPaymentAgainstDocument` does
+the payment and allocation in one transaction. One payment can be split across documents.
+The original `(document_id, version)` of every allocation remains unchanged when the
+document advances. `reconcileLatest` and `reconcile(reference)` load lineage allocations
+and call `FinancialDocumentReconciliation`: gross allocated, net applied, and balance
+are derived across the lineage, using the selected snapshot's total. The current slice
+persists payments and allocations; reversal and refund persistence is deferred.
+
+An application creates authoritative `LineItem`s and a domain document itself, then can
+join its relationship write to the financial write:
+
+```kotlin
+context.transactor.inTransaction { transaction ->
+    context.financialLedger.create(transaction, estimate)
+    applicationRepository.associate(transaction, inquiryId, estimate.id)
+}
+```
+
+The application owns its identifiers, pricing, relationships, HTTP routes, authentication,
+and policy on which stages accept payments. No financial or payment routes are mounted by
+the runtime in this slice. Existing built-in commerce permission keys remain available
+for an application that exposes its own protected routes.
 
 ### Transactions
 
