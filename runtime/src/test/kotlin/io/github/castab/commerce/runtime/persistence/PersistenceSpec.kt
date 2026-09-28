@@ -1,5 +1,6 @@
 package io.github.castab.commerce.runtime.persistence
 
+import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.kotest.assertions.throwables.shouldThrow
@@ -7,7 +8,9 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import org.jdbi.v3.core.Jdbi
+import org.jdbi.v3.core.transaction.TransactionException
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
@@ -213,7 +216,7 @@ class PersistenceSpec :
                             ) { "the writer did not commit while the reader was open" }
                             first to readValue(transaction, id)
                         }
-                        if (isolation == null) transactor.inTransaction(block = block) else transactor.inTransaction(isolation, block)
+                        if (isolation == null) transactor.inTransaction(block) else transactor.inTransaction(isolation, block)
                     }
 
                 try {
@@ -301,6 +304,161 @@ class PersistenceSpec :
                         effectiveIsolation(transaction) shouldBe "read committed"
                         sessionDefaultIsolation(transaction) shouldBe "read committed"
                     }
+                }
+            }
+            test("an explicit isolation is explicit: it overrides a pool whose baseline is another level") {
+                // A pool whose connections default to REPEATABLE READ, unrelated to createDataSource's baseline.
+                val baseline =
+                    HikariDataSource(
+                        HikariConfig().apply {
+                            jdbcUrl = database.configuration.jdbcUrl
+                            username = database.configuration.username
+                            password = database.configuration.password
+                            maximumPoolSize = 1
+                            minimumIdle = 1
+                            poolName = "repeatable-read-baseline"
+                            transactionIsolation = "TRANSACTION_REPEATABLE_READ"
+                        },
+                    )
+                baseline.use { pool ->
+                    val other = Transactor(Jdbi.create(pool))
+
+                    other.inTransaction { effectiveIsolation(it) } shouldBe "repeatable read"
+                    other.inTransaction(TransactionIsolation.READ_COMMITTED) { effectiveIsolation(it) } shouldBe "read committed"
+                    other.inTransaction(TransactionIsolation.REPEATABLE_READ) { effectiveIsolation(it) } shouldBe "repeatable read"
+                    // The explicit request does not stick: the same connection returns to its baseline.
+                    other.inTransaction(TransactionIsolation.READ_COMMITTED) { effectiveIsolation(it) } shouldBe "read committed"
+                    other.inTransaction { effectiveIsolation(it) } shouldBe "repeatable read"
+                }
+            }
+        }
+
+        // JDBI joins a nested inTransaction on the same thread to the outer managed handle. These specs pin
+        // that behaviour; the preferred composition is still to pass the caller-owned Transaction down.
+        context("nested inTransaction") {
+            val transactor = Transactor(jdbi)
+
+            fun backendPid(transaction: Transaction): Int =
+                transaction.handle
+                    .createQuery("SELECT pg_backend_pid()")
+                    .mapTo(Int::class.java)
+                    .one()
+
+            fun effectiveIsolation(transaction: Transaction): String =
+                transaction.handle
+                    .createQuery("SELECT current_setting('transaction_isolation')")
+                    .mapTo(String::class.java)
+                    .one()
+
+            fun insertRecord(
+                transaction: Transaction,
+                id: UUID,
+            ) {
+                transaction.handle
+                    .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'nested')")
+                    .bind("id", id)
+                    .execute()
+            }
+
+            fun exists(id: UUID): Boolean =
+                transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createQuery("SELECT count(*) FROM public.test_application_records WHERE id = :id")
+                        .bind("id", id)
+                        .mapTo(Int::class.java)
+                        .one() == 1
+                }
+
+            test("an inner call runs on the outer transaction's connection and transaction") {
+                transactor.inTransaction { outer ->
+                    val outerPid = backendPid(outer)
+                    val outerXid =
+                        outer.handle
+                            .createQuery("SELECT txid_current()")
+                            .mapTo(Long::class.java)
+                            .one()
+
+                    transactor.inTransaction { inner ->
+                        backendPid(inner) shouldBe outerPid
+                        inner.handle
+                            .createQuery("SELECT txid_current()")
+                            .mapTo(Long::class.java)
+                            .one() shouldBe outerXid
+                    }
+                }
+            }
+
+            test("an inner call is not a separate transaction: when the outer fails, outer and inner writes roll back together") {
+                val outerId = UUID.randomUUID()
+                val innerId = UUID.randomUUID()
+
+                shouldThrow<IllegalStateException> {
+                    transactor.inTransaction { outer ->
+                        insertRecord(outer, outerId)
+                        transactor.inTransaction { inner -> insertRecord(inner, innerId) }
+                        throw IllegalStateException("outer failed")
+                    }
+                }.message shouldBe "outer failed"
+
+                exists(outerId) shouldBe false
+                exists(innerId) shouldBe false
+            }
+
+            test("an inner call without an isolation inherits the outer transaction's isolation") {
+                transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { outer ->
+                    effectiveIsolation(outer) shouldBe "repeatable read"
+
+                    transactor.inTransaction { inner -> effectiveIsolation(inner) shouldBe "repeatable read" }
+                }
+                transactor.inTransaction(TransactionIsolation.READ_COMMITTED) { outer ->
+                    transactor.inTransaction { inner -> effectiveIsolation(inner) shouldBe "read committed" }
+                }
+            }
+
+            test("an inner call may repeat the outer transaction's isolation") {
+                TransactionIsolation.entries.forEach { isolation ->
+                    transactor.inTransaction(isolation) { outer ->
+                        transactor.inTransaction(isolation) { inner ->
+                            backendPid(inner) shouldBe backendPid(outer)
+                            effectiveIsolation(inner) shouldBe effectiveIsolation(outer)
+                        }
+                    }
+                }
+            }
+
+            test("an inner call requesting a different isolation than the open transaction fails") {
+                val conflicts =
+                    listOf(
+                        // outer request to inner request; the default outer transaction is READ COMMITTED
+                        TransactionIsolation.REPEATABLE_READ to TransactionIsolation.READ_COMMITTED,
+                        TransactionIsolation.READ_COMMITTED to TransactionIsolation.REPEATABLE_READ,
+                    )
+                conflicts.forEach { (outerIsolation, innerIsolation) ->
+                    val id = UUID.randomUUID()
+
+                    shouldThrow<TransactionException> {
+                        transactor.inTransaction(outerIsolation) { outer ->
+                            insertRecord(outer, id)
+                            transactor.inTransaction(innerIsolation) { }
+                        }
+                    }.message shouldContain "nested transaction with isolation level"
+
+                    // The failure escaped the outer block, so the outer transaction rolled back.
+                    exists(id) shouldBe false
+                }
+
+                shouldThrow<TransactionException> {
+                    transactor.inTransaction { transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { } }
+                }
+            }
+
+            test("a rejected inner isolation change leaves the outer transaction usable and its isolation unchanged") {
+                transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { outer ->
+                    shouldThrow<TransactionException> {
+                        transactor.inTransaction(TransactionIsolation.READ_COMMITTED) { }
+                    }
+
+                    effectiveIsolation(outer) shouldBe "repeatable read"
                 }
             }
         }
