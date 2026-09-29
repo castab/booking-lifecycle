@@ -213,6 +213,27 @@ locks, lock tables, or refund-specific isolation. Allocation reversals remain a 
 concept that the runtime does not persist; runtime reconciliation supplies none. Settlement
 stays derived: never store balances, reconciliation, or a refund or payment status.
 
+The ledger reads payment facts back through `PaymentHistory` (`FinancialLedger.paymentHistory`
+and `paymentHistoriesForLineage`). A history is the domain's own payment, allocation, refund,
+and refund-allocation records plus the `PaymentReconciliation` derived from exactly them,
+composed in `runtime.financial` because it is a persisted-fact read model, not a domain
+invariant. It has no public constructor or `copy()`, its lists are unmodifiable copies, and
+its factory derives the reconciliation from the facts it is given, so a caller cannot pair
+facts with another reconciliation. A payment is discovered from a lineage when it
+has ever been allocated to any version of it, and the history returned is always the
+payment's whole history, never one filtered to that lineage. The convenience reads use
+`REPEATABLE_READ` so the several queries share one snapshot, and take no row lock: reads do
+not serialize with allocations or refunds. The `Transaction` overloads add no isolation of
+their own; that is documented on them, as is the rule that code already inside an
+application-owned transaction calls the `Transaction` overload, because the convenience
+overload cannot change the isolation of an open outer transaction. `CommerceRuntimeContext`
+still exposes `paymentRepository` for application repositories that compose in a caller's
+transaction; applications should nevertheless read payment history through
+`FinancialLedger.paymentHistory` and `paymentHistoriesForLineage`, the supported semantic
+read surface, rather than assembling their own read model from `PaymentRepository`. Do not
+add per-fact ledger lookups, payment search, or a stored payment status here without a
+consumer that needs them.
+
 The `Transactor` owns transaction isolation. `Transactor.inTransaction { }` uses the runtime
 default (the pool baseline, `READ COMMITTED`); `Transactor.inTransaction(isolation) { }`
 explicitly requests a runtime-owned `TransactionIsolation` (`READ_COMMITTED` or
@@ -497,7 +518,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `domain/src/test/kotlin/io/github/castab/commerce/staff/AuthorizationSpec.kt` | Kotest coverage for staff values, resolver behavior, and fail-closed authorization. |
 | `runtime/build.gradle.kts` | The `commerce-runtime` publication (a `java-library`; no `application` plugin), its runtime stack, and the Docker-CLI PostgreSQL build service for tests. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/financial/` | `FinancialLedger`: transaction-owning document, payment, and refund operations and payment and lineage reconciliation; `Refunds.kt`: `RefundAllocationPortion` and `RecordedRefund`. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/financial/` | `FinancialLedger`: transaction-owning document, payment, and refund operations, payment and lineage reconciliation, and payment history reads; `Refunds.kt`: `RefundAllocationPortion` and `RecordedRefund`; `PaymentHistory.kt`: the `PaymentHistory` read model. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, the internal principal session and authorization repositories and `PrincipalIdColumns`, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/authorization/` | Live authorization directory, permission catalog, administration DTOs and HTTP capability. |
@@ -1410,6 +1431,12 @@ dependency just to support CI or publishing.
   PostgreSQL, including price and order round trips, duplicate and predecessor rejection,
   and a single transaction spanning an application row and commerce snapshot. It proves
   both commit and rollback from a later transaction.
+- `FinancialLedgerPaymentHistorySpec` covers the payment history reads against PostgreSQL:
+  rediscovering every id and link after a refund, lineage discovery across versions, fully
+  unwound allocations, split payments returned whole, ordering (including equal receipt
+  times), the immutable and closed construction of `PaymentHistory` (unmodifiable lists, no
+  public constructor or `copy()`, reconciliation equal to an independent reconcile),
+  caller-transaction reads before commit, and the `REPEATABLE_READ` isolation of the convenience reads.
 - `FinancialLedgerSpec` and `FinancialLedgerRefundSpec` cover the ledger against
   PostgreSQL. Keep the refund coverage: refunds from unapplied, allocated, mixed, and split
   value with their payment and document reconciliations; allocation that respects refunds;

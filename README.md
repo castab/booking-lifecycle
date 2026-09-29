@@ -159,6 +159,13 @@ payment row. The runtime persists allocation reversals nowhere yet; they remain 
 concept. It contacts no payment provider: it records the facts an application or adapter
 reports, identified by the provider-neutral `ExternalRefundReference`.
 
+The persisted facts can be read back without the mutation responses:
+`FinancialLedger.paymentHistory(paymentId)` returns a `PaymentHistory` (the payment, all its
+allocations, refunds, and refund allocations, and the reconciliation derived from them), and
+`paymentHistoriesForLineage(documentId)` returns the histories of every payment ever
+allocated to any version of a document lineage. Both read one `REPEATABLE_READ` snapshot
+and take no lock.
+
 Applications create documents from their own authoritative pricing and pass them to
 `context.financialLedger.create(...)`. For an application-owned association, use
 `context.transactor.inTransaction { transaction -> ... }` and
