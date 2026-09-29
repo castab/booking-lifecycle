@@ -254,7 +254,8 @@ frameworks. The runtime rules are:
 
 ## Provisional application-extension seam
 
-`ApplicationContributions` (Flyway locations, routes, and permission definitions) and `CommerceRuntimeContext` (the
+`ApplicationContributions` (application migrations, meaning the application-owned schema and
+the Flyway locations, plus routes and permission definitions) and `CommerceRuntimeContext` (the
 configuration, `Transactor`, offerings, financial-document, and payment repositories,
 `FinancialLedger`, `SessionManager`, and authorization directory handed to
 contributed routes) are
