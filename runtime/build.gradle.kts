@@ -68,7 +68,7 @@ publishing {
                 description = "Opinionated, reusable runtime for assembling commerce applications on " +
                     "commerce-domain: http4k on Jetty, kotlinx.serialization, PostgreSQL through " +
                     "HikariCP, JDBI, and Flyway, Hoplite/HOCON configuration, explicit " +
-                    "transactions, immutable financial snapshots and payment allocations, " +
+                    "transactions, immutable financial snapshots, payment allocations, and refunds, " +
                     "derived reconciliation, a consistent HTTP error contract, authenticated principal sessions and " +
                     "permission enforcement, and explicit composition."
             }

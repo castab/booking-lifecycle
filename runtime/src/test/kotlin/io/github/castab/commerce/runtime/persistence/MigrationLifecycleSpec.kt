@@ -6,6 +6,7 @@ import io.github.castab.commerce.runtime.testing.execute
 import io.github.castab.commerce.runtime.testing.history
 import io.github.castab.commerce.runtime.testing.relationExists
 import io.github.castab.commerce.runtime.testing.schemaExists
+import io.github.castab.commerce.runtime.testing.strings
 import io.github.castab.commerce.runtime.testing.withTestDatabase
 import io.kotest.assertions.throwables.shouldNotThrowAny
 import io.kotest.assertions.throwables.shouldThrow
@@ -15,6 +16,7 @@ import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import org.flywaydb.core.Flyway
 import org.flywaydb.core.api.FlywayException
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
@@ -76,9 +78,86 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V4 coexist with application V1 in separate version spaces.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5")
+                // Runtime V1 to V6 coexist with application V1 in separate version spaces.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
                 dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
+            }
+        }
+
+        test("released runtime migrations are unchanged") {
+            withTestDatabase { _, dataSource ->
+                RuntimeMigrations(dataSource).migrate()
+
+                // Flyway's checksums of the released scripts. A change here means a released
+                // migration was edited; correct it with a new migration instead.
+                val released =
+                    mapOf(
+                        "1" to "-1133615564",
+                        "2" to "839788254",
+                        "3" to "80008543",
+                        "4" to "1009054310",
+                        "5" to "-265215424",
+                    )
+                dataSource
+                    .strings(
+                        "SELECT version || '=' || checksum FROM commerce.$HISTORY_TABLE WHERE version::int <= 5 ORDER BY installed_rank",
+                    ).shouldContainExactly(released.map { (version, checksum) -> "$version=$checksum" })
+            }
+        }
+
+        test("a database at the released V5 ledger migrates forward to refunds, keeping its facts") {
+            withTestDatabase { _, dataSource ->
+                Flyway
+                    .configure()
+                    .dataSource(dataSource)
+                    .schemas(RuntimeMigrations.SCHEMA)
+                    .createSchemas(true)
+                    .table(HISTORY_TABLE)
+                    .locations(RuntimeMigrations.LOCATION)
+                    .target("5")
+                    .load()
+                    .migrate()
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5")
+                dataSource.relationExists("commerce.refund_records") shouldBe false
+                dataSource.execute(
+                    "INSERT INTO commerce.payment_records (payment_id, amount, currency, method, received_at_seconds, received_at_nanos) " +
+                        "VALUES ('00000000-0000-0000-0000-000000000005', 500.00, 'USD', 'CASH', 0, 0)",
+                )
+
+                MigrationLifecycle(dataSource, testApplication).migrate()
+
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
+                dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
+                dataSource.relationExists("commerce.refund_records") shouldBe true
+                dataSource.relationExists("commerce.refund_allocations") shouldBe true
+
+                val history = dataSource.history(RuntimeMigrations.SCHEMA)
+                MigrationLifecycle(dataSource, testApplication).migrate()
+                dataSource.history(RuntimeMigrations.SCHEMA) shouldBe history
+            }
+        }
+
+        test("refund tables belong to the commerce schema and reference the ledger's own tables") {
+            withTestDatabase { _, dataSource ->
+                MigrationLifecycle(dataSource, testApplication).migrate()
+
+                dataSource.strings(
+                    "SELECT schemaname || '.' || tablename FROM pg_tables WHERE tablename LIKE 'refund%' ORDER BY tablename",
+                ) shouldContainExactly listOf("commerce.refund_allocations", "commerce.refund_records")
+                dataSource.strings(
+                    """SELECT cn.nspname || '.' || c.relname || ' -> ' || fn.nspname || '.' || f.relname
+                       FROM pg_constraint k
+                       JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace cn ON cn.oid = c.relnamespace
+                       JOIN pg_class f ON f.oid = k.confrelid JOIN pg_namespace fn ON fn.oid = f.relnamespace
+                       WHERE k.contype = 'f' AND c.relname IN ('refund_records', 'refund_allocations')
+                       ORDER BY 1""",
+                ) shouldContainExactly
+                    listOf(
+                        "commerce.refund_allocations -> commerce.payment_allocations",
+                        "commerce.refund_allocations -> commerce.refund_records",
+                        "commerce.refund_records -> commerce.payment_records",
+                    )
             }
         }
 

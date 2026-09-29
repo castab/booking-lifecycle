@@ -53,7 +53,8 @@ concrete commerce application    (the consuming project)
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
    application contribution points, append-only offerings and financial-document snapshot
-   persistence, payment records and allocations, derived ledger reconciliation, and
+   persistence, payment records and allocations, refunds and refund allocations, derived
+   ledger reconciliation, and
    authenticated principal sessions, persistent principal and RBAC state, live permission
    resolution, and authorization administration over HTTP. It manages a session only after
    the application has proven identity and the runtime confirms a known, active principal;
@@ -145,6 +146,18 @@ net applied, and balance are derived and never stored on the document. External 
 references are unique by provider and reference. The database rejects two successors of
 the same snapshot, and allocation operations lock the payment while checking available
 funds.
+
+A `RefundRecord` describes money that left the business and belongs to a payment, not a
+document. When the refunded money had been applied, the caller names the allocations it
+unwinds, and a `RefundAllocation` records each unwound amount; money refunded from the
+payment's unapplied value needs none. `FinancialLedger.recordRefund` validates the refund
+and its refund allocations together against the payment's complete history and records
+them atomically. Refunds reduce the payment's net received money, refund allocations
+reduce its net allocated money and the document lineage's net applied amount, and refunded
+money never becomes available to allocate again. Refunds and allocations lock the same
+payment row. The runtime persists allocation reversals nowhere yet; they remain a domain
+concept. It contacts no payment provider: it records the facts an application or adapter
+reports, identified by the provider-neutral `ExternalRefundReference`.
 
 Applications create documents from their own authoritative pricing and pass them to
 `context.financialLedger.create(...)`. For an application-owned association, use

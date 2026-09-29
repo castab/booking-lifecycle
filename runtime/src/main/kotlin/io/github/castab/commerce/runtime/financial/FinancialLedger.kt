@@ -4,9 +4,14 @@ import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.payment.ExternalRefundReference
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentAllocation
+import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.payment.PaymentReconciliation
 import io.github.castab.commerce.payment.PaymentRecord
+import io.github.castab.commerce.payment.RefundAllocation
+import io.github.castab.commerce.payment.RefundRecord
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
@@ -19,7 +24,10 @@ import java.util.UUID
 /**
  * Financial ledger operations. Convenience methods open a transaction; their [Transaction]
  * overloads join the caller's transaction, including application-owned writes. Documents
- * and payment facts are append-only; settlement is derived on read.
+ * and payment facts (payments, allocations, refunds, and refund allocations) are
+ * append-only; settlement is derived on read. Every operation that consumes a payment's
+ * value locks that payment's row first, so allocations and refunds of one payment are
+ * serialized and each is checked against the other's committed facts.
  */
 class FinancialLedger internal constructor(
     private val transactor: Transactor,
@@ -161,7 +169,10 @@ class FinancialLedger internal constructor(
         return allocatePayment(transaction, payment.id, allocationId, documentReference, amount, allocatedAt)
     }
 
-    /** Allocates an existing payment, checking its entire persisted allocation history. */
+    /**
+     * Allocates an existing payment, checking its entire persisted history: allocations,
+     * refunds, and refund allocations. Refunded money is never available to allocate.
+     */
     fun allocatePayment(
         paymentId: UUID,
         allocationId: UUID,
@@ -183,7 +194,7 @@ class FinancialLedger internal constructor(
         allocatedAt: Instant,
     ): PaymentAllocation {
         val document = get(transaction, documentReference)
-        // The row lock serializes readers of the allocation history for this payment.
+        // The row lock serializes allocations and refunds that read this payment's history.
         val payment =
             payments.lockPayment(transaction, paymentId)
                 ?: throw CommerceFailure.NotFound("Payment $paymentId was not found")
@@ -191,6 +202,82 @@ class FinancialLedger internal constructor(
         // The repository checks the complete persisted history under this payment lock.
         payments.insertAllocation(transaction, allocation)
         return allocation
+    }
+
+    /**
+     * Records that money of an existing payment was returned, with the refund allocations
+     * that unwind applied value. [allocations] names exactly which payment allocations the
+     * refund unwinds and by how much; the rest of the refund came from the payment's
+     * unapplied value. The refund and its refund allocations are checked together against
+     * the payment's complete history and appended atomically, or not at all.
+     */
+    @JvmOverloads
+    fun recordRefund(
+        paymentId: UUID,
+        refundId: UUID,
+        amount: Money,
+        method: PaymentMethod,
+        refundedAt: Instant,
+        externalReference: ExternalRefundReference? = null,
+        allocations: List<RefundAllocationPortion> = emptyList(),
+    ): RecordedRefund =
+        transactor.inTransaction { transaction ->
+            recordRefund(transaction, paymentId, refundId, amount, method, refundedAt, externalReference, allocations)
+        }
+
+    /** Records a refund and its refund allocations in the caller's transaction. */
+    @JvmOverloads
+    fun recordRefund(
+        transaction: Transaction,
+        paymentId: UUID,
+        refundId: UUID,
+        amount: Money,
+        method: PaymentMethod,
+        refundedAt: Instant,
+        externalReference: ExternalRefundReference? = null,
+        allocations: List<RefundAllocationPortion> = emptyList(),
+    ): RecordedRefund {
+        // The same row lock as allocatePayment: both consume this payment's finite value.
+        val payment =
+            payments.lockPayment(transaction, paymentId)
+                ?: throw CommerceFailure.NotFound("Payment $paymentId was not found")
+        val refund = validating { RefundRecord.create(refundId, payment, amount, method, refundedAt, externalReference) }
+        val refundAllocations =
+            allocations.map { portion ->
+                val allocation =
+                    payments.retrieveAllocation(transaction, portion.paymentAllocationId)
+                        ?: throw CommerceFailure.NotFound("Payment allocation ${portion.paymentAllocationId} was not found")
+                validating { RefundAllocation.create(portion.id, refund, allocation, portion.amount, portion.allocatedAt) }
+            }
+        // The repository checks the complete proposed history under this payment lock.
+        payments.insertRefund(transaction, refund, refundAllocations)
+        return RecordedRefund(refund, refundAllocations)
+    }
+
+    /** Reconciles a payment against its complete persisted history. */
+    fun reconcilePayment(paymentId: UUID): PaymentReconciliation =
+        transactor.inTransaction { transaction -> reconcilePayment(transaction, paymentId) }
+
+    /**
+     * Reconciles a payment in the caller's transaction. Locks the payment row, like the
+     * operations that append its facts, so the allocations, refunds, and refund allocations
+     * it reads are one consistent history.
+     */
+    fun reconcilePayment(
+        transaction: Transaction,
+        paymentId: UUID,
+    ): PaymentReconciliation {
+        val payment =
+            payments.lockPayment(transaction, paymentId)
+                ?: throw CommerceFailure.NotFound("Payment $paymentId was not found")
+        // The runtime does not persist allocation reversals.
+        return PaymentReconciliation.reconcile(
+            payment,
+            payments.allocationsForPayment(transaction, paymentId),
+            emptyList(),
+            payments.refundsForPayment(transaction, paymentId),
+            payments.refundAllocationsForPayment(transaction, paymentId),
+        )
     }
 
     /** Reconciles the latest obligation against all allocations in its lineage. */
@@ -218,6 +305,12 @@ class FinancialLedger internal constructor(
         document: FinancialDocument,
     ): FinancialDocumentReconciliation =
         validating {
-            FinancialDocumentReconciliation.reconcile(document, payments.allocationsForLineage(transaction, document.id))
+            // Refund allocations unwind applied value; the runtime does not persist allocation reversals.
+            FinancialDocumentReconciliation.reconcile(
+                document,
+                payments.allocationsForLineage(transaction, document.id),
+                emptyList(),
+                payments.refundAllocationsForLineage(transaction, document.id),
+            )
         }
 }
