@@ -306,10 +306,14 @@ class FinancialLedger internal constructor(
      * Reads a payment's history in the caller's transaction, seeing the caller's own
      * uncommitted writes. It reads the payment's facts with several queries and takes no
      * lock, so the result is coherent only if the caller's transaction is
-     * [TransactionIsolation.REPEATABLE_READ] (or the payment has no concurrent writers). At
-     * `READ_COMMITTED`, a concurrent commit between two of the queries can make the facts and
-     * the reconciliation describe different states, or fail the reconciliation. The
-     * convenience overload requests the stronger isolation itself. Use
+     * [TransactionIsolation.REPEATABLE_READ] (or the payment has no concurrent writers). The
+     * returned [PaymentHistory] always reconciles exactly the facts it exposes; the isolation
+     * decides whether those facts come from one database snapshot. At `READ_COMMITTED`, a
+     * concurrent commit between queries can make the returned facts combine different
+     * committed database states, potentially producing a history that never existed as one
+     * snapshot or causing reconciliation to reject the mixed facts. This transaction overload
+     * does not change the caller's isolation; the convenience overload avoids the risk by
+     * owning a `REPEATABLE_READ` transaction. Use
      * [reconcilePayment], which locks the payment row, when the history is about to be acted on.
      *
      * @throws CommerceFailure.NotFound if there is no payment [paymentId].
