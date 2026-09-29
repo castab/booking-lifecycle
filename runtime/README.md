@@ -251,7 +251,7 @@ never open their own transactions.
 | `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, commerce repositories, `financialLedger`, `sessions`, and `authorization`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
 | `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor`, `Transaction` and `TransactionIsolation`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
-| `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, and derived reconciliation. |
+| `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, refunds with their refund allocations, and derived payment and document reconciliation. |
 | `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
 | `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
@@ -399,6 +399,19 @@ document snapshot. `(external_provider, external_reference)` is unique for payme
 The payment method check allows exactly `CASH`, `CHECK`, `CARD`, `BANK_TRANSFER`,
 `DIGITAL_WALLET`, and `OTHER`, matching `PaymentMethod`; adding a method requires a
 migration that widens the check constraint.
+
+`V6__refunds.sql` adds `commerce.refund_records` and `commerce.refund_allocations` and
+leaves `V5` unchanged. A refund row references its payment
+(`refund_records.payment_id → payment_records`) and stores the amount (strictly positive),
+currency, method (the same check as payments), refund time as epoch seconds plus
+nanoseconds, and an optional external provider and reference. The pair is either absent
+or both non-blank, and `(external_provider, external_reference)` is unique. A refund
+allocation row references its refund (`refund_id → refund_records`) and the payment
+allocation it unwinds (`payment_allocation_id → payment_allocations`) and stores the
+amount (strictly positive), currency, and allocation time. Neither table duplicates the
+payment or document id: they are recovered through the referenced rows. Indexes cover a
+payment's refunds and a refund's, or an allocation's, refund allocations. There is no
+status, balance, or other mutable column.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
@@ -553,14 +566,67 @@ seconds plus nanoseconds.
 
 `PaymentRecord` remains separate from `PaymentAllocation`. The ledger's `recordPayment`
 can leave money unapplied. `allocatePayment` loads an exact document snapshot, locks the
-payment row, checks all of that payment's allocations through
-`PaymentReconciliation`, and appends an allocation. `recordPaymentAgainstDocument` does
+payment row, checks that payment's complete history (allocations, refunds, and refund
+allocations) through `PaymentReconciliation`, and appends an allocation. `recordPaymentAgainstDocument` does
 the payment and allocation in one transaction. One payment can be split across documents.
 The original `(document_id, version)` of every allocation remains unchanged when the
 document advances. `reconcileLatest` and `reconcile(reference)` load lineage allocations
-and call `FinancialDocumentReconciliation`: gross allocated, net applied, and balance
-are derived across the lineage, using the selected snapshot's total. The current slice
-persists payments and allocations; reversal and refund persistence is deferred.
+and the refund allocations that unwind them and call `FinancialDocumentReconciliation`:
+gross allocated, refund allocations, net applied, and balance are derived across the
+lineage, using the selected snapshot's total.
+
+#### Refunds
+
+A refund is money that left the business. It belongs to a payment, not to a document:
+
+| Refund | Recorded as |
+|---|---|
+| entirely from the payment's unapplied value | `RefundRecord` only |
+| entirely from previously allocated value | `RefundRecord` + one or more `RefundAllocation`s |
+| partly unapplied, partly allocated | `RefundRecord` + one or more `RefundAllocation`s |
+| split across several allocations of the payment | `RefundRecord` + one `RefundAllocation` per allocation |
+
+`recordRefund(paymentId, refundId, amount, method, refundedAt, externalReference,
+allocations)` takes application-chosen ids and timestamps. Each
+`RefundAllocationPortion(id, paymentAllocationId, amount, allocatedAt)` names a persisted
+payment allocation the refund unwinds and by how much. The runtime never chooses
+allocations for the caller; the part of a refund not covered by portions came from the
+payment's unapplied value. The operation locks the payment row, creates the domain
+`RefundRecord` and `RefundAllocation`s, checks the proposed history (payment,
+allocations, refunds, refund allocations) through `PaymentReconciliation`, and only then
+appends the refund and every refund allocation. It returns a `RecordedRefund`. A refund
+is therefore never stored without the refund allocations that make it valid: a $100
+refund of a fully allocated $500 payment is rejected unless it unwinds $100 of applied
+value in the same call. Like every ledger operation, it has a `Transaction` overload so
+an application can record its own receipt in the same transaction.
+
+`reconcilePayment(paymentId)` locks the payment row and reconciles its complete persisted
+history:
+
+```text
+netReceived  = paymentAmount - totalRefunded
+netAllocated = grossAllocated - allocationReversals - refundAllocations
+unallocated  = netReceived - netAllocated
+```
+
+Refunds reduce `netReceived`. Refund allocations reduce `netAllocated` and the affected
+document lineage's `netApplied`, raising its balance; a refund of unapplied value changes
+no document reconciliation. Refunded money never becomes available to allocate again:
+`allocatePayment` checks refunds and refund allocations too, so a $500 payment with a
+$100 refund can have at most $400 allocated. Allocations and refunds lock the same payment
+row, so concurrent operations on one payment are serialized, and each validates against
+the other's committed facts. Allocation reversals are not persisted by the runtime; their
+contribution is zero.
+
+Failures: an unknown payment or payment allocation is `NotFound`; a refund invalid on its
+own (non-positive amount, other currency, more than the payment, a refund allocation of
+another payment's allocation or larger than its refund or allocation) is
+`ValidationFailed`; a refund inconsistent with the payment's history (refunds beyond the
+payment, refund allocations beyond their refund or reducing an allocation below zero, an
+over-applied payment) is `InvariantViolated`; an existing refund id, refund allocation id,
+or external refund reference is `Conflict`. Nothing is stored on any failure.
+`PaymentRepository.insertRefund` enforces the same checks for callers that use the
+repository directly.
 
 An application creates authoritative `LineItem`s and a domain document itself, then can
 join its relationship write to the financial write:
@@ -573,8 +639,8 @@ context.transactor.inTransaction { transaction ->
 ```
 
 The application owns its identifiers, pricing, relationships, HTTP routes, authentication,
-and policy on which stages accept payments. No financial or payment routes are mounted by
-the runtime in this slice. Existing built-in commerce permission keys remain available
+and policy on which stages accept payments and which refunds are allowed. No financial,
+payment, or refund routes are mounted by the runtime in this slice. Existing built-in commerce permission keys remain available
 for an application that exposes its own protected routes.
 
 ### Transactions
@@ -1059,9 +1125,10 @@ transaction in which the application writes it.
   JWTs, sliding expiry, or CSRF protection. Expired and revoked session rows are kept;
   there is no purge operation yet (see [Session cleanup](#sessions-and-authorization)).
 - No booking persistence or orchestration yet. Financial-document snapshots, payment
-  records, and payment allocations are persisted and orchestrated by the ledger;
-  financial-document reconciliation is derived from those facts.
-- Refund and payment-allocation-reversal persistence and orchestration are deferred.
+  records, payment allocations, refund records, and refund allocations are persisted and
+  orchestrated by the ledger; payment and financial-document reconciliation are derived
+  from those facts.
+- Payment-allocation-reversal persistence and orchestration are deferred.
 - No idempotency keys, outbox or events, Server-Sent Events, or scheduled jobs yet.
 - No payment provider integration. Providers (e.g. a future `stripe-adapter`) sit
   behind the provider-neutral contract in `commerce-domain`. This module will never
@@ -1100,6 +1167,13 @@ runtime the way a concrete application does: it supplies explicit
 `CommerceRuntimeContext` and persist an application-owned table through
 `context.transactor`), starts Jetty, exercises it over real HTTP and PostgreSQL, including
 error handling and rollback, and closes it.
+
+`FinancialLedgerSpec` and `FinancialLedgerRefundSpec` prove document, payment, allocation,
+refund, and refund-allocation round trips, the refund examples and every rejection, atomic
+refund recording, and that refunds and allocations of one payment are serialized by its
+row lock (observed as a blocked PostgreSQL backend). `MigrationLifecycleSpec` also pins
+the checksums of released runtime migrations and migrates a released `V5` database
+forward.
 
 `OfferingsSnapshotRepositorySpec` proves append-only round trips, revision constraints,
 price subtype reconstruction, ordering, and atomic commit and rollback of an offering

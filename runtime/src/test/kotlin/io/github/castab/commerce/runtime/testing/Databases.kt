@@ -36,7 +36,8 @@ fun DataSource.execute(sql: String) {
     connection.use { connection -> connection.createStatement().use { it.execute(sql) } }
 }
 
-private fun DataSource.strings(sql: String): List<String> =
+/** The first column of every row of [sql], as text. */
+fun DataSource.strings(sql: String): List<String> =
     connection.use { connection ->
         connection.createStatement().use { statement ->
             statement.executeQuery(sql).use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } }
