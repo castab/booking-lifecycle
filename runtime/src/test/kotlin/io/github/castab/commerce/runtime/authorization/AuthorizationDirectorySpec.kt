@@ -13,6 +13,7 @@ import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.github.castab.commerce.runtime.testing.appliedVersions
 import io.github.castab.commerce.runtime.testing.execute
 import io.github.castab.commerce.runtime.testing.relationExists
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.github.castab.commerce.runtime.testing.withTestDatabase
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
@@ -76,7 +77,7 @@ class AuthorizationDirectorySpec :
                     .load()
                     .migrate()
                 dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3")
-                MigrationLifecycle(dataSource, emptyList()).migrate()
+                MigrationLifecycle(dataSource).migrate()
                 dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3", "4", "5", "6")
                 dataSource.relationExists("commerce.principal_roles") shouldBe true
             }
@@ -175,7 +176,7 @@ class AuthorizationDirectorySpec :
                 commerceRuntime(
                     database.configuration(),
                     ApplicationContributions(
-                        migrationLocations = listOf("classpath:db/testapp"),
+                        migrations = testApplicationMigrations("classpath:db/testapp"),
                         routes = {
                             context = it
                             emptyList()
@@ -189,7 +190,7 @@ class AuthorizationDirectorySpec :
                         context.transactor.inTransaction { tx ->
                             auth.setStatus(tx, staff.id, PrincipalStatus.DISABLED)
                             tx.handle
-                                .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'credential')")
+                                .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'credential')")
                                 .bind("id", UUID.randomUUID())
                                 .execute()
                             error("roll back")
@@ -200,7 +201,7 @@ class AuthorizationDirectorySpec :
                     context.transactor.inTransaction { tx ->
                         auth.setStatus(tx, staff.id, PrincipalStatus.DISABLED)
                         tx.handle
-                            .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'credential')")
+                            .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'credential')")
                             .bind("id", UUID.randomUUID())
                             .execute()
                     }
@@ -222,7 +223,7 @@ class AuthorizationDirectorySpec :
                 commerceRuntime(
                     database.configuration(),
                     ApplicationContributions(
-                        migrationLocations = listOf("classpath:db/testapp"),
+                        migrations = testApplicationMigrations("classpath:db/testapp"),
                         routes = {
                             context = it
                             emptyList()
@@ -235,7 +236,7 @@ class AuthorizationDirectorySpec :
                         context.authorization.createRole(tx, admin)
                         context.authorization.createUser(tx, initial)
                         tx.handle
-                            .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'hash')")
+                            .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'hash')")
                             .bind("id", initial.id.value)
                             .execute()
                         context.authorization.assignRole(tx, initial.id, admin.key)
@@ -243,7 +244,7 @@ class AuthorizationDirectorySpec :
                     context.authorization.permissionResolver.permissionsFor(initial.id) shouldBe setOf(CommercePermissions.PrincipalManage)
                     context.transactor.inTransaction { tx ->
                         tx.handle
-                            .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                            .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
                             .bind("id", initial.id.value)
                             .mapTo(String::class.java)
                             .one() shouldBe "hash"
@@ -452,7 +453,7 @@ class AuthorizationDirectorySpec :
                 commerceRuntime(
                     database.configuration(),
                     ApplicationContributions(
-                        migrationLocations = listOf("classpath:db/testapp-remove-stale-permission"),
+                        migrations = testApplicationMigrations("classpath:db/testapp-remove-stale-permission"),
                         routes = {
                             context = it
                             emptyList()

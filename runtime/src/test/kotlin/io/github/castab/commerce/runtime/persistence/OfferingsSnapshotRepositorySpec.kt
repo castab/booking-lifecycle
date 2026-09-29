@@ -13,6 +13,7 @@ import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.offering.QuantityDimension
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -58,7 +59,7 @@ class OfferingsSnapshotRepositorySpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "offerings-repository-spec")
-            MigrationLifecycle(dataSource, listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
         }
 
@@ -89,7 +90,7 @@ class OfferingsSnapshotRepositorySpec :
                     }
                 }
 
-        fun applicationRows(): Int = outsideCount("SELECT count(*) FROM public.test_application_records")
+        fun applicationRows(): Int = outsideCount("SELECT count(*) FROM testapp.test_application_records")
 
         fun snapshotRows(reference: OfferingsSnapshotReference): Int =
             outsideCount(
@@ -163,7 +164,7 @@ class OfferingsSnapshotRepositorySpec :
                 transactor.inTransaction { transaction ->
                     repository.insert(transaction, rolledBack)
                     transaction.handle
-                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                         .bind("id", rowId)
                         .bind("value", "rolled back")
                         .execute()
@@ -177,7 +178,7 @@ class OfferingsSnapshotRepositorySpec :
             transactor.inTransaction { transaction ->
                 repository.insert(transaction, committed)
                 transaction.handle
-                    .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                    .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                     .bind("id", rowId)
                     .bind("value", "committed")
                     .execute()

@@ -17,7 +17,13 @@ private val logger = KotlinLogging.logger {}
  * | Stream | Owner | Discovered at | Schema history |
  * |---|---|---|---|
  * | runtime migrations | commerce-runtime | `classpath:db/commerce`, internally | `commerce.flyway_schema_history` |
- * | application migrations | the concrete application | [applicationLocations] | `public.flyway_schema_history` |
+ * | application migrations | the concrete application | [ApplicationMigrations.locations] | `<schema>.flyway_schema_history`, in the application's own [ApplicationMigrations.schema] |
+ *
+ * A schema that owns data also owns the Flyway history describing it, so application
+ * migration metadata never lives in `public`: the application declares its own schema, and the
+ * runtime creates it, when missing, before recording its history there. An installation that
+ * predates this rule and holds its application history in `public.flyway_schema_history` is
+ * not migrated or reinterpreted; see [ApplicationMigrations].
  *
  * [migrate] applies the runtime migrations and only then the application migrations, so an
  * application migration may reference runtime-owned objects created by the runtime
@@ -32,7 +38,7 @@ private val logger = KotlinLogging.logger {}
  *
  * ```kotlin
  * createDataSource(configuration.database).use { dataSource ->
- *     MigrationLifecycle(dataSource, application.migrationLocations).migrate()
+ *     MigrationLifecycle(dataSource, application.migrations).migrate()
  * }
  * ```
  *
@@ -48,18 +54,18 @@ private val logger = KotlinLogging.logger {}
  */
 class MigrationLifecycle internal constructor(
     private val runtime: RuntimeMigrations,
-    private val application: ApplicationMigrations,
+    private val application: ApplicationMigrationStream?,
 ) {
-    /** [applicationLocations] names the application's own migrations only; possibly none. */
+    /** [application] describes the application's own migrations only; `null` when it has none. */
     constructor(
         dataSource: DataSource,
-        applicationLocations: List<String>,
-    ) : this(RuntimeMigrations(dataSource), ApplicationMigrations(dataSource, applicationLocations))
+        application: ApplicationMigrations? = null,
+    ) : this(RuntimeMigrations(dataSource), application?.let { ApplicationMigrationStream(dataSource, it) })
 
     /** Applies the pending runtime migrations, then the pending application migrations. */
     fun migrate() {
         runtime.migrate()
-        application.migrate()
+        application?.migrate()
     }
 
     /**
@@ -69,13 +75,14 @@ class MigrationLifecycle internal constructor(
     @JvmSynthetic
     internal fun validate() {
         runtime.validate()
-        application.validate()
+        application?.validate()
     }
 }
 
 /**
- * One participant's Flyway migration stream: its locations, its schema, and its own
- * `flyway_schema_history` table in that schema. A stream without locations does nothing.
+ * One participant's Flyway migration stream: its locations, the schema it owns, and its own
+ * `flyway_schema_history` table in that schema. Flyway creates the schema when it is missing,
+ * before it records anything there. A stream without locations does nothing.
  */
 internal sealed class MigrationStream(
     private val owner: String,
@@ -92,6 +99,7 @@ internal sealed class MigrationStream(
             Flyway
                 .configure()
                 .dataSource(dataSource)
+                .defaultSchema(schema)
                 .schemas(schema)
                 .createSchemas(true)
                 .table(HISTORY_TABLE)
@@ -150,35 +158,11 @@ internal class RuntimeMigrations(
 }
 
 /**
- * The concrete application's migrations, from the locations it contributes.
- *
- * A location that would also discover the runtime's migrations (`db/commerce`, an ancestor
- * such as `db`, or a descendant) is rejected, because it would apply runtime-owned
- * migrations under the application's history.
+ * The concrete application's migration stream: the locations it contributes, run in the
+ * schema it declared, with the history in that schema. [ApplicationMigrations] validates the
+ * schema and the locations.
  */
-internal class ApplicationMigrations(
+internal class ApplicationMigrationStream(
     dataSource: DataSource,
-    locations: List<String>,
-) : MigrationStream("application", dataSource, SCHEMA, locations) {
-    init {
-        locations.forEach { location ->
-            require(!location.overlapsRuntimeLocation()) {
-                "Application migration location $location overlaps commerce-runtime's own migrations " +
-                    "(${RuntimeMigrations.LOCATION}); application migrations must live in their own location"
-            }
-        }
-    }
-
-    companion object {
-        /** The default schema of application migrations, which also holds their schema history. */
-        const val SCHEMA = "public"
-    }
-}
-
-private fun String.overlapsRuntimeLocation(): Boolean {
-    // Flyway treats a location without a prefix as a classpath location.
-    if (contains(':') && !startsWith("classpath:")) return false
-    val path = removePrefix("classpath:").trim('/')
-    val runtimePath = RuntimeMigrations.LOCATION.removePrefix("classpath:")
-    return path.isEmpty() || path == runtimePath || runtimePath.startsWith("$path/") || path.startsWith("$runtimePath/")
-}
+    migrations: ApplicationMigrations,
+) : MigrationStream("application", dataSource, migrations.schema, migrations.locations)

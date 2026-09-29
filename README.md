@@ -199,7 +199,11 @@ fun main() {
             configuration = CommerceRuntimeConfiguration.load(),
             application =
                 ApplicationContributions(
-                    migrationLocations = listOf("classpath:db/migration"),
+                    migrations =
+                        ApplicationMigrations(
+                            schema = "catering",
+                            locations = listOf("classpath:db/migration"),
+                        ),
                     routes = { context -> cateringRoutes(context) },
                 ),
         )

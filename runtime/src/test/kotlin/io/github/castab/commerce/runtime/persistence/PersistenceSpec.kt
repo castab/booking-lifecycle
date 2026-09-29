@@ -2,7 +2,9 @@ package io.github.castab.commerce.runtime.persistence
 
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
+import io.github.castab.commerce.runtime.testing.TEST_APPLICATION_SCHEMA
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -29,7 +31,7 @@ class PersistenceSpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, poolName = "persistence-spec")
-            MigrationLifecycle(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
             jdbi = Jdbi.create(dataSource)
         }
 
@@ -60,12 +62,13 @@ class PersistenceSpec :
                 jdbi.count("pg_tables WHERE schemaname = 'commerce' AND tablename <> 'flyway_schema_history'") shouldBe 16
             }
 
-            test("application migrations run afterwards with their own history in the default schema") {
-                jdbi.appliedVersions("public.flyway_schema_history") shouldContainExactly listOf("1")
+            test("application migrations run afterwards with their own history in the application's schema") {
+                jdbi.appliedVersions("$TEST_APPLICATION_SCHEMA.flyway_schema_history") shouldContainExactly listOf("1")
+                jdbi.count("pg_tables WHERE tablename = 'flyway_schema_history' AND schemaname = 'public'") shouldBe 0
             }
 
             test("migrating again is a no-op") {
-                MigrationLifecycle(dataSource, applicationLocations = listOf("classpath:db/testapp")).migrate()
+                MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
 
                 jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 6
             }
@@ -86,7 +89,7 @@ class PersistenceSpec :
             ): UUID =
                 UUID.randomUUID().also { id ->
                     transaction.handle
-                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                         .bind("id", id)
                         .bind("value", value)
                         .execute()
@@ -97,14 +100,14 @@ class PersistenceSpec :
                 id: UUID,
             ): String? =
                 transaction.handle
-                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", id)
                     .mapTo(String::class.java)
                     .findOne()
                     .orElse(null)
 
             test("every write made through one transaction commits together") {
-                val before = jdbi.count("public.test_application_records")
+                val before = jdbi.count("testapp.test_application_records")
 
                 val (first, second) =
                     transactor.inTransaction { transaction ->
@@ -113,11 +116,11 @@ class PersistenceSpec :
 
                 transactor.inTransaction { findRecord(it, first) } shouldBe "first application row"
                 transactor.inTransaction { findRecord(it, second) } shouldBe "second application row"
-                jdbi.count("public.test_application_records") shouldBe before + 2
+                jdbi.count("testapp.test_application_records") shouldBe before + 2
             }
 
             test("a failure rolls back every write in the transaction and rethrows the original exception") {
-                val before = jdbi.count("public.test_application_records")
+                val before = jdbi.count("testapp.test_application_records")
                 var written: UUID? = null
 
                 shouldThrow<IllegalStateException> {
@@ -128,7 +131,7 @@ class PersistenceSpec :
                     }
                 }.message shouldBe "application policy rejected the operation"
 
-                jdbi.count("public.test_application_records") shouldBe before
+                jdbi.count("testapp.test_application_records") shouldBe before
                 transactor.inTransaction { findRecord(it, written!!) }.shouldBeNull()
             }
 
@@ -147,7 +150,7 @@ class PersistenceSpec :
                 value: String,
             ) {
                 transaction.handle
-                    .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                    .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                     .bind("id", id)
                     .bind("value", value)
                     .execute()
@@ -159,7 +162,7 @@ class PersistenceSpec :
                 value: String,
             ) {
                 transaction.handle
-                    .createUpdate("UPDATE public.test_application_records SET value = :value WHERE id = :id")
+                    .createUpdate("UPDATE testapp.test_application_records SET value = :value WHERE id = :id")
                     .bind("id", id)
                     .bind("value", value)
                     .execute()
@@ -171,7 +174,7 @@ class PersistenceSpec :
                 id: UUID,
             ): String? =
                 transaction.handle
-                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", id)
                     .mapTo(String::class.java)
                     .findOne()
@@ -355,7 +358,7 @@ class PersistenceSpec :
                 id: UUID,
             ) {
                 transaction.handle
-                    .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'nested')")
+                    .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'nested')")
                     .bind("id", id)
                     .execute()
             }
@@ -363,7 +366,7 @@ class PersistenceSpec :
             fun exists(id: UUID): Boolean =
                 transactor.inTransaction { transaction ->
                     transaction.handle
-                        .createQuery("SELECT count(*) FROM public.test_application_records WHERE id = :id")
+                        .createQuery("SELECT count(*) FROM testapp.test_application_records WHERE id = :id")
                         .bind("id", id)
                         .mapTo(Int::class.java)
                         .one() == 1

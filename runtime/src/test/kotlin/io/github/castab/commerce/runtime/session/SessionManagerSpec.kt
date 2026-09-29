@@ -11,6 +11,7 @@ import io.github.castab.commerce.runtime.testing.MutableClock
 import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.github.castab.commerce.runtime.testing.capturingStandardOutput
 import io.github.castab.commerce.runtime.testing.insertTestPrincipal
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
@@ -42,7 +43,7 @@ class SessionManagerSpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "session-manager-spec")
-            MigrationLifecycle(dataSource, listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
             sessions =
                 PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), AuthorizationRepository(), lifetime, clock)

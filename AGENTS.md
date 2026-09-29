@@ -1114,7 +1114,7 @@ runtime version and the database shape it requires are one compatibility unit.
 MigrationLifecycle.migrate():
     runtime stream        validate → migrate   classpath:db/commerce    commerce.flyway_schema_history
         ↓ (only if it succeeded)
-    application stream    validate → migrate   contributed locations    public.flyway_schema_history
+    application stream    validate → migrate   contributed locations    <application schema>.flyway_schema_history
         ↓
 commerceRuntime(...) composes Jdbi, repositories, routes, Jetty    →    start() serves HTTP
 ```
@@ -1129,10 +1129,21 @@ commerceRuntime(...) composes Jdbi, repositories, routes, Jetty    →    start(
   enforced by review, not SQL analysis: do not add SQL parsing or schema policing.
 - **Discovery.** `RuntimeMigrations` discovers the runtime's migrations internally, at
   `classpath:db/commerce` in the runtime jar. Applications never list that location;
-  `ApplicationContributions.migrationLocations` names application migrations only, and a
-  location that overlaps `db/commerce` (including an ancestor such as `classpath:db`) is
-  rejected. Never put application migrations under `db/commerce`, or runtime migrations
-  anywhere else.
+  `ApplicationContributions.migrations` (`ApplicationMigrations(schema, locations)`) names
+  application migrations only, and a location that overlaps `db/commerce` (including an
+  ancestor such as `classpath:db`) is rejected. Never put application migrations under
+  `db/commerce`, or runtime migrations anywhere else.
+- **A schema owns its migration history.** The application declares the one PostgreSQL
+  schema it owns in `ApplicationMigrations.schema`; the runtime never hard-codes an
+  application schema name. Flyway runs the application stream with that schema as its
+  default and only managed schema (`defaultSchema` + `schemas`) and creates it when missing
+  (`createSchemas`), so the history is `<schema>.flyway_schema_history` and no application
+  migration metadata lives in `public`. The schema cannot be `commerce`, `public`,
+  `information_schema`, or a `pg_` schema. Never make the schema optional, default it to
+  `public`, or place a second application schema in one runtime instance: there is exactly
+  one commerce owner and one application owner. Do not add automatic relocation of a legacy
+  `public.flyway_schema_history`, baselining, or `baselineOnMigrate`; an installation with
+  that history fails startup and is recreated or moved deliberately by the application.
 - **Independent streams.** Runtime and application migrations are two Flyway streams with
   separate schema histories and version spaces. An application's `V1` coexists with the
   runtime's `V1`. Never merge them into one interleaved sequence or one history.

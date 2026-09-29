@@ -18,6 +18,7 @@ import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.github.castab.commerce.runtime.testing.insertTestPrincipal
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.UserId
@@ -65,7 +66,7 @@ private fun insertRecord(
 ): UUID =
     UUID.randomUUID().also { id ->
         transaction.handle
-            .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+            .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
             .bind("id", id)
             .bind("value", value)
             .execute()
@@ -76,7 +77,7 @@ private fun findRecord(
     id: UUID,
 ): String? =
     transaction.handle
-        .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+        .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
         .bind("id", id)
         .mapTo(String::class.java)
         .findOne()
@@ -205,7 +206,7 @@ class CommerceRuntimeSpec :
                 )
             val application =
                 ApplicationContributions(
-                    migrationLocations = listOf("classpath:db/testapp"),
+                    migrations = testApplicationMigrations("classpath:db/testapp"),
                     routes = { suppliedContext ->
                         context = suppliedContext
                         listOf(testApplicationRoutes(suppliedContext), testAuthenticationRoutes(suppliedContext))
@@ -388,7 +389,7 @@ private object TestRecords {
             .getConnection(database.configuration.jdbcUrl, database.configuration.username, database.configuration.password)
             .use { connection ->
                 connection.createStatement().use { statement ->
-                    statement.executeQuery("SELECT count(*) FROM public.test_application_records").use { rows ->
+                    statement.executeQuery("SELECT count(*) FROM testapp.test_application_records").use { rows ->
                         rows.next()
                         rows.getInt(1)
                     }

@@ -71,7 +71,7 @@ class SessionAuthenticationSpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "session-authentication-spec")
-            MigrationLifecycle(dataSource, emptyList()).migrate()
+            MigrationLifecycle(dataSource).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
             sessions =
                 PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), AuthorizationRepository(), lifetime, clock)
