@@ -251,7 +251,7 @@ never open their own transactions.
 | `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, commerce repositories, `financialLedger`, `sessions`, and `authorization`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
 | `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor`, `Transaction` and `TransactionIsolation`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
-| `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, refunds with their refund allocations, and derived payment and document reconciliation. |
+| `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, refunds with their refund allocations, derived payment and document reconciliation, and `PaymentHistory` reads of a payment or a document lineage's payments. |
 | `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
 | `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
@@ -646,6 +646,53 @@ over-applied payment) is `InvariantViolated`; an existing refund id, refund allo
 or external refund reference is `Conflict`. Nothing is stored on any failure.
 `PaymentRepository.insertRefund` enforces the same checks for callers that use the
 repository directly.
+
+#### Payment history
+
+Payment facts are immutable and append-only, and an application should not have to keep
+the ids from a mutation response to find them again. `FinancialLedger` reads them back:
+
+| Operation | Returns |
+|---|---|
+| `paymentHistory(paymentId)` | the payment's `PaymentHistory`; `NotFound` for an unknown payment |
+| `paymentHistoriesForLineage(documentId)` | the `PaymentHistory` of every payment ever allocated to any version of the document lineage, ordered by `receivedAt`, then payment id; `NotFound` for a missing lineage, an empty list for a lineage with no payments |
+
+A `PaymentHistory` is one coherent read: the `PaymentRecord`, all its `PaymentAllocation`s
+(to any document), `RefundRecord`s, and `RefundAllocation`s, and the
+`PaymentReconciliation` derived from exactly those facts through the domain's
+`PaymentReconciliation.reconcile`. It reuses the domain records rather than copying them,
+stores no status, and can only be constructed by the ledger. It lives in the runtime
+because it composes persisted facts; it is not a domain invariant. The lists are ordered
+for presentation: allocations by `allocatedAt`, refunds by `refundedAt`, refund
+allocations by `allocatedAt`, ties broken by id (reconciliation ignores order).
+
+Discovery is historical. A payment is found through a lineage when it has *ever* been
+allocated to it, including when refunds later unwound those allocations completely. The
+history returned is always the payment's whole history, never one filtered to the lineage:
+a payment split between documents A and B is returned in full for either, with its
+reconciliation over both allocations, because that reconciliation is what says how much is
+still allocatable or refundable. To show one document, select the allocations with
+`financialDocumentReference.id == documentId`. A payment that was never allocated cannot
+be discovered from a document; the read for it is `paymentHistory(paymentId)`.
+
+The convenience overloads run in one `REPEATABLE_READ` transaction, so a result never mixes
+committed states, and they take no row lock, so a history read neither waits for nor
+delays an allocation or refund. The `Transaction` overloads join the caller's transaction
+and see its own uncommitted writes; they add no isolation of their own, so an application
+that needs a coherent history from an outer transaction opens it with
+`TransactionIsolation.REPEATABLE_READ`. To act on a history (allocate or refund), use the
+mutation, which locks and validates against the payment's committed facts.
+
+```kotlin
+// After a reload: which payments and allocations exist for this invoice?
+val histories = context.financialLedger.paymentHistoriesForLineage(invoiceId)
+val history = histories.single { it.payment.id == paymentId }
+val allocation = history.allocations.first { it.financialDocumentReference.id == invoiceId }
+context.financialLedger.recordRefund(
+    paymentId, refundId, amount, method, refundedAt, null,
+    listOf(RefundAllocationPortion(refundAllocationId, allocation.id, amount, refundedAt)),
+)
+```
 
 An application creates authoritative `LineItem`s and a domain document itself, then can
 join its relationship write to the financial write:
@@ -1192,7 +1239,11 @@ error handling and rollback, and closes it.
 `FinancialLedgerSpec` and `FinancialLedgerRefundSpec` prove document, payment, allocation,
 refund, and refund-allocation round trips, the refund examples and every rejection, atomic
 refund recording, and that refunds and allocations of one payment are serialized by its
-row lock (observed as a blocked PostgreSQL backend). `MigrationLifecycleSpec` also pins
+row lock (observed as a blocked PostgreSQL backend). `FinancialLedgerPaymentHistorySpec`
+proves the payment history reads: rediscovery of every id and link after a refund,
+lineage discovery across versions, fully unwound allocations, split payments returned whole,
+deterministic ordering, reads inside an uncommitted caller transaction, and the
+`REPEATABLE_READ` isolation of the convenience reads. `MigrationLifecycleSpec` also pins
 the checksums of released runtime migrations and migrates a released `V5` database
 forward.
 

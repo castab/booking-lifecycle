@@ -17,6 +17,7 @@ import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
+import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.time.Instant
 import java.util.UUID
@@ -278,6 +279,109 @@ class FinancialLedger internal constructor(
             payments.refundsForPayment(transaction, paymentId),
             payments.refundAllocationsForPayment(transaction, paymentId),
         )
+    }
+
+    /**
+     * Reads the complete persisted history of one payment: the payment, all its allocations,
+     * refunds, and refund allocations, and the reconciliation derived from exactly those
+     * facts. This is how an application rediscovers payment, allocation, and refund ids after
+     * the response of the mutation that created them is gone.
+     *
+     * Runs in one `REPEATABLE_READ` transaction, so the facts and the reconciliation are one
+     * coherent committed state, and it takes no row lock: it never blocks or delays the
+     * operations that append facts. See [PaymentHistory] for the ordering of its lists.
+     *
+     * @throws CommerceFailure.NotFound if there is no payment [paymentId].
+     */
+    fun paymentHistory(paymentId: UUID): PaymentHistory =
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction -> paymentHistory(transaction, paymentId) }
+
+    /**
+     * Reads a payment's history in the caller's transaction, seeing the caller's own
+     * uncommitted writes. It reads the payment's facts with several queries and takes no
+     * lock, so the result is coherent only if the caller's transaction is
+     * [TransactionIsolation.REPEATABLE_READ] (or the payment has no concurrent writers). At
+     * `READ_COMMITTED`, a concurrent commit between two of the queries can make the facts and
+     * the reconciliation describe different states, or fail the reconciliation. The
+     * convenience overload requests the stronger isolation itself. Use
+     * [reconcilePayment], which locks the payment row, when the history is about to be acted on.
+     *
+     * @throws CommerceFailure.NotFound if there is no payment [paymentId].
+     */
+    fun paymentHistory(
+        transaction: Transaction,
+        paymentId: UUID,
+    ): PaymentHistory {
+        val payment =
+            payments.retrievePayment(transaction, paymentId)
+                ?: throw CommerceFailure.NotFound("Payment $paymentId was not found")
+        return historyOf(transaction, payment)
+    }
+
+    /**
+     * Reads the history of every payment that has ever been allocated to any version of the
+     * financial-document lineage [documentId], ordered ascending by
+     * [PaymentRecord.receivedAt], then [PaymentRecord.id].
+     *
+     * Discovery is historical, not a filter on current value: a payment stays in the result
+     * after refunds have unwound its allocations to this document completely. Each element is
+     * the payment's complete [PaymentHistory], including its allocations to other documents;
+     * its reconciliation is never computed from this lineage's allocations alone, because
+     * that would misstate what remains allocatable or refundable. Select the allocations
+     * whose `financialDocumentReference.id` is [documentId] to show only this document's.
+     * A payment that was never allocated cannot be discovered here.
+     *
+     * Runs in one `REPEATABLE_READ` transaction: every history in the result belongs to the
+     * same committed state, and no row lock is taken.
+     *
+     * @throws CommerceFailure.NotFound if the document lineage does not exist. A lineage
+     * that exists and has no payments yields an empty list.
+     */
+    fun paymentHistoriesForLineage(documentId: UUID): List<PaymentHistory> =
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
+            paymentHistoriesForLineage(transaction, documentId)
+        }
+
+    /**
+     * Reads the payment histories of a document lineage in the caller's transaction. Ordering,
+     * discovery, `NotFound` behavior, and the isolation the caller's transaction needs for a
+     * coherent result are those of [paymentHistoriesForLineage] and [paymentHistory].
+     */
+    fun paymentHistoriesForLineage(
+        transaction: Transaction,
+        documentId: UUID,
+    ): List<PaymentHistory> {
+        latest(transaction, documentId)
+        return payments
+            .allocationsForLineage(transaction, documentId)
+            .mapTo(LinkedHashSet()) { it.paymentReference }
+            .map { paymentId ->
+                checkNotNull(payments.retrievePayment(transaction, paymentId)) {
+                    "Payment $paymentId has allocations but no payment record"
+                }
+            }.sortedWith(compareBy<PaymentRecord> { it.receivedAt }.thenBy { it.id })
+            .map { historyOf(transaction, it) }
+    }
+
+    private fun historyOf(
+        transaction: Transaction,
+        payment: PaymentRecord,
+    ): PaymentHistory {
+        val allocations =
+            payments
+                .allocationsForPayment(transaction, payment.id)
+                .sortedWith(compareBy<PaymentAllocation> { it.allocatedAt }.thenBy { it.id })
+        val refunds =
+            payments
+                .refundsForPayment(transaction, payment.id)
+                .sortedWith(compareBy<RefundRecord> { it.refundedAt }.thenBy { it.id })
+        val refundAllocations =
+            payments
+                .refundAllocationsForPayment(transaction, payment.id)
+                .sortedWith(compareBy<RefundAllocation> { it.allocatedAt }.thenBy { it.id })
+        // The runtime does not persist allocation reversals.
+        val reconciliation = PaymentReconciliation.reconcile(payment, allocations, emptyList(), refunds, refundAllocations)
+        return PaymentHistory(payment, allocations, refunds, refundAllocations, reconciliation)
     }
 
     /** Reconciles the latest obligation against all allocations in its lineage. */
