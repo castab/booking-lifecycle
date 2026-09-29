@@ -1,8 +1,15 @@
 package io.github.castab.commerce.runtime.testing
 
 import com.zaxxer.hikari.HikariDataSource
+import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import javax.sql.DataSource
+
+/** The schema the test application's migrations own; its history lives there too. */
+const val TEST_APPLICATION_SCHEMA = "testapp"
+
+/** The test application's migrations (`db/testapp`), which create `testapp.test_application_records`. */
+fun testApplicationMigrations(location: String = "classpath:db/testapp") = ApplicationMigrations(TEST_APPLICATION_SCHEMA, listOf(location))
 
 /** Runs [block] against a fresh [TestDatabase] and its own pool, then drops the database. */
 inline fun <T> withTestDatabase(block: (TestDatabase, HikariDataSource) -> T): T {

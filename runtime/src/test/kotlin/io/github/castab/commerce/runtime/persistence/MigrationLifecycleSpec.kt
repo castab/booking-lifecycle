@@ -1,12 +1,14 @@
 package io.github.castab.commerce.runtime.persistence
 
 import io.github.castab.commerce.runtime.persistence.MigrationStream.Companion.HISTORY_TABLE
+import io.github.castab.commerce.runtime.testing.TEST_APPLICATION_SCHEMA
 import io.github.castab.commerce.runtime.testing.appliedVersions
 import io.github.castab.commerce.runtime.testing.execute
 import io.github.castab.commerce.runtime.testing.history
 import io.github.castab.commerce.runtime.testing.relationExists
 import io.github.castab.commerce.runtime.testing.schemaExists
 import io.github.castab.commerce.runtime.testing.strings
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.github.castab.commerce.runtime.testing.withTestDatabase
 import io.kotest.assertions.throwables.shouldNotThrowAny
 import io.kotest.assertions.throwables.shouldThrow
@@ -25,43 +27,45 @@ import javax.sql.DataSource
 
 /**
  * The migration phase against a real PostgreSQL: the runtime stream is discovered
- * internally, the application stream comes from contributed locations, the runtime stream
- * always runs first, and the two keep independent histories and version spaces. Every test
- * uses a fresh database.
+ * internally, the application stream comes from contributed locations in the application's
+ * own schema, the runtime stream always runs first, and the two keep independent histories and
+ * version spaces, each in the schema of its owner. Every test uses a fresh database.
  *
  * Dependency-order tests use a small stand-in runtime stream from `db/testruntime`.
  */
 class MigrationLifecycleSpec :
     FunSpec({
-        val testApplication = listOf("classpath:db/testapp")
-        val dependentApplication = listOf("classpath:db/testapp-dependent")
+        val testApplication = testApplicationMigrations()
+        val dependentApplication = testApplicationMigrations("classpath:db/testapp-dependent")
+        val applicationHistory = "$TEST_APPLICATION_SCHEMA.$HISTORY_TABLE"
 
         // The lifecycle with the stand-in runtime stream (V1 creates commerce.test_runtime_records).
         fun standInLifecycle(
             dataSource: DataSource,
-            applicationLocations: List<String>,
+            application: ApplicationMigrations,
         ) = MigrationLifecycle(
             RuntimeMigrations(dataSource, location = "classpath:db/testruntime"),
-            ApplicationMigrations(dataSource, applicationLocations),
+            ApplicationMigrationStream(dataSource, application),
         )
 
         test("runtime migrations are discovered internally and own the commerce schema and its history") {
             withTestDatabase { _, dataSource ->
-                MigrationLifecycle(dataSource, applicationLocations = emptyList()).migrate()
+                MigrationLifecycle(dataSource).migrate()
 
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldNotBeEmpty()
-                // No application stream: no application history is created.
+                // No application stream: no application schema or history is created.
                 dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
+                dataSource.schemaExists(TEST_APPLICATION_SCHEMA) shouldBe false
             }
         }
 
         test("an application migration that depends on a runtime-owned table fails on its own") {
             withTestDatabase { _, dataSource ->
                 shouldThrow<FlywayException> {
-                    ApplicationMigrations(dataSource, dependentApplication).migrate()
+                    ApplicationMigrationStream(dataSource, dependentApplication).migrate()
                 }.message shouldContain "schema \"commerce\" does not exist"
 
-                dataSource.relationExists("public.test_application_dependents") shouldBe false
+                dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_dependents") shouldBe false
             }
         }
 
@@ -70,7 +74,8 @@ class MigrationLifecycleSpec :
                 standInLifecycle(dataSource, dependentApplication).migrate()
 
                 dataSource.relationExists("commerce.test_runtime_records") shouldBe true
-                dataSource.relationExists("public.test_application_dependents") shouldBe true
+                dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_dependents") shouldBe true
+                dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
             }
         }
 
@@ -80,7 +85,7 @@ class MigrationLifecycleSpec :
 
                 // Runtime V1 to V6 coexist with application V1 in separate version spaces.
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
-                dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
+                dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
 
@@ -127,7 +132,7 @@ class MigrationLifecycleSpec :
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
-                dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
+                dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
                 dataSource.relationExists("commerce.refund_allocations") shouldBe true
@@ -166,13 +171,13 @@ class MigrationLifecycleSpec :
                 val lifecycle = MigrationLifecycle(dataSource, testApplication)
                 lifecycle.migrate()
                 val runtimeHistory = dataSource.history(RuntimeMigrations.SCHEMA)
-                val applicationHistory = dataSource.history(ApplicationMigrations.SCHEMA)
+                val applicationHistoryRows = dataSource.history(TEST_APPLICATION_SCHEMA)
 
                 lifecycle.migrate()
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
                 dataSource.history(RuntimeMigrations.SCHEMA) shouldBe runtimeHistory
-                dataSource.history(ApplicationMigrations.SCHEMA) shouldBe applicationHistory
+                dataSource.history(TEST_APPLICATION_SCHEMA) shouldBe applicationHistoryRows
             }
         }
 
@@ -200,7 +205,7 @@ class MigrationLifecycleSpec :
 
                 createDataSource(database.configuration, poolName = "verification").use { dataSource ->
                     dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1")
-                    dataSource.appliedVersions(ApplicationMigrations.SCHEMA) shouldContainExactly listOf("1")
+                    dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }
         }
@@ -216,19 +221,20 @@ class MigrationLifecycleSpec :
                 }.message shouldContain "checksum mismatch"
 
                 dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
-                dataSource.relationExists("public.test_application_records") shouldBe false
+                dataSource.schemaExists(TEST_APPLICATION_SCHEMA) shouldBe false
+                dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe false
             }
         }
 
         test("a failed application migration is not recorded, and the runtime migrations stay applied") {
             withTestDatabase { _, dataSource ->
                 shouldThrow<FlywayException> {
-                    MigrationLifecycle(dataSource, listOf("classpath:db/testapp-broken")).migrate()
+                    MigrationLifecycle(dataSource, testApplicationMigrations("classpath:db/testapp-broken")).migrate()
                 }.message shouldContain "V1__test_application_broken.sql"
 
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldNotBeEmpty()
-                dataSource.appliedVersions(ApplicationMigrations.SCHEMA).shouldBeEmpty()
-                dataSource.relationExists("public.test_application_broken") shouldBe false
+                dataSource.appliedVersions(TEST_APPLICATION_SCHEMA).shouldBeEmpty()
+                dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_broken") shouldBe false
             }
         }
 
@@ -238,10 +244,12 @@ class MigrationLifecycleSpec :
 
                 shouldThrow<FlywayException> { lifecycle.validate() }
                 dataSource.schemaExists(RuntimeMigrations.SCHEMA) shouldBe false
+                dataSource.schemaExists(TEST_APPLICATION_SCHEMA) shouldBe false
 
                 RuntimeMigrations(dataSource).migrate()
                 shouldThrow<FlywayException> { lifecycle.validate() }
                 dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
+                dataSource.relationExists(applicationHistory) shouldBe false
 
                 lifecycle.migrate()
                 shouldNotThrowAny { lifecycle.validate() }
@@ -253,7 +261,7 @@ class MigrationLifecycleSpec :
                 MigrationLifecycle(dataSource, testApplication).migrate()
                 // As if a later application release had applied V2 already.
                 dataSource.execute(
-                    "INSERT INTO public.$HISTORY_TABLE " +
+                    "INSERT INTO $applicationHistory " +
                         "(installed_rank, version, description, type, script, checksum, installed_by, execution_time, success) " +
                         "VALUES (100, '2', 'later release', 'SQL', 'V2__later_release.sql', 0, current_user, 0, true)",
                 )
@@ -263,23 +271,139 @@ class MigrationLifecycleSpec :
         }
 
         test("application locations that would also discover the runtime migrations are rejected") {
-            withTestDatabase { _, dataSource ->
-                listOf(
-                    "classpath:db/commerce",
-                    "db/commerce",
-                    "classpath:/db/commerce/",
-                    "classpath:db",
-                    "classpath:db/commerce/nested",
-                    "classpath:",
-                ).forEach { location ->
-                    shouldThrow<IllegalArgumentException> {
-                        MigrationLifecycle(dataSource, listOf(location))
-                    }.message shouldContain "overlaps commerce-runtime's own migrations"
-                }
+            listOf(
+                "classpath:db/commerce",
+                "db/commerce",
+                "classpath:/db/commerce/",
+                "classpath:db",
+                "classpath:db/commerce/nested",
+                "classpath:",
+            ).forEach { location ->
+                shouldThrow<IllegalArgumentException> {
+                    ApplicationMigrations("fionas", listOf(location))
+                }.message shouldContain "overlaps commerce-runtime's own migrations"
+            }
 
-                listOf("classpath:db/migration", "db/commerce-application", "filesystem:db")
-                    .forEach { location -> shouldNotThrowAny { MigrationLifecycle(dataSource, listOf(location)) } }
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldBeEmpty()
+            listOf("classpath:db/migration", "db/commerce-application", "filesystem:db")
+                .forEach { location -> shouldNotThrowAny { ApplicationMigrations("fionas", listOf(location)) } }
+        }
+
+        context("the application owns its migration schema and the history in it") {
+            test("from a clean database, each owner has its schema and its own history, and public holds none") {
+                withTestDatabase { _, dataSource ->
+                    dataSource.schemaExists(RuntimeMigrations.SCHEMA) shouldBe false
+                    dataSource.schemaExists(TEST_APPLICATION_SCHEMA) shouldBe false
+
+                    MigrationLifecycle(dataSource, testApplication).migrate()
+
+                    dataSource.schemaExists(RuntimeMigrations.SCHEMA) shouldBe true
+                    dataSource.schemaExists(TEST_APPLICATION_SCHEMA) shouldBe true
+                    dataSource.relationExists("commerce.$HISTORY_TABLE") shouldBe true
+                    dataSource.relationExists(applicationHistory) shouldBe true
+                    dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
+                    dataSource
+                        .strings("SELECT schemaname FROM pg_tables WHERE tablename = '$HISTORY_TABLE' ORDER BY schemaname")
+                        .shouldContainExactly(listOf("commerce", TEST_APPLICATION_SCHEMA))
+
+                    // The application's SQL ran, and its table lives in the application's schema.
+                    dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe true
+                    dataSource.relationExists("public.test_application_records") shouldBe false
+                    // Independent histories and version spaces.
+                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                    dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
+                }
+            }
+
+            test("the schema is whatever the application declares; the runtime knows no application schema name") {
+                withTestDatabase { _, dataSource ->
+                    val elsewhere = ApplicationMigrations("another_application", listOf("classpath:db/testapp-unqualified"))
+
+                    MigrationLifecycle(dataSource, elsewhere).migrate()
+
+                    dataSource.appliedVersions("another_application") shouldContainExactly listOf("1")
+                    dataSource.relationExists("another_application.$HISTORY_TABLE") shouldBe true
+                    dataSource.schemaExists(TEST_APPLICATION_SCHEMA) shouldBe false
+                    dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
+                }
+            }
+
+            test("an unqualified application migration resolves against the application's schema, not public") {
+                withTestDatabase { _, dataSource ->
+                    MigrationLifecycle(dataSource, testApplicationMigrations("classpath:db/testapp-unqualified")).migrate()
+
+                    dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_unqualified") shouldBe true
+                    dataSource.relationExists("public.test_application_unqualified") shouldBe false
+                }
+            }
+
+            test("a schema that already exists but is empty is used as it is") {
+                withTestDatabase { _, dataSource ->
+                    dataSource.execute("CREATE SCHEMA $TEST_APPLICATION_SCHEMA")
+
+                    MigrationLifecycle(dataSource, testApplication).migrate()
+
+                    dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
+                    dataSource.relationExists("public.$HISTORY_TABLE") shouldBe false
+                }
+            }
+
+            test("a schema that already holds tables but no history is refused, never baselined") {
+                withTestDatabase { _, dataSource ->
+                    dataSource.execute("CREATE SCHEMA $TEST_APPLICATION_SCHEMA")
+                    dataSource.execute("CREATE TABLE $TEST_APPLICATION_SCHEMA.preexisting (id int PRIMARY KEY)")
+
+                    shouldThrow<FlywayException> { MigrationLifecycle(dataSource, testApplication).migrate() }
+                        .message shouldContain "non-empty schema"
+
+                    dataSource.appliedVersions(TEST_APPLICATION_SCHEMA).shouldBeEmpty()
+                    dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe false
+                }
+            }
+
+            test("an installation with its application history in public is not migrated, copied, or reinterpreted") {
+                withTestDatabase { _, dataSource ->
+                    // As left by an earlier runtime: application history in public.flyway_schema_history.
+                    dataSource.execute("CREATE SCHEMA $TEST_APPLICATION_SCHEMA")
+                    Flyway
+                        .configure()
+                        .dataSource(dataSource)
+                        .schemas("public")
+                        .table(HISTORY_TABLE)
+                        .locations("classpath:db/testapp")
+                        .load()
+                        .migrate()
+                    val legacyHistory = dataSource.history("public")
+                    RuntimeMigrations(dataSource).migrate()
+
+                    // The application's schema now holds its tables but no history of its own, so the
+                    // new stream refuses to start: it neither adopts the legacy history nor re-runs V1.
+                    shouldThrow<FlywayException> { MigrationLifecycle(dataSource, testApplication).migrate() }
+                        .message shouldContain "non-empty schema"
+                    shouldThrow<FlywayException> { MigrationLifecycle(dataSource, testApplication).validate() }
+
+                    dataSource.history("public") shouldBe legacyHistory
+                    dataSource.appliedVersions(TEST_APPLICATION_SCHEMA).shouldBeEmpty()
+                }
+            }
+
+            test("the schema and locations are validated when the migrations are declared") {
+                listOf("", "Fionas", "1fionas", "fi-onas", "fionas.app", " fionas", "a".repeat(64)).forEach { schema ->
+                    shouldThrow<IllegalArgumentException> { ApplicationMigrations(schema, testApplication.locations) }
+                        .message shouldContain "lower-case PostgreSQL identifier"
+                }
+                shouldThrow<IllegalArgumentException> { ApplicationMigrations("commerce", testApplication.locations) }
+                    .message shouldContain "owned by commerce-runtime"
+                listOf("public", "information_schema", "pg_catalog", "pg_temp").forEach { schema ->
+                    shouldThrow<IllegalArgumentException> { ApplicationMigrations(schema, testApplication.locations) }
+                        .message shouldContain "shared or system schema"
+                }
+                shouldThrow<IllegalArgumentException> { ApplicationMigrations("fionas", emptyList()) }
+                    .message shouldContain "at least one location"
+
+                shouldNotThrowAny { ApplicationMigrations("fionas", testApplication.locations) }
+                shouldNotThrowAny { ApplicationMigrations("a".repeat(63), testApplication.locations) }
+                ApplicationMigrations("fionas", testApplication.locations) shouldBe
+                    ApplicationMigrations("fionas", testApplication.locations)
             }
         }
     })

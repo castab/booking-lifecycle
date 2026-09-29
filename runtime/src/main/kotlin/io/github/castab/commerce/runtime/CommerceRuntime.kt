@@ -9,6 +9,7 @@ import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.Mig
 import io.github.castab.commerce.runtime.financial.FinancialLedger
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.healthRoutes
+import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.persistence.AuthorizationRepository
 import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
@@ -79,10 +80,11 @@ class CommerceRuntimeContext internal constructor(
  * further capabilities are designed from real consumer requirements, and it grows only
  * when a concrete consumer needs it.
  *
- * @property migrationLocations Flyway locations of the application's own migrations, and
- *   only those. commerce-runtime discovers its own migrations itself and always applies them
- *   first; the application's are a separate stream with its own schema history and version
- *   space. See [MigrationLifecycle].
+ * @property migrations The application's own migrations: the PostgreSQL schema it owns, which
+ *   also holds its Flyway history, and their locations, and only those. `null` when the
+ *   application has none. commerce-runtime discovers its own migrations itself and always
+ *   applies them first; the application's are a separate stream with its own schema history
+ *   and version space. See [ApplicationMigrations] and [MigrationLifecycle].
  * @property routes The application's own routes, built from the shared
  *   [CommerceRuntimeContext]. They are served behind the same error handling as the
  *   commerce routes.
@@ -90,7 +92,7 @@ class CommerceRuntimeContext internal constructor(
  *   runtime's built-in catalog. Duplicate keys fail composition.
  */
 class ApplicationContributions(
-    val migrationLocations: List<String> = emptyList(),
+    val migrations: ApplicationMigrations? = null,
     val routes: (CommerceRuntimeContext) -> List<RoutingHttpHandler> = { emptyList() },
     val permissionDefinitions: List<PermissionDefinition> = emptyList(),
 )
@@ -155,7 +157,7 @@ fun commerceRuntime(
     val permissionCatalog = PermissionCatalog(commercePermissionDefinitions + application.permissionDefinitions)
     val dataSource = createDataSource(configuration.database)
     try {
-        val migrations = MigrationLifecycle(dataSource, application.migrationLocations)
+        val migrations = MigrationLifecycle(dataSource, application.migrations)
         when (configuration.migrations.onStartup) {
             OnStartup.MIGRATE -> migrations.migrate()
             OnStartup.VALIDATE -> migrations.validate()

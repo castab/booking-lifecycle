@@ -69,7 +69,7 @@ A concrete application depends on `commerce-runtime` and owns its entry point, i
 fun main() {
     val application =
         ApplicationContributions(
-            migrationLocations = listOf("classpath:db/migration"),
+            migrations = ApplicationMigrations(schema = "myapp", locations = listOf("classpath:db/migration")),
             routes = { context -> listOf(myApplicationRoutes(context.transactor)) },
         )
 
@@ -126,8 +126,8 @@ commerce-runtime
 ```
 
 `ApplicationContributions` is intentionally small and not booking-specific. An
-application contributes the Flyway locations of its own migrations, never the runtime's,
-its own routes, and software-defined `permissionDefinitions`. The routes are built from
+application contributes its own migrations (the PostgreSQL schema it owns and the Flyway
+locations of its scripts, never the runtime's), its own routes, and software-defined `permissionDefinitions`. The routes are built from
 the shared `CommerceRuntimeContext`, which holds configuration, the `Transactor`, the
 offerings snapshot repository, `context.sessions`, and `context.authorization`. The
 runtime owns the error handling around every route.
@@ -317,9 +317,9 @@ runtime version and the database shape it requires are one compatibility unit.
 | | Runtime migrations | Application migrations |
 |---|---|---|
 | Owner | commerce-runtime | the concrete application |
-| Objects | the `commerce` schema and everything in it | the application's own schemas and objects |
-| Discovered at | `classpath:db/commerce`, inside the runtime jar, internally | `ApplicationContributions.migrationLocations` |
-| Schema history | `commerce.flyway_schema_history` | `public.flyway_schema_history` |
+| Objects | the `commerce` schema and everything in it | the application's own schema and objects |
+| Discovered at | `classpath:db/commerce`, inside the runtime jar, internally | `ApplicationContributions.migrations.locations` |
+| Schema history | `commerce.flyway_schema_history` | `<schema>.flyway_schema_history`, in the application's declared schema |
 | Runs | first | only after the runtime migrations succeeded |
 
 - **Two independent streams.** Each has its own history and version space: the
@@ -327,6 +327,25 @@ runtime version and the database shape it requires are one compatibility unit.
   its migrations after the runtime's. Upgrading `commerce-runtime` is enough to pick up its
   new migrations. The application never lists them, and a contributed location that
   overlaps `db/commerce` (such as `classpath:db`) is rejected.
+- **The application declares its migration schema.** `ApplicationMigrations(schema, locations)`
+  names the one schema the application owns; the runtime knows no application schema name.
+  A schema that owns application data also owns the Flyway history that describes it, so
+  the application's history is `<schema>.flyway_schema_history` and no application migration
+  metadata is ever left in `public`. The runtime creates the schema when it does not exist
+  (Flyway's `createSchemas`, before it records anything there), so a clean database needs no
+  preparation, and it configures Flyway with that schema as its default and only managed
+  schema. Consequently an unqualified `CREATE TABLE foo (...)` in an application migration
+  resolves into the application's schema, not `public`; prefer qualifying names anyway, and
+  always qualify references to runtime-owned objects (`commerce.<table>`). The schema must
+  be a lower-case identifier and cannot be `commerce`, `public`, `information_schema`, or a
+  `pg_` schema. An application with no migrations contributes none (the default, `null`) and
+  has no schema or history managed by the runtime.
+- **Installations that predate this rule.** Earlier versions kept the application's history in
+  `public.flyway_schema_history`. The runtime does not copy, rename, baseline, or reinterpret
+  it, and never enables `baselineOnMigrate`. Where the application's tables already sit in the
+  declared schema, Flyway refuses to migrate or validate that non-empty schema without a
+  history there, and startup fails instead of re-running migrations. Recreate the database, or
+  move the history deliberately as a one-time operation owned by the application.
 - **Ownership.** Sharing one database is not shared ownership. Runtime migrations change
   only runtime-owned objects and never touch application tables, indexes, constraints,
   sequences, or views. Application migrations may *reference* runtime-owned objects (for
@@ -350,7 +369,7 @@ runtime version and the database shape it requires are one compatibility unit.
   ```kotlin
   // In the application's migration entry point: migrate, then exit. No Jetty is started.
   createDataSource(configuration.database).use { dataSource ->
-      MigrationLifecycle(dataSource, application.migrationLocations).migrate()
+      MigrationLifecycle(dataSource, application.migrations).migrate()
   }
   ```
 
@@ -370,8 +389,8 @@ runtime version and the database shape it requires are one compatibility unit.
   new migration.
 - Every SQL statement names the `commerce` schema explicitly. PostgreSQL's default
   `search_path` starts with `"$user"`, so a role named `commerce` would otherwise resolve
-  unqualified names into the commerce schema. Application migrations run with `public` as
-  their default schema.
+  unqualified names into the commerce schema. Application migrations run with the
+  application's declared schema as their default schema.
 
 The runtime migration stream starts with `V1__commerce_baseline.sql` and adds the
 offerings tables in `V2__offerings_snapshots.sql`. The latter creates
@@ -1096,7 +1115,7 @@ the known consumers. What this module already guarantees:
 Responsibilities this foundation has identified for the future extension:
 
 1. **Detail schema.** Its own tables, contributed through the existing
-   `ApplicationContributions.migrationLocations`, keyed by the application's own booking
+   `ApplicationContributions.migrations`, keyed by the application's own booking
    identity (commerce-domain defines no booking record or booking ID).
 2. **Transactional persistence.** A repository for its details that takes the runtime's
    `Transaction`, so detail writes commit atomically with the booking identity and
@@ -1160,7 +1179,9 @@ configuration loading and validation, the error contract, health and readiness, 
 serialization, every migration from an empty database, the migration contract (internal runtime
 discovery, runtime-before-application ordering proven by a real dependency on a stand-in
 runtime stream, independent version spaces, idempotent and concurrent migration,
-validation, and startup gating on failures), and commit and rollback of several
+validation, and startup gating on failures, and the application-owned schema and history: a clean
+database ends with `commerce` and the application schema each holding its own
+`flyway_schema_history`, none in `public`), and commit and rollback of several
 application-owned writes sharing one `Transaction`. `CommerceRuntimeSpec` composes the
 runtime the way a concrete application does: it supplies explicit
 `ApplicationContributions` (an application migration and routes that receive

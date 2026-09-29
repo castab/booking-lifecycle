@@ -16,6 +16,7 @@ import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
@@ -56,7 +57,7 @@ class FinancialLedgerSpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "financial-ledger-spec")
-            MigrationLifecycle(dataSource, listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
             ledger = FinancialLedger(transactor, documents, payments)
         }
@@ -249,7 +250,7 @@ class FinancialLedgerSpec :
                     ledger.latest(transaction, estimate.id) shouldBe quote
                     ledger.history(transaction, estimate.id).shouldContainExactly(estimate, quote)
                     transaction.handle
-                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                         .bind("id", rolledBackRow)
                         .bind("value", "quote issued")
                         .execute()
@@ -259,7 +260,7 @@ class FinancialLedgerSpec :
             ledger.latest(estimate.id) shouldBe estimate
             transactor.inTransaction { transaction ->
                 transaction.handle
-                    .createQuery("SELECT count(*) FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT count(*) FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", rolledBackRow)
                     .mapTo(Int::class.java)
                     .one()
@@ -270,7 +271,7 @@ class FinancialLedgerSpec :
                 transactor.inTransaction { transaction ->
                     ledger.issueQuote(transaction, estimate.id).also {
                         transaction.handle
-                            .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                            .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                             .bind("id", committedRow)
                             .bind("value", "quote issued")
                             .execute()
@@ -279,7 +280,7 @@ class FinancialLedgerSpec :
             ledger.latest(estimate.id) shouldBe quote
             transactor.inTransaction { transaction ->
                 transaction.handle
-                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", committedRow)
                     .mapTo(String::class.java)
                     .one()
@@ -302,7 +303,7 @@ class FinancialLedgerSpec :
                         Instant.EPOCH,
                     )
                     transaction.handle
-                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                         .bind("id", rolledBackRow)
                         .bind("value", "provider receipt")
                         .execute()
@@ -313,7 +314,7 @@ class FinancialLedgerSpec :
                 payments.retrievePayment(transaction, rolledBackPayment.id) shouldBe null
                 payments.retrieveAllocation(transaction, rolledBackAllocation) shouldBe null
                 transaction.handle
-                    .createQuery("SELECT count(*) FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT count(*) FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", rolledBackRow)
                     .mapTo(Int::class.java)
                     .one() shouldBe 0
@@ -333,7 +334,7 @@ class FinancialLedgerSpec :
                             Instant.EPOCH,
                         ).also {
                             transaction.handle
-                                .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                                .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                                 .bind("id", committedRow)
                                 .bind("value", "provider receipt")
                                 .execute()
@@ -345,7 +346,7 @@ class FinancialLedgerSpec :
                 ledger.reconcileLatest(transaction, document.id).netApplied shouldBe money("30.00")
                 ledger.reconcile(transaction, document.reference).netApplied shouldBe money("30.00")
                 transaction.handle
-                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", committedRow)
                     .mapTo(String::class.java)
                     .one() shouldBe "provider receipt"
@@ -385,7 +386,7 @@ class FinancialLedgerSpec :
                 transactor.inTransaction { transaction ->
                     ledger.create(transaction, associated)
                     transaction.handle
-                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                         .bind("id", UUID.randomUUID())
                         .bind("value", "related")
                         .execute()
@@ -399,7 +400,7 @@ class FinancialLedgerSpec :
             transactor.inTransaction { transaction ->
                 ledger.create(transaction, committed)
                 transaction.handle
-                    .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                    .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                     .bind("id", rowId)
                     .bind("value", "associated")
                     .execute()
@@ -407,7 +408,7 @@ class FinancialLedgerSpec :
             ledger.get(committed.reference) shouldBe committed
             transactor.inTransaction { transaction ->
                 transaction.handle
-                    .createQuery("SELECT value FROM public.test_application_records WHERE id = :id")
+                    .createQuery("SELECT value FROM testapp.test_application_records WHERE id = :id")
                     .bind("id", rowId)
                     .mapTo(String::class.java)
                     .one()

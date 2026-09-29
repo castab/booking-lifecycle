@@ -7,6 +7,7 @@ import io.github.castab.commerce.runtime.session.SessionId
 import io.github.castab.commerce.runtime.session.SessionToken
 import io.github.castab.commerce.runtime.session.SessionTokenDigest
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.github.castab.commerce.staff.PrincipalId
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
@@ -43,7 +44,7 @@ class PrincipalSessionRepositorySpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "principal-session-repository-spec")
-            MigrationLifecycle(dataSource, listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
             jdbi = Jdbi.create(dataSource)
             transactor = Transactor(jdbi)
         }
@@ -214,7 +215,7 @@ class PrincipalSessionRepositorySpec :
                 transactor.inTransaction { transaction ->
                     repository.insert(transaction, session(), SessionTokenDigest.of(rolledBack))
                     transaction.handle
-                        .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'rolled back')")
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'rolled back')")
                         .bind("id", UUID.randomUUID())
                         .execute()
                     throw IllegalStateException("roll back both")
@@ -227,14 +228,14 @@ class PrincipalSessionRepositorySpec :
             transactor.inTransaction { transaction ->
                 repository.insert(transaction, session(), SessionTokenDigest.of(committed))
                 transaction.handle
-                    .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, 'committed')")
+                    .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'committed')")
                     .bind("id", recordId)
                     .execute()
                 // Visible inside the same transaction before it commits.
                 repository.findByDigest(transaction, SessionTokenDigest.of(committed)).shouldNotBeNull()
             }
             find(committed)!!.createdAt shouldBe createdAt
-            query("SELECT count(*) FROM public.test_application_records WHERE value = 'committed'", Int::class.java).single() shouldBe 1
+            query("SELECT count(*) FROM testapp.test_application_records WHERE value = 'committed'", Int::class.java).single() shouldBe 1
 
             // A revocation rolled back with its caller's transaction leaves the session active.
             shouldThrow<IllegalStateException> {

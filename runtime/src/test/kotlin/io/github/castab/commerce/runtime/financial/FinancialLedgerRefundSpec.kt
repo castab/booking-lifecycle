@@ -17,6 +17,7 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.testing.TestDatabase
+import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
@@ -71,7 +72,7 @@ class FinancialLedgerRefundSpec :
         beforeSpec {
             database = TestDatabase.create()
             dataSource = createDataSource(database.configuration, "financial-ledger-refund-spec")
-            MigrationLifecycle(dataSource, listOf("classpath:db/testapp")).migrate()
+            MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
             transactor = Transactor(Jdbi.create(dataSource))
             ledger = FinancialLedger(transactor, documents, payments)
         }
@@ -531,7 +532,7 @@ class FinancialLedgerRefundSpec :
                             listOf(RefundAllocationPortion(UUID.randomUUID(), allocation.id, money("100.00"), Instant.EPOCH)),
                         ).also {
                             handle
-                                .createUpdate("INSERT INTO public.test_application_records (id, value) VALUES (:id, :value)")
+                                .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
                                 .bind("id", rowId)
                                 .bind("value", "refund receipt")
                                 .execute()
@@ -548,14 +549,14 @@ class FinancialLedgerRefundSpec :
                 }
                 refunds(payment).shouldBeEmpty()
                 refundAllocations(payment).shouldBeEmpty()
-                count("public.test_application_records WHERE id = '$rolledBackRow'") shouldBe 0
+                count("testapp.test_application_records WHERE id = '$rolledBackRow'") shouldBe 0
                 ledger.reconcileLatest(document.id).netApplied shouldBeNumerically "500"
 
                 val committedRow = UUID.randomUUID()
                 val recorded = transactor.inTransaction { transaction -> transaction.record(committedRow, UUID.randomUUID()) }
                 refunds(payment).shouldContainExactly(recorded.refund)
                 refundAllocations(payment).shouldContainExactly(recorded.allocations)
-                count("public.test_application_records WHERE id = '$committedRow'") shouldBe 1
+                count("testapp.test_application_records WHERE id = '$committedRow'") shouldBe 1
                 ledger.reconcileLatest(document.id).netApplied shouldBeNumerically "400"
             }
         }
