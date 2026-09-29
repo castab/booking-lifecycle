@@ -8,7 +8,10 @@ import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.PaymentAllocation
 import io.github.castab.commerce.payment.PaymentMethod
+import io.github.castab.commerce.payment.PaymentReconciliation
 import io.github.castab.commerce.payment.PaymentRecord
+import io.github.castab.commerce.payment.RefundAllocation
+import io.github.castab.commerce.payment.RefundRecord
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository
@@ -28,6 +31,7 @@ import io.kotest.matchers.shouldBe
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.statement.SqlLogger
 import org.jdbi.v3.core.statement.StatementContext
+import java.lang.reflect.Modifier
 import java.math.BigDecimal
 import java.time.Instant
 import java.util.Currency
@@ -48,6 +52,11 @@ private infix fun Money.shouldBeNumerically(expected: String) {
 }
 
 private fun at(second: Long): Instant = Instant.ofEpochSecond(1_800_000_000L + second)
+
+private fun PaymentHistory.copyOfFacts() = Triple(allocations.toList(), refunds.toList(), refundAllocations.toList())
+
+private fun reconcileIndependently(history: PaymentHistory): PaymentReconciliation =
+    PaymentReconciliation.reconcile(history.payment, history.allocations, emptyList(), history.refunds, history.refundAllocations)
 
 /**
  * Runs [block] on another thread, so its transactions are independent of the calling thread's:
@@ -269,6 +278,18 @@ class FinancialLedgerPaymentHistorySpec :
                 histories.forEach { it shouldBe ledger.paymentHistory(it.payment.id) }
             }
 
+            test("payments received at the same instant are ordered by payment id") {
+                val document = invoice()
+                // Inserted in descending id order, so neither insertion nor allocation order is the id order.
+                val ids = List(4) { UUID.randomUUID() }.sorted()
+                ids.reversed().forEach { id ->
+                    val payment = ledger.recordPayment(PaymentRecord(id, money("100.00"), PaymentMethod.CARD, at(7)))
+                    allocate(payment, document, "10.00")
+                }
+
+                ledger.paymentHistoriesForLineage(document.id).map { it.payment.id } shouldContainExactly ids
+            }
+
             test("several allocations of one payment yield one history") {
                 val document = invoice()
                 val payment = payment()
@@ -343,6 +364,108 @@ class FinancialLedgerPaymentHistorySpec :
 
                 ledger.paymentHistory(paymentId).allocations.map { it.id } shouldContainExactly listOf(allocationId)
                 ledger.paymentHistoriesForLineage(document.id).size shouldBe 1
+            }
+        }
+
+        context("a closed, immutable history") {
+            /** A payment with several allocations, refunds, and refund allocations. */
+            fun busyHistory(): PaymentHistory {
+                val document = invoice("10000.00")
+                val payment = payment("1000.00")
+                val allocations =
+                    listOf("10.00", "20.00", "30.00").mapIndexed { i, amount -> allocate(payment, document, amount, at(i.toLong())) }
+                allocations.forEachIndexed { i, allocation ->
+                    refund(payment, "2.00", at(10L + i), allocation.id to "1.00")
+                }
+                return ledger.paymentHistory(payment.id)
+            }
+
+            test("the fact lists cannot be mutated, even cast to a mutable list") {
+                val history = busyHistory()
+                history.allocations.size shouldBe 3
+                history.refunds.size shouldBe 3
+                history.refundAllocations.size shouldBe 3
+                val allocation = history.allocations.first()
+                val refundRecord = history.refunds.first()
+                val refundAllocation = history.refundAllocations.first()
+                val before = history.copyOfFacts()
+
+                @Suppress("UNCHECKED_CAST")
+                val allocations = history.allocations as MutableList<PaymentAllocation>
+
+                @Suppress("UNCHECKED_CAST")
+                val refunds = history.refunds as MutableList<RefundRecord>
+
+                @Suppress("UNCHECKED_CAST")
+                val refundAllocations = history.refundAllocations as MutableList<RefundAllocation>
+
+                shouldThrow<UnsupportedOperationException> { allocations.clear() }
+                shouldThrow<UnsupportedOperationException> { allocations.add(allocation) }
+                shouldThrow<UnsupportedOperationException> { allocations.removeAt(0) }
+                shouldThrow<UnsupportedOperationException> { allocations[0] = allocation }
+                shouldThrow<UnsupportedOperationException> { allocations.reverse() }
+                shouldThrow<UnsupportedOperationException> { refunds.clear() }
+                shouldThrow<UnsupportedOperationException> { refunds.add(refundRecord) }
+                shouldThrow<UnsupportedOperationException> { refundAllocations.clear() }
+                shouldThrow<UnsupportedOperationException> { refundAllocations.add(refundAllocation) }
+                shouldThrow<UnsupportedOperationException> { refundAllocations.iterator().also { it.next() }.remove() }
+
+                history.copyOfFacts() shouldBe before
+                history.reconciliation shouldBe reconcileIndependently(history)
+            }
+
+            test("the history keeps its own copy of the facts it was built from") {
+                val history = busyHistory()
+                val allocations = history.allocations.toMutableList()
+                val refunds = history.refunds.toMutableList()
+                val refundAllocations = history.refundAllocations.toMutableList()
+
+                val rebuilt = PaymentHistory.from(history.payment, allocations, refunds, refundAllocations)
+                allocations.clear()
+                refunds.clear()
+                refundAllocations.clear()
+
+                rebuilt shouldBe history
+                rebuilt.allocations.size shouldBe 3
+                rebuilt.reconciliation shouldBe reconcileIndependently(rebuilt)
+            }
+
+            test("the reconciliation is exactly the reconciliation of the exposed facts") {
+                val history = busyHistory()
+
+                history.reconciliation shouldBe reconcileIndependently(history)
+                history.reconciliation shouldBe ledger.reconcilePayment(history.payment.id)
+                history.reconciliation.totalRefunded shouldBeNumerically "6"
+                history.reconciliation.refundAllocations shouldBeNumerically "3"
+                val lineage =
+                    history.allocations
+                        .first()
+                        .financialDocumentReference.id
+                ledger.paymentHistoriesForLineage(lineage).single().also {
+                    it.reconciliation shouldBe reconcileIndependently(it)
+                }
+            }
+
+            test("the only way in derives the reconciliation from the facts it is given") {
+                val history = busyHistory()
+
+                val fewer = PaymentHistory.from(history.payment, history.allocations.take(1), emptyList(), emptyList())
+
+                fewer.reconciliation shouldBe reconcileIndependently(fewer)
+                (fewer.reconciliation == history.reconciliation) shouldBe false
+            }
+
+            test("no constructor or copy() is publicly callable") {
+                val type = PaymentHistory::class.java
+
+                type.constructors.filter { !it.isSynthetic }.shouldBeEmpty()
+                type.declaredConstructors
+                    .filter { !it.isSynthetic }
+                    .forEach { Modifier.isPrivate(it.modifiers) shouldBe true }
+                type.methods.filter { it.name == "copy" && !it.isSynthetic }.shouldBeEmpty()
+                val copies = type.declaredMethods.filter { it.name == "copy" && !it.isSynthetic }
+                copies.shouldNotBeEmpty()
+                copies.forEach { Modifier.isPrivate(it.modifiers) shouldBe true }
             }
         }
 

@@ -661,8 +661,12 @@ A `PaymentHistory` is one coherent read: the `PaymentRecord`, all its `PaymentAl
 (to any document), `RefundRecord`s, and `RefundAllocation`s, and the
 `PaymentReconciliation` derived from exactly those facts through the domain's
 `PaymentReconciliation.reconcile`. It reuses the domain records rather than copying them,
-stores no status, and can only be constructed by the ledger. It lives in the runtime
-because it composes persisted facts; it is not a domain invariant. The lists are ordered
+stores no status, and cannot be publicly constructed: there is no public constructor or
+`copy()`, the lists are unmodifiable copies (mutating one throws
+`UnsupportedOperationException`), and the runtime derives the reconciliation from the same
+facts it stores, so the two cannot disagree. It lives in the runtime because it composes
+persisted facts; it is not a domain invariant. Use these two operations, not a read model
+assembled from `context.paymentRepository`, for payment history. The lists are ordered
 for presentation: allocations by `allocatedAt`, refunds by `refundedAt`, refund
 allocations by `allocatedAt`, ties broken by id (reconciliation ignores order).
 
@@ -680,7 +684,9 @@ committed states, and they take no row lock, so a history read neither waits for
 delays an allocation or refund. The `Transaction` overloads join the caller's transaction
 and see its own uncommitted writes; they add no isolation of their own, so an application
 that needs a coherent history from an outer transaction opens it with
-`TransactionIsolation.REPEATABLE_READ`. To act on a history (allocate or refund), use the
+`TransactionIsolation.REPEATABLE_READ`. Code already inside an application-owned transaction
+calls the `Transaction` overload: the convenience overload owns its transaction, and on the
+same thread it would join the open one rather than change its isolation. To act on a history (allocate or refund), use the
 mutation, which locks and validates against the payment's committed facts.
 
 ```kotlin
@@ -1242,7 +1248,8 @@ refund recording, and that refunds and allocations of one payment are serialized
 row lock (observed as a blocked PostgreSQL backend). `FinancialLedgerPaymentHistorySpec`
 proves the payment history reads: rediscovery of every id and link after a refund,
 lineage discovery across versions, fully unwound allocations, split payments returned whole,
-deterministic ordering, reads inside an uncommitted caller transaction, and the
+deterministic ordering (including equal receipt times), the immutability and closed
+construction of `PaymentHistory`, reads inside an uncommitted caller transaction, and the
 `REPEATABLE_READ` isolation of the convenience reads. `MigrationLifecycleSpec` also pins
 the checksums of released runtime migrations and migrates a released `V5` database
 forward.

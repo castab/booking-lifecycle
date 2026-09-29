@@ -291,6 +291,12 @@ class FinancialLedger internal constructor(
      * coherent committed state, and it takes no row lock: it never blocks or delays the
      * operations that append facts. See [PaymentHistory] for the ordering of its lists.
      *
+     * This overload owns its transaction and requests `REPEATABLE_READ`. When already inside an
+     * application-owned transaction, call the overload that accepts that [Transaction] instead:
+     * on the same thread this call would join the open transaction, which keeps its own
+     * isolation (`READ_COMMITTED` by default) or is rejected if that differs. It is never a way
+     * to change the isolation of an outer transaction.
+     *
      * @throws CommerceFailure.NotFound if there is no payment [paymentId].
      */
     fun paymentHistory(paymentId: UUID): PaymentHistory =
@@ -332,7 +338,10 @@ class FinancialLedger internal constructor(
      * A payment that was never allocated cannot be discovered here.
      *
      * Runs in one `REPEATABLE_READ` transaction: every history in the result belongs to the
-     * same committed state, and no row lock is taken.
+     * same committed state, and no row lock is taken. Like [paymentHistory], this overload owns
+     * its transaction; inside an application-owned transaction, call the overload that accepts
+     * that [Transaction] instead, and open the outer transaction at `REPEATABLE_READ` for a
+     * coherent result.
      *
      * @throws CommerceFailure.NotFound if the document lineage does not exist. A lineage
      * that exists and has no payments yields an empty list.
@@ -366,23 +375,13 @@ class FinancialLedger internal constructor(
     private fun historyOf(
         transaction: Transaction,
         payment: PaymentRecord,
-    ): PaymentHistory {
-        val allocations =
-            payments
-                .allocationsForPayment(transaction, payment.id)
-                .sortedWith(compareBy<PaymentAllocation> { it.allocatedAt }.thenBy { it.id })
-        val refunds =
-            payments
-                .refundsForPayment(transaction, payment.id)
-                .sortedWith(compareBy<RefundRecord> { it.refundedAt }.thenBy { it.id })
-        val refundAllocations =
-            payments
-                .refundAllocationsForPayment(transaction, payment.id)
-                .sortedWith(compareBy<RefundAllocation> { it.allocatedAt }.thenBy { it.id })
-        // The runtime does not persist allocation reversals.
-        val reconciliation = PaymentReconciliation.reconcile(payment, allocations, emptyList(), refunds, refundAllocations)
-        return PaymentHistory(payment, allocations, refunds, refundAllocations, reconciliation)
-    }
+    ): PaymentHistory =
+        PaymentHistory.from(
+            payment,
+            payments.allocationsForPayment(transaction, payment.id),
+            payments.refundsForPayment(transaction, payment.id),
+            payments.refundAllocationsForPayment(transaction, payment.id),
+        )
 
     /** Reconciles the latest obligation against all allocations in its lineage. */
     fun reconcileLatest(id: UUID): FinancialDocumentReconciliation =
