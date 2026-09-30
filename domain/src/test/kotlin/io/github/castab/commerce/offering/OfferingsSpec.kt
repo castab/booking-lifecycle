@@ -113,6 +113,52 @@ class OfferingsSpec :
             shouldThrow<IllegalArgumentException> { snapshot(listOf(category("x")), listOf(offering("a", "missing"))) }
         }
 
+        test("successor replacements retain keys and positions and removals cannot cascade") {
+            val original =
+                snapshot(
+                    listOf(category("a"), category("b"), category("c")),
+                    listOf(offering("first", "a"), offering("middle", "a"), offering("last", "b")),
+                )
+            val replacement = original.offering(OfferingKey("middle"))!!.copy(displayName = "Changed", category = OfferingCategoryKey("b"))
+            val updated = original.replaceOffering(replacement.key, replacement)
+            updated.offerings.map { it.key.value }.shouldContainExactly("first", "middle", "last")
+            updated.offerings[1] shouldBe replacement
+            original.offerings[1].displayName shouldBe "middle"
+            updated.previousRevision shouldBe original.revision
+            val changedCategory = category("b").copy(displayName = "Changed category")
+            val updatedCategory = updated.replaceCategory(changedCategory.key, changedCategory)
+            updatedCategory.categories.map { it.key.value }.shouldContainExactly("a", "b", "c")
+            updatedCategory.categories[1] shouldBe changedCategory
+            updated.categories[1].displayName shouldBe "b"
+            updated
+                .withoutOffering(replacement.key)
+                .offerings
+                .map { it.key.value }
+                .shouldContainExactly("first", "last")
+            updated
+                .withoutCategory(OfferingCategoryKey("c"))
+                .categories
+                .map { it.key.value }
+                .shouldContainExactly("a", "b")
+            shouldThrow<IllegalArgumentException> {
+                original.replaceOffering(
+                    replacement.key,
+                    replacement.copy(key = OfferingKey("other")),
+                )
+            }
+            shouldThrow<IllegalArgumentException> {
+                original.replaceCategory(changedCategory.key, changedCategory.copy(key = OfferingCategoryKey("other")))
+            }
+            shouldThrow<IllegalArgumentException> {
+                original.replaceOffering(replacement.key, replacement.copy(category = OfferingCategoryKey("missing")))
+            }
+            shouldThrow<IllegalArgumentException> { original.withoutCategory(OfferingCategoryKey("a")) }
+            shouldThrow<IllegalArgumentException> { original.withoutOffering(OfferingKey("missing")) }
+            shouldThrow<IllegalArgumentException> { original.withoutCategory(OfferingCategoryKey("missing")) }
+            shouldThrow<IllegalArgumentException> { original.replaceOffering(OfferingKey("missing"), offering("missing", "a")) }
+            shouldThrow<IllegalArgumentException> { original.replaceCategory(OfferingCategoryKey("missing"), category("missing")) }
+        }
+
         test("dessert, taco, and detailing catalogs use the same domain vocabulary") {
             val dessert =
                 snapshot(

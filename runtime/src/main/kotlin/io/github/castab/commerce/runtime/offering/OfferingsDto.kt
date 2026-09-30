@@ -74,6 +74,87 @@ data class OfferingCategoryDto(
         validating { OfferingCategory(OfferingCategoryKey(key), displayName, description, minimumSelections, maximumSelections) }
 }
 
+/** A new natural offering identity appended against the catalog revision the caller observed. */
+@Serializable
+data class AddOfferingDto(
+    val expectedRevision: Int,
+    val key: String,
+    val category: String,
+    val displayName: String,
+    val description: String? = null,
+    val price: OfferingPriceDto? = null,
+) {
+    fun toDomain(): Offering = OfferingDto(key, category, displayName, description, price).toDomain()
+}
+
+/** A new natural category identity appended against the catalog revision the caller observed. */
+@Serializable
+data class AddOfferingCategoryDto(
+    val expectedRevision: Int,
+    val key: String,
+    val displayName: String,
+    val description: String? = null,
+    val minimumSelections: Int = 0,
+    val maximumSelections: Int? = null,
+) {
+    fun toDomain(): OfferingCategory = OfferingCategoryDto(key, displayName, description, minimumSelections, maximumSelections).toDomain()
+}
+
+/** Editable offering properties. Identity comes only from the route/operation key. */
+@Serializable
+data class OfferingMutationDto(
+    val expectedRevision: Int,
+    val category: String,
+    val displayName: String,
+    val description: String? = null,
+    val price: OfferingPriceDto? = null,
+) {
+    fun toDomain(key: OfferingKey): Offering = OfferingDto(key.value, category, displayName, description, price).toDomain()
+}
+
+/** Editable category properties. Identity comes only from the route/operation key. */
+@Serializable
+data class OfferingCategoryMutationDto(
+    val expectedRevision: Int,
+    val displayName: String,
+    val description: String? = null,
+    val minimumSelections: Int = 0,
+    val maximumSelections: Int? = null,
+) {
+    fun toDomain(key: OfferingCategoryKey): OfferingCategory =
+        OfferingCategoryDto(key.value, displayName, description, minimumSelections, maximumSelections).toDomain()
+}
+
+/** A retirement still advances the catalog timeline. */
+@Serializable
+data class CatalogRevisionDto(
+    val revision: Int,
+)
+
+@Serializable
+data class RetiredOfferingDto(
+    val lastSeenRevision: Int,
+    val offering: OfferingDto,
+)
+
+@Serializable
+data class RetiredCategoryDto(
+    val lastSeenRevision: Int,
+    val category: OfferingCategoryDto,
+)
+
+@Serializable
+data class RetiredOfferingsDto(
+    val revision: Int,
+    val offerings: List<RetiredOfferingDto>,
+)
+
+@Serializable
+data class RetiredCategoriesDto(
+    val revision: Int,
+    val categories: List<RetiredCategoryDto>,
+)
+
 @Serializable
 data class CatalogCategoryDto(
     val key: String,
@@ -177,3 +258,9 @@ fun CatalogResult<CategoryOfferings>.categoryOfferingsDto(): CategoryOfferingsDt
 fun CatalogResult<List<Offering>>.offeringsDto(): OfferingsDto = OfferingsDto(reference.revision.number, value.map { it.dto() })
 
 fun CatalogResult<Offering>.offeringDto(): OfferingResultDto = OfferingResultDto(reference.revision.number, value.dto())
+
+fun CatalogResult<List<CatalogResult<Offering>>>.retiredOfferingsDto(): RetiredOfferingsDto =
+    RetiredOfferingsDto(reference.revision.number, value.map { RetiredOfferingDto(it.reference.revision.number, it.value.dto()) })
+
+fun CatalogResult<List<CatalogResult<OfferingCategory>>>.retiredCategoriesDto(): RetiredCategoriesDto =
+    RetiredCategoriesDto(reference.revision.number, value.map { RetiredCategoryDto(it.reference.revision.number, it.value.dto()) })

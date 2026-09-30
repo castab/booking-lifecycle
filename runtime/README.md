@@ -476,7 +476,10 @@ It does not open a connection or transaction. A duplicate revision is reported a
 `io.github.castab.commerce.runtime.offering` provides `CreateOfferingsCatalog`,
 `AddOfferingCategory`, `AddOffering`, `GetOfferingsCatalog`,
 `GetOfferingsCatalogRevision`, `ListOfferingCategories`, `GetOfferingCategory`,
-`ListCategoryOfferings`, `ListOfferings`, and `GetOffering`. Every operation accepts an
+`ListCategoryOfferings`, `ListOfferings`, and `GetOffering`, plus `UpdateOffering`,
+`RetireOffering`, `RestoreOffering`, `UpdateOfferingCategory`, `RetireOfferingCategory`,
+`RestoreOfferingCategory`, `ListRetiredOfferings`, and `ListRetiredCategories`.
+Every operation accepts an
 explicit `OfferingsCatalogId` (the revision query accepts a reference containing it).
 Commands each open one transaction through `Transactor`, read the latest catalog, derive
 an immutable immediate successor, and append it through `OfferingsSnapshotRepository`.
@@ -484,6 +487,73 @@ Initialization creates an empty revision 1. A missing catalog or item is `NotFou
 duplicate keys and duplicate initialization are `Conflict`. Concurrent writers that
 derive the same successor revision receive `Conflict` on the losing insert. The runtime
 does not retry or merge it; the caller may reload and decide what to do.
+
+Offering and category keys are durable natural identities within a catalog. Any key
+that has appeared in history remains reserved. Latest-snapshot absence means retired;
+retirement does not delete history, and restoration reactivates the same identity with
+caller-supplied properties. Update never changes the key. Historical revisions remain
+immutable, including decimal price scale, category relationships, and ordering.
+
+| Current identity | Add | Update | Retire | Restore |
+|---|---|---|---|---|
+| Never existed | Append | 404 | 404 | 404 |
+| Active | 409 | Replace in place | Remove from successor | 409 |
+| Retired | 409: restore instead | 409: restore first | 409: already retired | Append same identity |
+
+Updates preserve list positions; unrelated items retain their relative order on retirement.
+Both additions and restorations append deterministically. A category with active offerings
+cannot be retired (409); the caller must explicitly retire or move its offerings first.
+An offering update or restore requires a current category (404 when missing or retired).
+There is no cascade, general reorder, key rename, per-item timestamp/version/UUID, or
+mutable active/deleted flag.
+
+`offeringKeyExistsInHistory(transaction, catalogId, key)` and
+`categoryKeyExistsInHistory(...)` use PostgreSQL `EXISTS` over the existing revision rows.
+`retrieveRetiredOfferings(transaction, reference)` and `retrieveRetiredCategories(...)`
+select each key's last representation up to that reference, excluding keys present at it.
+They return persistence-owned `HistoricalCatalogValue<T>` items whose reference is the
+last revision containing that key. Operations translate these into their `CatalogResult`
+read models, so persistence has no dependency on `runtime.offering`.
+The catalog ID scopes both identity checks and discovery. The queries use the existing
+revision tables and indexes without a new index. All methods use the caller's transaction,
+with no history scan in application memory.
+
+`ListRetiredOfferings` and `ListRetiredCategories` return the latest catalog reference and
+those last representations in ascending key order (PostgreSQL `C` collation). The SQL is
+bounded to that immutable reference, so a concurrent successor cannot change the meaning
+of the discovery response, even under the default READ COMMITTED isolation. HTTP returns
+`{"revision": 5, "offerings": [{"lastSeenRevision": 4, "offering": {...}}]}` (or
+`categories`/`category`). The current revision and last-seen revision refer to the catalog
+timeline, not per-item versions. Retired discovery belongs exclusively to the managed
+`ReadWrite` surface and requires `commerce.offerings.manage` through the supplied live
+`AccessControl`: 401 without a principal, 403 without the permission, and 200 for a
+manager. `ReadOnly` does not mount these endpoints. Ordinary active and exact historical
+reads retain the host-owned read access policy. If the host exposes historical revisions
+publicly, a reader can still infer retired identities by comparing those revisions;
+protecting management discovery is not a guarantee of historical-data confidentiality. Paths use `/retired/offerings` and
+`/retired/categories` to keep the legal natural key `retired` accessible on item paths.
+
+Every mutation of an existing catalog, including `AddOffering` and
+`AddOfferingCategory`, requires `expectedRevision: OfferingsRevision` immediately after
+`catalogId` in the operation signature. `CreateOfferingsCatalog` has no precondition.
+There are two separate concurrency guarantees:
+
+- **Client optimistic concurrency:** inside the mutation's transaction, read latest and
+  compare its revision with the caller's expected revision before checking lifecycle
+  transitions or deriving a successor. A mismatch returns `CommerceFailure.Conflict`
+  (409), with the current and expected revisions and an instruction to reload. No
+  successor is created and the committed values remain unchanged. Callers must acknowledge
+  the latest revision before replacing, adding, retiring, or restoring anything.
+- **Database successor concurrency:** two transactions can both read r12 and satisfy
+  expected r12 before deriving r13. The `(catalog_id, revision)` primary key permits only
+  one successor; the losing insert returns 409 and rolls its entire transaction back.
+  This constraint alone does not protect against a stale browser submitting after r13
+  has already committed.
+
+There is no automatic retry, merge, or added lock. Callers reload and decide what to do.
+Tests cover stale requests for all eight mutations, the stale full-replacement price
+regression, and synchronized PostgreSQL writers that satisfy the same expected revision
+and then race to insert one successor.
 
 The HTTP capability is opt-in. A concrete application can bind a catalog and compose its
 original http4k contract routes into its own contract. A write-capable binding carries the
@@ -530,24 +600,58 @@ At the chosen base path, the capability offers:
 | GET, POST | `/` | Latest catalog; initialize empty catalog |
 | GET | `/revisions/{revision}` | Exact historical catalog |
 | GET, POST | `/categories` | List; append category |
-| GET | `/categories/{categoryKey}` | Category |
+| GET, PUT, DELETE | `/categories/{categoryKey}` | Read; replace properties; retire category |
+| POST | `/categories/{categoryKey}/restore` | Restore retired category |
 | GET | `/categories/{categoryKey}/offerings` | Ordered category offerings |
 | GET, POST | `/offerings` | List; append offering |
-| GET | `/offerings/{offeringKey}` | Offering |
+| GET, PUT, DELETE | `/offerings/{offeringKey}` | Read; replace properties; retire offering |
+| POST | `/offerings/{offeringKey}/restore` | Restore retired offering |
+| GET | `/retired/offerings` | Last representations of retired offerings |
+| GET | `/retired/categories` | Last representations of retired categories |
 
-`OfferingsHttpAccess.ReadOnly` omits the three POST routes entirely and needs no
-authorization dependency. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes them, and
-every write requires an authenticated principal that currently holds
+`OfferingsHttpAccess.ReadOnly` omits every mutation and retired-discovery route and needs
+no authorization dependency. `OfferingsHttpAccess.ReadWrite(accessControl)` exposes those
+management routes, and every mutation and retired discovery requires a principal holding
 `CommercePermissions.OfferingsManage` (`commerce.offerings.manage`): `401 unauthenticated`
 without a principal and `403 forbidden` without the permission, before the request body is
 read. The runtime declares that requirement; the application's `AccessControl` supplies the
 authentication and the `PermissionResolver` that evaluates it, so which roles grant the
 permission is the application's decision. A write-capable binding cannot be built without
-one. Reads carry no permission requirement: they are as public as the place the host mounts
-them, and the host may still wrap them in its own filters. The write routes document `401`
-and `403` in OpenAPI. The binding's catalog ID supplies all write targets; request DTOs
-have no catalog ID or revision fields. The operation ID prefix prevents collisions when
+one. Ordinary active and exact historical reads carry no permission requirement: they
+are as public as the place the host mounts them, and the host may still wrap them in its
+own filters. Management routes document `401` and `403` in OpenAPI. The binding's catalog
+ID supplies all write targets; request DTOs have no catalog ID or successor revision.
+They carry the caller's required expected revision instead. The operation ID prefix prevents collisions when
 two catalogs are mounted in one host contract.
+
+PUT and restore POST use `OfferingMutationDto` or `OfferingCategoryMutationDto`, with
+the identity taken only from the path. Both require integer `expectedRevision`.
+Offering bodies also contain `category`, `displayName`,
+optional `description`, and optional `price`; category bodies contain `displayName`,
+optional `description`, `minimumSelections` (default 0), and `maximumSelections`
+(default null). These are complete replacements: omitted optional values reset to their
+defaults. They reuse the existing DTO domain conversion and validation. Unknown additive
+fields follow `CommerceJson` conventions and cannot rename the path identity.
+Add POST uses the flat `AddOfferingDto`/`AddOfferingCategoryDto` request, retaining the
+existing new-key properties and adding required integer `expectedRevision`. Response
+DTOs remain unchanged; no precondition is added to ordinary catalog/item responses.
+
+DELETE uses a required integer query parameter for both kinds:
+`DELETE /offerings/{offeringKey}?expectedRevision=12` and
+`DELETE /categories/{categoryKey}?expectedRevision=12`. This is directly usable by browser
+clients and declared as a required integer query parameter in OpenAPI. There is no DELETE
+body or ETag machinery. Authentication and permission checks run before body/query
+extraction. Missing, repeated, non-integer, or out-of-range query revisions return
+`400 malformed_request`. Missing or malformed JSON revisions also return 400. Valid
+integers below 1 use `OfferingsRevision.of` validation and return `422 validation_failed`.
+A valid revision different from latest returns `409 conflict` without a successor.
+
+Update and restore respond 200 with the existing `OfferingResultDto`/`CategoryDto`,
+including successor revision. DELETE responds 200 with `CatalogRevisionDto`, e.g.
+`{"revision": 6}`. Existing add routes retain 201 responses. Malformed mutation bodies
+return 400; invalid values return 422. Stable operation IDs append `UpdateOffering`,
+`RetireOffering`, `RestoreOffering`, `UpdateCategory`, `RetireCategory`, `RestoreCategory`,
+`ListRetiredOfferings`, or `ListRetiredCategories` to the host's operation ID prefix.
 
 The catalog response groups ordered offerings beneath ordered categories and includes
 catalog ID, revision, and predecessor revision. Other reads and create responses include
@@ -565,8 +669,9 @@ Path parameters fail the same way as bodies: a non-integer revision is
 blank or contains whitespace, is `validation_failed` (422); a well-formed but absent
 revision, category, or offering is `not_found` (404). Each route's OpenAPI metadata lists
 the error statuses among these that the route can actually return. It does not evaluate
-an `OfferingsEngine`, own any application catalog contents, or implement update/delete
-commands. Released `V2__offerings_snapshots.sql` remains unchanged.
+an `OfferingsEngine` or own any application catalog contents. Lifecycle state conflicts
+are `conflict` (409). Released migrations V1-V7, including `V2__offerings_snapshots.sql`,
+remain unchanged; this feature requires no new migration or index.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
 schema node; it operates on schema values before OpenAPI serialization and does not
 traverse example, default, const, or extension payloads as schemas.

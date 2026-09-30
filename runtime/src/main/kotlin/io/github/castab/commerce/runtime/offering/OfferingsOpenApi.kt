@@ -154,7 +154,18 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
 }
 
 private val priceCarrierNames =
-    setOf("OfferingDto", "OfferingResultDto", "OfferingsDto", "CategoryOfferingsDto", "CatalogCategoryDto", "OfferingsCatalogDto")
+    setOf(
+        "OfferingDto",
+        "OfferingResultDto",
+        "OfferingsDto",
+        "CategoryOfferingsDto",
+        "CatalogCategoryDto",
+        "OfferingsCatalogDto",
+        "AddOfferingDto",
+        "OfferingMutationDto",
+        "RetiredOfferingDto",
+        "RetiredOfferingsDto",
+    )
 
 private fun Any.withCompletePriceShape(): Any {
     fun OfferingPriceDto.complete() = copy(dimension = "guest", interval = "PT1H")
@@ -164,6 +175,9 @@ private fun Any.withCompletePriceShape(): Any {
         is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
+        is AddOfferingDto -> copy(price = price?.complete())
+        is OfferingMutationDto -> copy(price = price?.complete())
+        is RetiredOfferingsDto -> copy(offerings = offerings.map { it.copy(offering = it.offering.complete()) })
         is OfferingResultDto -> copy(offering = offering.complete())
         is OfferingsDto -> copy(offerings = offerings.map { it.complete() })
         is CategoryOfferingsDto -> copy(offerings = offerings.map { it.complete() })

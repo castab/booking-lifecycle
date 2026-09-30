@@ -122,10 +122,20 @@ The runtime also supplies generic catalog commands, queries, and an explicitly m
 Offerings HTTP capability. Applications select a catalog ID, route path, operation ID
 prefix, and read-only or read-write exposure; the same http4k contract routes execute
 HTTP and contribute to the application's OpenAPI document. Catalog writes append
-successor snapshots and never change historical revisions. Writes require the
+successor snapshots and never change historical revisions. Every mutation of an existing
+catalog requires the caller's observed `expectedRevision`; stale writes return 409 before
+creating a successor, while the database primary key still guards true competing writers.
+Offering and category keys
+are durable natural identities, reserved throughout a catalog's history. Add creates a
+new identity; update retains its key and position; retire removes it from the successor;
+restore reactivates the same identity at the end of the current list. Retired discovery
+returns each last representation and its revision without reconstructing history on the
+client. Categories containing offerings cannot be retired. Writes require the
 `commerce.offerings.manage` permission, evaluated with the supplied `PermissionResolver`
 (normally `context.authorization.permissionResolver`);
-reads are as public as the host mounts them. See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
+retired discovery is also protected by this permission and absent from read-only bindings.
+Ordinary active and historical reads are as public as the host mounts them.
+See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
 
 This is conceptual, not a required persistence design: each application chooses its own
 types, tables, and relationships.

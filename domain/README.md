@@ -818,6 +818,26 @@ Construction rejects duplicate keys, offerings with missing categories, and inva
 revision lineage. Empty catalogs are allowed. Lookups by key and by category are
 conveniences on the in-memory snapshot; they do not access persistence.
 
+`OfferingKey` and `OfferingCategoryKey` are durable natural identities within one catalog.
+A key that has appeared in any historical revision remains reserved. Absence from the
+latest snapshot means retired; retirement never deletes or rewrites history. Restoration
+reactivates the same identity and can supply updated properties. Ordinary update changes
+properties, never keys. Catalog revision plus catalog ID plus key identifies the exact
+historical representation; there are no per-item UUIDs, versions, timestamps, or active flags.
+
+```text
+never existed -> add -> active -> update -> active -> retire -> retired -> restore -> active
+```
+
+`retired -> add`, `active -> restore`, `unknown -> restore`, `unknown -> update`, and
+`retired -> update` are invalid. Lifetime identity checks belong to runtime persistence,
+not a single domain snapshot. The domain's `replaceOffering(key, replacement)` and
+`replaceCategory(key, replacement)` require an existing item and the same key, preserving
+position. `withoutOffering(key)` and `withoutCategory(key)` produce successors that
+remove only that item and retain other order. A category must be empty before removal;
+every offering must reference a category in the successor. Adding and restoring through
+the runtime append to the relevant list. No general reorder operation is provided.
+
 Candidate `OfferingSelections` contain ordered `OfferingCategorySelection` blocks. They
 may be built before a snapshot is known. `OfferingsEngine<C>.evaluate(...)` checks selected
 categories and offerings, category membership, cardinalities, and duplicates before

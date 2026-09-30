@@ -31,6 +31,8 @@ import org.http4k.lens.Invalid
 import org.http4k.lens.LensFailure
 import org.http4k.lens.ParamMeta
 import org.http4k.lens.Path
+import org.http4k.lens.Query
+import org.http4k.lens.int
 import org.http4k.lens.mapWithNewMeta
 
 /**
@@ -42,14 +44,15 @@ import org.http4k.lens.mapWithNewMeta
  */
 sealed interface OfferingsHttpAccess {
     /**
-     * Only the read routes. Reads carry no permission requirement of their own: they are as
+     * Only ordinary active and historical reads. Retired management discovery is absent.
+     * These reads carry no permission requirement of their own: they are as
      * public as the place the host mounts them.
      */
     data object ReadOnly : OfferingsHttpAccess
 
     /**
-     * The read routes plus the write routes (initialize a catalog, append a category, append
-     * an offering). Every write requires an authenticated principal that currently holds
+     * Ordinary reads plus protected retired discovery, catalog initialization, and offering/category add, update, retire,
+     * and restore routes. Every write requires an authenticated principal that currently holds
      * [CommercePermissions.OfferingsManage], evaluated through [accessControl]: `401` without
      * a principal, `403` without the permission.
      */
@@ -120,18 +123,35 @@ fun offeringsHttpCapability(
     val categoryOfferingsBody = jsonBody(CategoryOfferingsDto.serializer())
     val offeringsBody = jsonBody(OfferingsDto.serializer())
     val offeringBody = jsonBody(OfferingResultDto.serializer())
-    val categoryRequest = jsonBody(OfferingCategoryDto.serializer())
-    val offeringRequest = jsonBody(OfferingDto.serializer())
+    val categoryRequest = jsonBody(AddOfferingCategoryDto.serializer())
+    val offeringRequest = jsonBody(AddOfferingDto.serializer())
+    val offeringMutationRequest = jsonBody(OfferingMutationDto.serializer())
+    val categoryMutationRequest = jsonBody(OfferingCategoryMutationDto.serializer())
+    val revisionBody = jsonBody(CatalogRevisionDto.serializer())
+    val retiredOfferingsBody = jsonBody(RetiredOfferingsDto.serializer())
+    val retiredCategoriesBody = jsonBody(RetiredCategoriesDto.serializer())
     val errorBody = jsonBody(ErrorResponse.serializer())
     val validationErrorBody = jsonBody(ValidationErrorResponse.serializer())
     // Documented as an integer but read as text: a contract path lens that fails to parse
     // makes the route not match (404), whereas a non-integer revision is a malformed request.
     val revisionPath = Path.mapWithNewMeta(BiDiMapping<String, String>({ it }, { it }), ParamMeta.IntegerParam).of("revision")
+    val expectedRevisionQuery = Query.int().required("expectedRevision", "Catalog revision observed by the caller")
+
+    fun expectedRevisionFromQuery(request: Request): OfferingsRevision {
+        if (request.queries("expectedRevision").size > 1) {
+            throw LensFailure(Invalid(expectedRevisionQuery.meta), target = request)
+        }
+        return validating { OfferingsRevision.of(expectedRevisionQuery(request)) }
+    }
     val categoryPath = Path.of("categoryKey")
     val offeringPath = Path.of("offeringKey")
     val sampleCategory = OfferingCategoryDto("choice", "Choice", "An optional choice", 0, 2)
     val samplePrice = OfferingPriceDto("PER_QUANTITY", "0.75", "USD", "guest")
     val sampleOffering = OfferingDto("item", "choice", "Item", "An item", samplePrice)
+    val sampleOfferingMutation = OfferingMutationDto(3, "choice", "Item", "An item", samplePrice)
+    val sampleCategoryMutation = OfferingCategoryMutationDto(3, "Choice", "An optional choice", 0, 2)
+    val sampleAddOffering = AddOfferingDto(2, "item", "choice", "Item", "An item", samplePrice)
+    val sampleAddCategory = AddOfferingCategoryDto(1, "choice", "Choice", "An optional choice", 0, 2)
     // Examples follow one coherent history: initialization creates an empty r1, adding the
     // category creates r2, and adding the offering creates r3, which the reads return.
     val initializedCatalog = OfferingsCatalogDto(catalogId.value.toString(), 1, null, emptyList())
@@ -248,6 +268,30 @@ fun offeringsHttpCapability(
     val access = binding.access
     if (access is OfferingsHttpAccess.ReadWrite) {
         val manage = access.accessControl.requirePermission(CommercePermissions.OfferingsManage)
+        // Keep lifecycle discovery outside the item-key paths so even the key "retired" remains addressable.
+        routes +=
+            "$base/retired/offerings" meta {
+                describe("ListRetiredOfferings", "List retired identities and their last offering representations")
+                returning(Status.OK, retiredOfferingsBody to RetiredOfferingsDto(4, listOf(RetiredOfferingDto(3, sampleOffering))))
+                errors(Status.UNAUTHORIZED, Status.FORBIDDEN, Status.NOT_FOUND)
+            } bindContract Method.GET to
+            manage.then { _: Request ->
+                Response(Status.OK).with(
+                    retiredOfferingsBody of ListRetiredOfferings(transactor, repository)(catalogId).retiredOfferingsDto(),
+                )
+            }
+        routes +=
+            "$base/retired/categories" meta {
+                describe("ListRetiredCategories", "List retired identities and their last category representations")
+                returning(Status.OK, retiredCategoriesBody to RetiredCategoriesDto(5, listOf(RetiredCategoryDto(4, sampleCategory))))
+                errors(Status.UNAUTHORIZED, Status.FORBIDDEN, Status.NOT_FOUND)
+            } bindContract Method.GET to
+            manage.then { _: Request ->
+                Response(Status.OK).with(
+                    retiredCategoriesBody of ListRetiredCategories(transactor, repository)(catalogId).retiredCategoriesDto(),
+                )
+            }
+
         routes +=
             base meta {
                 describe("CreateCatalog", "Initialize an empty offerings catalog")
@@ -261,7 +305,7 @@ fun offeringsHttpCapability(
             "$base/categories" meta {
                 describe("AddCategory", "Append a category in a successor catalog revision")
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
-                receiving(categoryRequest to sampleCategory)
+                receiving(categoryRequest to sampleAddCategory)
                 returning(Status.CREATED, categoryBody to CategoryDto(2, sampleCategory))
                 errors(
                     Status.UNAUTHORIZED,
@@ -273,14 +317,16 @@ fun offeringsHttpCapability(
                 )
             } bindContract Method.POST to
             manage.then { request: Request ->
-                val category = categoryRequest(request).toDomain()
-                Response(Status.CREATED).with(categoryBody of addCategory(catalogId, category).categoryDto())
+                val body = categoryRequest(request)
+                val expectedRevision = validating { OfferingsRevision.of(body.expectedRevision) }
+                val category = body.toDomain()
+                Response(Status.CREATED).with(categoryBody of addCategory(catalogId, expectedRevision, category).categoryDto())
             }
         routes +=
             "$base/offerings" meta {
                 describe("AddOffering", "Append an offering in a successor catalog revision")
                 preFlightExtraction = PreFlightExtraction.IgnoreBody
-                receiving(offeringRequest to sampleOffering)
+                receiving(offeringRequest to sampleAddOffering)
                 returning(Status.CREATED, offeringBody to OfferingResultDto(3, sampleOffering))
                 errors(
                     Status.UNAUTHORIZED,
@@ -292,8 +338,207 @@ fun offeringsHttpCapability(
                 )
             } bindContract Method.POST to
             manage.then { request: Request ->
-                val offering = offeringRequest(request).toDomain()
-                Response(Status.CREATED).with(offeringBody of addOffering(catalogId, offering).offeringDto())
+                val body = offeringRequest(request)
+                val expectedRevision = validating { OfferingsRevision.of(body.expectedRevision) }
+                val offering = body.toDomain()
+                Response(Status.CREATED).with(offeringBody of addOffering(catalogId, expectedRevision, offering).offeringDto())
+            }
+        routes +=
+            "$base/offerings" / offeringPath meta {
+                describe("UpdateOffering", "Update an offering through a successor revision")
+                preFlightExtraction = PreFlightExtraction.IgnoreBody
+                receiving(offeringMutationRequest to sampleOfferingMutation)
+                returning(Status.OK, offeringBody to OfferingResultDto(4, sampleOffering))
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.PUT to { key: String ->
+                manage.then { request: Request ->
+                    val identity = validating { OfferingKey(key) }
+                    val body = offeringMutationRequest(request)
+                    val expectedRevision = validating { OfferingsRevision.of(body.expectedRevision) }
+                    val value = body.toDomain(identity)
+                    Response(Status.OK).with(
+                        offeringBody of
+                            UpdateOffering(
+                                transactor,
+                                repository,
+                            )(
+                                catalogId,
+                                expectedRevision,
+                                identity,
+                                value.category,
+                                value.displayName,
+                                value.description,
+                                value.price,
+                            ).offeringDto(),
+                    )
+                }
+            }
+
+        routes +=
+            "$base/offerings" / offeringPath meta {
+                describe("RetireOffering", "Retire an offering through a successor revision")
+                preFlightExtraction = PreFlightExtraction.None
+                queries += expectedRevisionQuery
+                returning(Status.OK, revisionBody to CatalogRevisionDto(4))
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.DELETE to { key: String ->
+                manage.then { request: Request ->
+                    val identity = validating { OfferingKey(key) }
+                    val expectedRevision = expectedRevisionFromQuery(request)
+                    val successor = RetireOffering(transactor, repository)(catalogId, expectedRevision, identity)
+                    Response(Status.OK).with(revisionBody of CatalogRevisionDto(successor.revision.number))
+                }
+            }
+
+        routes +=
+            "$base/offerings" / offeringPath / "restore" meta {
+                describe("RestoreOffering", "Restore an offering through a successor revision")
+                preFlightExtraction = PreFlightExtraction.IgnoreBody
+                receiving(offeringMutationRequest to sampleOfferingMutation)
+                returning(Status.OK, offeringBody to OfferingResultDto(4, sampleOffering))
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.POST to { key: String, _: String ->
+                manage.then { request: Request ->
+                    val identity = validating { OfferingKey(key) }
+                    val body = offeringMutationRequest(request)
+                    val expectedRevision = validating { OfferingsRevision.of(body.expectedRevision) }
+                    val value = body.toDomain(identity)
+                    Response(Status.OK).with(
+                        offeringBody of
+                            RestoreOffering(
+                                transactor,
+                                repository,
+                            )(
+                                catalogId,
+                                expectedRevision,
+                                identity,
+                                value.category,
+                                value.displayName,
+                                value.description,
+                                value.price,
+                            ).offeringDto(),
+                    )
+                }
+            }
+
+        routes +=
+            "$base/categories" / categoryPath meta {
+                describe("UpdateCategory", "Update a category through a successor revision")
+                preFlightExtraction = PreFlightExtraction.IgnoreBody
+                receiving(categoryMutationRequest to sampleCategoryMutation)
+                returning(Status.OK, categoryBody to CategoryDto(4, sampleCategory))
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.PUT to { key: String ->
+                manage.then { request: Request ->
+                    val identity = validating { OfferingCategoryKey(key) }
+                    val body = categoryMutationRequest(request)
+                    val expectedRevision = validating { OfferingsRevision.of(body.expectedRevision) }
+                    val value = body.toDomain(identity)
+                    Response(Status.OK).with(
+                        categoryBody of
+                            UpdateOfferingCategory(
+                                transactor,
+                                repository,
+                            )(
+                                catalogId,
+                                expectedRevision,
+                                identity,
+                                value.displayName,
+                                value.description,
+                                value.minimumSelections,
+                                value.maximumSelections,
+                            ).categoryDto(),
+                    )
+                }
+            }
+
+        routes +=
+            "$base/categories" / categoryPath meta {
+                describe("RetireCategory", "Retire a category through a successor revision")
+                preFlightExtraction = PreFlightExtraction.None
+                queries += expectedRevisionQuery
+                returning(Status.OK, revisionBody to CatalogRevisionDto(4))
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.DELETE to { key: String ->
+                manage.then { request: Request ->
+                    val identity = validating { OfferingCategoryKey(key) }
+                    val expectedRevision = expectedRevisionFromQuery(request)
+                    val successor = RetireOfferingCategory(transactor, repository)(catalogId, expectedRevision, identity)
+                    Response(Status.OK).with(revisionBody of CatalogRevisionDto(successor.revision.number))
+                }
+            }
+
+        routes +=
+            "$base/categories" / categoryPath / "restore" meta {
+                describe("RestoreCategory", "Restore a category through a successor revision")
+                preFlightExtraction = PreFlightExtraction.IgnoreBody
+                receiving(categoryMutationRequest to sampleCategoryMutation)
+                returning(Status.OK, categoryBody to CategoryDto(4, sampleCategory))
+                errors(
+                    Status.UNAUTHORIZED,
+                    Status.FORBIDDEN,
+                    Status.BAD_REQUEST,
+                    Status.UNPROCESSABLE_ENTITY,
+                    Status.NOT_FOUND,
+                    Status.CONFLICT,
+                )
+            } bindContract Method.POST to { key: String, _: String ->
+                manage.then { request: Request ->
+                    val identity = validating { OfferingCategoryKey(key) }
+                    val body = categoryMutationRequest(request)
+                    val expectedRevision = validating { OfferingsRevision.of(body.expectedRevision) }
+                    val value = body.toDomain(identity)
+                    Response(Status.OK).with(
+                        categoryBody of
+                            RestoreOfferingCategory(
+                                transactor,
+                                repository,
+                            )(
+                                catalogId,
+                                expectedRevision,
+                                identity,
+                                value.displayName,
+                                value.description,
+                                value.minimumSelections,
+                                value.maximumSelections,
+                            ).categoryDto(),
+                    )
+                }
             }
     }
     return OfferingsHttpCapability(routes)
