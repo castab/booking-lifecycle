@@ -83,8 +83,8 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V6 coexist with application V1 in separate version spaces.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                // Runtime V1 to V7 coexist with application V1 in separate version spaces.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
@@ -110,7 +110,7 @@ class MigrationLifecycleSpec :
             }
         }
 
-        test("a database at the released V5 ledger migrates forward to refunds, keeping its facts") {
+        test("a database at the released V5 ledger migrates through refunds and timestamps, keeping its facts") {
             withTestDatabase { _, dataSource ->
                 Flyway
                     .configure()
@@ -128,12 +128,18 @@ class MigrationLifecycleSpec :
                     "INSERT INTO commerce.payment_records (payment_id, amount, currency, method, received_at_seconds, received_at_nanos) " +
                         "VALUES ('00000000-0000-0000-0000-000000000005', 500.00, 'USD', 'CASH', 0, 0)",
                 )
+                dataSource.execute(
+                    "INSERT INTO commerce.financial_document_snapshots (document_id, version, stage) " +
+                        "VALUES ('00000000-0000-0000-0000-000000000006', 1, 'ESTIMATE')",
+                )
 
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
+                dataSource.strings("SELECT (created_at IS NOT NULL)::text FROM commerce.financial_document_snapshots") shouldContainExactly
+                    listOf("true")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
                 dataSource.relationExists("commerce.refund_allocations") shouldBe true
 
@@ -309,7 +315,7 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe true
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
-                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

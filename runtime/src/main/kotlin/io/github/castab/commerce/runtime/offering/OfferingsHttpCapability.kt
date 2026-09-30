@@ -9,6 +9,7 @@ import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
 import io.github.castab.commerce.runtime.http.ErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.CommercePermissions
@@ -122,6 +123,7 @@ fun offeringsHttpCapability(
     val categoryRequest = jsonBody(OfferingCategoryDto.serializer())
     val offeringRequest = jsonBody(OfferingDto.serializer())
     val errorBody = jsonBody(ErrorResponse.serializer())
+    val validationErrorBody = jsonBody(ValidationErrorResponse.serializer())
     // Documented as an integer but read as text: a contract path lens that fails to parse
     // makes the route not match (404), whereas a non-integer revision is a malformed request.
     val revisionPath = Path.mapWithNewMeta(BiDiMapping<String, String>({ it }, { it }), ParamMeta.IntegerParam).of("revision")
@@ -144,7 +146,11 @@ fun offeringsHttpCapability(
     fun RouteMetaDsl.errors(vararg statuses: Status) {
         statuses.forEach { status ->
             val category = ErrorCategory.entries.first { it.status == status }
-            returning(status, errorBody to ErrorResponse(category.code, "Request failed"))
+            if (category == ErrorCategory.VALIDATION_FAILED) {
+                returning(status, validationErrorBody to ValidationErrorResponse(category.code, "Request failed"))
+            } else {
+                returning(status, errorBody to ErrorResponse(category.code, "Request failed"))
+            }
         }
     }
 

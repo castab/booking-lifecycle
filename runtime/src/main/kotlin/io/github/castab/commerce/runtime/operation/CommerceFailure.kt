@@ -1,5 +1,16 @@
 package io.github.castab.commerce.runtime.operation
 
+import java.util.Collections
+
+/** A stable identifier for one validation problem. Its diagnostic text is the enclosing failure message. */
+data class ValidationViolation(
+    val code: String,
+) {
+    init {
+        require(code.isNotBlank()) { "Validation violation code cannot be blank" }
+    }
+}
+
 /**
  * An expected failure of an operation (a use case such as issuing an invoice or recording
  * a payment).
@@ -15,10 +26,23 @@ sealed class CommerceFailure(
     cause: Throwable? = null,
 ) : RuntimeException(message, cause) {
     /** Well-formed input whose values are invalid, for example a document with no line items. */
-    class ValidationFailed(
+    class ValidationFailed private constructor(
         message: String,
-        cause: Throwable? = null,
-    ) : CommerceFailure(message, cause)
+        cause: Throwable?,
+        violations: List<ValidationViolation>,
+    ) : CommerceFailure(message, cause) {
+        val violations: List<ValidationViolation> = Collections.unmodifiableList(ArrayList(violations))
+
+        constructor(message: String, cause: Throwable? = null) : this(message, cause, emptyList())
+
+        constructor(
+            message: String,
+            violations: List<ValidationViolation>,
+            cause: Throwable? = null,
+        ) : this(message, cause, violations) {
+            require(violations.isNotEmpty()) { "Structured validation failure must have violations" }
+        }
+    }
 
     /** A referenced resource does not exist. */
     class NotFound(

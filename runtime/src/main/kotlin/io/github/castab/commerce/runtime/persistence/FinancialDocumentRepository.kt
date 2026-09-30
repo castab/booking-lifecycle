@@ -6,6 +6,7 @@ import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
+import io.github.castab.commerce.runtime.financial.FinancialDocumentVersion
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
@@ -33,6 +34,24 @@ interface FinancialDocumentRepository {
         transaction: Transaction,
         id: UUID,
     ): List<FinancialDocument>
+
+    /** The database-assigned creation instant of an exact persisted version. */
+    fun version(
+        transaction: Transaction,
+        reference: FinancialDocumentReference,
+    ): FinancialDocumentVersion? {
+        val document = retrieveVersion(transaction, reference) ?: return null
+        val createdAt =
+            transaction.handle
+                .createQuery(
+                    """SELECT created_at FROM commerce.financial_document_snapshots
+                       WHERE document_id = :id AND version = :version""",
+                ).bind("id", reference.id)
+                .bind("version", reference.version.number)
+                .map { rows, _ -> rows.getObject(1, java.time.OffsetDateTime::class.java).toInstant() }
+                .one()
+        return FinancialDocumentVersion.from(document, createdAt)
+    }
 
     /** Adapts transaction-bound reads to the domain history SPI. */
     fun asHistory(transaction: Transaction): FinancialDocumentHistory =

@@ -1,8 +1,11 @@
 package io.github.castab.commerce.runtime.offering
 
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import org.http4k.contract.jsonschema.JsonSchema
 import org.http4k.contract.jsonschema.JsonSchemaCreator
@@ -32,14 +35,20 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         // null predecessor, and an empty catalog are filled in. This copy is only a
         // schema input; the route's original object remains the HTTP example.
         val schema = delegate.toSchema(obj.withCompletePriceShape(), overrideDefinitionId, refModelNamePrefix)
-        if ("OfferingPriceDto" !in schema.definitions) return schema
+        if ("OfferingPriceDto" !in schema.definitions) {
+            return schema.copy(
+                node = schema.node.withoutNullFormats(),
+                definitions = schema.definitions.mapValues { (_, node) -> node.withoutNullFormats() },
+            )
+        }
         return schema.copy(
+            node = schema.node.withoutNullFormats(),
             definitions =
                 schema.definitions.mapValues { (name, node) ->
                     if (name in priceCarrierNames) {
-                        node.withoutSchemaOnlyExamples()
+                        node.withoutSchemaOnlyExamples().withoutNullFormats()
                     } else {
-                        node
+                        node.withoutNullFormats()
                     }
                 } +
                     mapOf(
@@ -114,6 +123,23 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
             }
         return json.parse(strip(Json.parseToJsonElement(json.compact(this))).toString())
     }
+
+    /** http4k emits null for absent formats; omit that optional schema keyword. */
+    private fun NODE.withoutNullFormats(): NODE {
+        fun omit(element: JsonElement): JsonElement =
+            when (element) {
+                is JsonObject ->
+                    JsonObject(
+                        element
+                            .filter { (key, value) ->
+                                key != "format" || value != JsonNull
+                            }.mapValues { omit(it.value) },
+                    )
+                is JsonArray -> JsonArray(element.map(::omit))
+                else -> element
+            }
+        return json.parse(omit(Json.parseToJsonElement(json.compact(this))).toString())
+    }
 }
 
 private val priceCarrierNames =
@@ -124,6 +150,7 @@ private fun Any.withCompletePriceShape(): Any {
 
     fun OfferingDto.complete() = copy(price = price?.complete())
     return when (this) {
+        is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
         is OfferingResultDto -> copy(offering = offering.complete())

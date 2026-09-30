@@ -1,6 +1,7 @@
 package io.github.castab.commerce.runtime.http
 
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.ValidationViolation
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.jsonObject
@@ -12,7 +13,7 @@ import org.http4k.core.with
 import org.http4k.lens.LensFailure
 
 /**
- * The body of every commerce error response.
+ * The base body of a commerce error response.
  *
  * ```json
  * {"code": "validation_failed", "message": "Financial document 5f0c6a7e-... must contain at least one line item"}
@@ -24,6 +25,20 @@ import org.http4k.lens.LensFailure
 data class ErrorResponse(
     val code: String,
     val message: String,
+)
+
+/** One machine-readable validation violation, in the order reported by the evaluator. */
+@Serializable
+data class ValidationViolationResponse(
+    val code: String,
+)
+
+/** Additive validation error body for failures that carry structured violation codes. */
+@Serializable
+data class ValidationErrorResponse(
+    val code: String,
+    val message: String,
+    val violations: List<ValidationViolationResponse>? = null,
 )
 
 /** The error categories of the commerce HTTP contract, each with its status and code. */
@@ -60,6 +75,7 @@ enum class ErrorCategory(
 }
 
 private val errorBody = jsonBody(ErrorResponse.serializer())
+private val validationErrorBody = jsonBody(ValidationErrorResponse.serializer())
 private val logger = KotlinLogging.logger {}
 
 /** http4k contracts turn body lens failures into a response before an outer filter can catch them. */
@@ -74,7 +90,21 @@ private fun Response.isContractLensFailure(): Boolean =
 fun errorResponse(
     category: ErrorCategory,
     message: String,
-): Response = Response(category.status).with(errorBody of ErrorResponse(category.code, message))
+    violations: List<ValidationViolation>,
+): Response =
+    if (violations.isEmpty()) {
+        Response(category.status).with(errorBody of ErrorResponse(category.code, message))
+    } else {
+        Response(category.status).with(
+            validationErrorBody of ValidationErrorResponse(category.code, message, violations.map { ValidationViolationResponse(it.code) }),
+        )
+    }
+
+/** Retains the original two-argument response builder. */
+fun errorResponse(
+    category: ErrorCategory,
+    message: String,
+): Response = errorResponse(category, message, emptyList())
 
 /** The category a [CommerceFailure] is reported as. */
 fun CommerceFailure.category(): ErrorCategory =
@@ -119,7 +149,11 @@ val CommerceErrorHandling =
                     errorResponse(ErrorCategory.MALFORMED_REQUEST, "Malformed request: $inputs")
                 }
             } catch (e: CommerceFailure) {
-                errorResponse(e.category(), e.message ?: e.category().code)
+                errorResponse(
+                    e.category(),
+                    e.message ?: e.category().code,
+                    if (e is CommerceFailure.ValidationFailed) e.violations else emptyList(),
+                )
             } catch (e: Exception) {
                 logger.error(e) { "event=request_failed method=${request.method} path=${request.uri.path}" }
                 errorResponse(ErrorCategory.INTERNAL_FAILURE, "The request could not be completed")

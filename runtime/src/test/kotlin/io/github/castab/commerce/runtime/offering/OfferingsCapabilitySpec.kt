@@ -500,7 +500,31 @@ class OfferingsCapabilitySpec :
 
         test("OpenAPI price union and every request and response reference match runtime validation") {
             val document = request(Method.GET, "/openapi.json").json()
+
+            fun assertNoNullFormats(
+                element: JsonElement,
+                path: String = "root",
+            ) {
+                when (element) {
+                    is JsonObject -> {
+                        check(element["format"] != JsonNull) { "format: null at $path" }
+                        element.forEach { (key, value) -> assertNoNullFormats(value, "$path.$key") }
+                    }
+                    is JsonArray -> element.forEachIndexed { index, value -> assertNoNullFormats(value, "$path[$index]") }
+                    else -> Unit
+                }
+            }
+            assertNoNullFormats(document)
             val schemas = document["components"]!!.jsonObject["schemas"]!!.jsonObject
+            schemas["ErrorResponse"]!!.jsonObject["properties"]!!.jsonObject.containsKey("violations") shouldBe false
+            schemas["ValidationErrorResponse"]!!.jsonObject["properties"]!!.jsonObject.containsKey("violations") shouldBe true
+            val errorRequired =
+                schemas["ValidationErrorResponse"]!!
+                    .jsonObject["required"]
+                    ?.jsonArray
+                    ?.map { it.jsonPrimitive.content }
+                    .orEmpty()
+            errorRequired.contains("violations") shouldBe false
             val price = schemas["OfferingPriceDto"]!!.jsonObject
             val refs = price["oneOf"]!!.jsonArray.map { it.jsonObject["\$ref"]!!.jsonPrimitive.content }
             refs.shouldContainExactly(

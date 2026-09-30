@@ -136,7 +136,10 @@ types, tables, and relationships.
 `commerce.financial_document_snapshots` with ordered lines. Stage transitions and change
 orders append a new version; previous versions remain available. A lineage may begin at
 any of the three stages. The runtime stores exact decimal line facts and derives document
-totals from the domain model when restoring them.
+totals from the domain model when restoring them. `FinancialLedger.version`,
+`latestVersion`, and `versionHistory` return each persisted snapshot with its
+database-assigned `createdAt`. Versions created before migration V7 receive the migration
+instant because their original creation times were not recorded.
 
 `PaymentRecord` describes money received. A separate `PaymentAllocation` connects part of
 that money to an exact `(document id, version)` snapshot. An allocation stays attached to
@@ -163,8 +166,15 @@ The persisted facts can be read back without the mutation responses:
 `FinancialLedger.paymentHistory(paymentId)` returns a `PaymentHistory` (the payment, all its
 allocations, refunds, and refund allocations, and the reconciliation derived from them), and
 `paymentHistoriesForLineage(documentId)` returns the histories of every payment ever
-allocated to any version of a document lineage. Both read one `REPEATABLE_READ` snapshot
-and take no lock.
+allocated to any version of a document lineage. `unappliedPayments()` discovers standalone
+and partially applied payments with money still available to allocate; the amount is
+`PaymentHistory.reconciliation.unallocated`. These reads use one `REPEATABLE_READ`
+snapshot and take no lock.
+
+The shared HTTP error envelope can add `violations` with stable codes to a
+`validation_failed` response. Application pricing routes pass `OfferingsViolation` values
+through `offeringsValidationFailed`; no client needs to parse diagnostic text. The
+Offerings OpenAPI renderer omits absent schema formats.
 
 Applications create documents from their own authoritative pricing and pass them to
 `context.financialLedger.create(...)`. For an application-owned association, use

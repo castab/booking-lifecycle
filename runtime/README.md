@@ -432,6 +432,12 @@ payment or document id: they are recovered through the referenced rows. Indexes 
 payment's refunds and a refund's, or an allocation's, refund allocations. There is no
 status, balance, or other mutable column.
 
+`V7__financial_document_created_at.sql` adds
+`commerce.financial_document_snapshots.created_at timestamptz NOT NULL` with a
+`clock_timestamp()` default. PostgreSQL assigns the instant once at each snapshot insert;
+reads never generate it. For snapshots already stored before V7, the migration fills the
+column at migration time; their original creation instants cannot be reconstructed.
+
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
 > baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
@@ -560,6 +566,8 @@ revision, category, or offering is `not_found` (404). Each route's OpenAPI metad
 the error statuses among these that the route can actually return. It does not evaluate
 an `OfferingsEngine`, own any application catalog contents, or implement update/delete
 commands. Released `V2__offerings_snapshots.sql` remains unchanged.
+`offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
+schema node; it operates on schema values before OpenAPI serialization.
 
 ### Financial ledger
 
@@ -569,6 +577,12 @@ Every ledger operation also has a `Transaction` overload for application-owned w
 that must commit or roll back with it. Convenience overloads open a transaction and
 delegate; a caller already inside `Transactor.inTransaction` passes its transaction to
 the ledger operation.
+
+`version(reference)`, `latestVersion(id)`, and `versionHistory(id)` expose persisted
+`FinancialDocumentVersion(document, createdAt)` read values. History is ordered by
+document version. The domain `FinancialDocument` stays a clock-free immutable financial
+fact; the runtime database owns each version's creation instant. Existing `get`, `latest`,
+and `history` methods still return domain documents.
 `FinancialDocumentRepository.asHistory(transaction)` implements the domain
 `FinancialDocumentHistory` SPI for reads within that transaction. It also exposes exact,
 latest, and ordered history reads. The ledger provides `create`, `get`, `latest`,
@@ -656,6 +670,7 @@ the ids from a mutation response to find them again. `FinancialLedger` reads the
 |---|---|
 | `paymentHistory(paymentId)` | the payment's `PaymentHistory`; `NotFound` for an unknown payment |
 | `paymentHistoriesForLineage(documentId)` | the `PaymentHistory` of every payment ever allocated to any version of the document lineage, ordered by `receivedAt`, then payment id; `NotFound` for a missing lineage, an empty list for a lineage with no payments |
+| `unappliedPayments()` | complete `PaymentHistory` values for all payments whose derived `unallocated` amount is positive, ordered by `receivedAt`, then payment id |
 
 A `PaymentHistory` is one coherent read: the `PaymentRecord`, all its `PaymentAllocation`s
 (to any document), `RefundRecord`s, and `RefundAllocation`s, and the
@@ -677,7 +692,13 @@ a payment split between documents A and B is returned in full for either, with i
 reconciliation over both allocations, because that reconciliation is what says how much is
 still allocatable or refundable. To show one document, select the allocations with
 `financialDocumentReference.id == documentId`. A payment that was never allocated cannot
-be discovered from a document; the read for it is `paymentHistory(paymentId)`.
+be discovered from a document; `unappliedPayments()` discovers it while kept value remains.
+Its `reconciliation.unallocated` is `payment amount - total refunds - effective net
+allocations`. Refund allocations unwind applied money but do not make refunded money
+available again. A payment with positive `unallocated` may be fully or partly unapplied;
+the full payment record contains amount, currency, method, receipt time, and any external
+reference. The list is unpaged and ordered deterministically; applications may expose a
+UI-specific pagination contract later if needed.
 
 The convenience overloads run in one `REPEATABLE_READ` transaction, so a result never mixes
 committed states, and they take no row lock, so a history read neither waits for nor
@@ -785,6 +806,19 @@ Every error has one shape:
 ```json
 {"code": "validation_failed", "message": "Financial document 5f0c6a7e-... must contain at least one line item"}
 ```
+
+For structured validation results, an optional `violations` array carries stable codes:
+
+```json
+{"code":"validation_failed","message":"Selection cannot be priced","violations":[{"code":"TOO_MANY_SELECTIONS"}]}
+```
+
+`offeringsValidationFailed(message, violations)` preserves codes from structural and
+application-defined `OfferingsViolation` values. The message stays diagnostic; the domain
+violation interface does not provide a reliable field path or per-violation message, so
+neither is fabricated. Errors without structured violations retain the two-field JSON
+body. The Offerings OpenAPI contract uses `ValidationErrorResponse` to describe the
+optional array and leaves the base `ErrorResponse` schema unchanged.
 
 | Category | Status | `code` | Raised by |
 |---|---|---|---|

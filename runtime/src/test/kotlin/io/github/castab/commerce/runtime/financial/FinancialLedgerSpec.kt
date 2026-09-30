@@ -107,6 +107,13 @@ class FinancialLedgerSpec :
             invoice.version shouldBe Version.of(5)
             val changedInvoice = ledger.changeOrder(id, ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("3.00")))))
             ledger.history(id).shouldContainExactly(first, changedEstimate, quote, changedQuote, invoice, changedInvoice)
+            val versions = ledger.versionHistory(id)
+            versions.map { it.document }.shouldContainExactly(first, changedEstimate, quote, changedQuote, invoice, changedInvoice)
+            versions.forEach { stored ->
+                stored.createdAt shouldBe ledger.version(stored.document.reference).createdAt
+                stored.createdAt shouldBe ledger.version(stored.document.reference).createdAt
+            }
+            ledger.latestVersion(id).createdAt shouldBe versions.last().createdAt
             shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueQuote(id) }
             shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueInvoice(id) }
             ledger.history(id).size shouldBe 6

@@ -34,6 +34,16 @@ interface PaymentRepository {
         id: UUID,
     ): PaymentRecord?
 
+    /** All payment facts in receipt time and database UUID order, including payments never allocated. */
+    fun payments(transaction: Transaction): List<PaymentRecord> =
+        transaction.handle
+            .createQuery(
+                """SELECT payment_id FROM commerce.payment_records
+                   ORDER BY received_at_seconds, received_at_nanos, payment_id""",
+            ).mapTo(UUID::class.java)
+            .list()
+            .map { id -> checkNotNull(retrievePayment(transaction, id)) }
+
     /** Serializes allocation and refund attempts for one payment until the caller commits. */
     fun lockPayment(
         transaction: Transaction,
