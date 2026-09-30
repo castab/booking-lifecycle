@@ -1050,6 +1050,18 @@ unique category and offering keys, valid category references, and revision seque
 Empty catalogs are permitted. An application may change its catalog by storing a new
 snapshot; prior revisions remain historical facts.
 
+`OfferingKey` and `OfferingCategoryKey` are durable natural identities within a catalog.
+A historical key remains reserved: never existed -> add -> active -> update -> active ->
+retire -> retired -> restore -> active. Retired means absent from the latest snapshot, not
+row deletion. Retired -> add/update, active -> restore, and unknown -> update/restore are
+invalid. Updates retain keys and positions; additions and restorations append. Category
+retirement requires no active offerings and never cascades. Missing/retired target
+categories must be added/restored before moving or restoring an offering into them.
+The snapshot enforces current invariants and remains clock-free; runtime SQL answers
+historical existence and last representations of retired identities. Discovery is bounded
+to the latest immutable reference and ordered by key. No per-item UUIDs, revisions,
+timestamps, active/deleted flags, key rename, or general reordering are part of this model.
+
 `OfferingPrice` has only `Fixed`, `PerQuantity` with an application-named
 `QuantityDimension`, and `PerDuration` with a positive `Duration`. It is descriptive
 price metadata, not a pricing rules system. Do not add business-specific rates such as
@@ -1087,8 +1099,8 @@ Adopters supply explicit catalog IDs; they do not need to reimplement generic ca
 administration. Commands own `Transactor` boundaries, derive immediate immutable
 successors, and call the append-only `OfferingsSnapshotRepository`. Concurrent successor
 collisions surface as `CommerceFailure.Conflict` without automatic retry or merge. Do
-not add update/delete repository methods or generic update/delete HTTP semantics; later
-changes need deliberately designed successor-revision commands.
+not add mutable update/delete repository methods. Update, retire, and restore are
+explicit successor-revision commands, never edits of stored rows.
 
 The Offerings HTTP capability is explicitly mounted and bound to one application-supplied
 catalog ID and base path. Its runtime-owned serializable DTOs translate domain values;
@@ -1097,8 +1109,9 @@ source for execution and host OpenAPI metadata. The runtime does not own the hos
 aggregate OpenAPI document, Swagger UI, or route mount. `ReadOnly` exposes the
 reads only and needs no authorization dependency. `ReadWrite(accessControl)` adds the writes,
 each requiring `CommercePermissions.OfferingsManage` through the application's
-`AccessControl` (`401` without a principal, `403` without the permission). Reads keep no
-permission requirement; the host decides where to mount them.
+`AccessControl` (`401` without a principal, `403` without the permission). Reads, including
+`/retired/offerings` and `/retired/categories`, keep no permission requirement; the host
+decides where to mount them.
 Hosts rendering these routes with http4k OpenAPI use `offeringsOpenApiRenderer` so the
 shared `OfferingPriceDto` definition is the three-branch `kind`-discriminated `oneOf`.
 OpenAPI tags are host-supplied per capability instance (`OfferingsHttpBinding.tags`, and

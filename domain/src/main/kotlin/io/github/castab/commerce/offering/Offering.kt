@@ -4,7 +4,7 @@ import io.github.castab.commerce.financial.Money
 import java.time.Duration
 import java.util.UUID
 
-/** Stable machine key for an offering. Presentation text is held separately. */
+/** Durable natural identity within a catalog. Historical use reserves the key even after retirement. */
 @JvmInline
 value class OfferingKey(
     val value: String,
@@ -16,7 +16,7 @@ value class OfferingKey(
     }
 }
 
-/** Stable machine key for a category; intentionally distinct from [OfferingKey]. */
+/** Durable natural category identity within a catalog; historical use reserves it even after retirement. */
 @JvmInline
 value class OfferingCategoryKey(
     val value: String,

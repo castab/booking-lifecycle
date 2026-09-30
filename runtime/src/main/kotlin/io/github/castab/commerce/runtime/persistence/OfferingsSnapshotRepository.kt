@@ -11,6 +11,7 @@ import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.offering.QuantityDimension
+import io.github.castab.commerce.runtime.offering.CatalogResult
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
@@ -33,6 +34,32 @@ interface OfferingsSnapshotRepository {
         transaction: Transaction,
         catalogId: OfferingsCatalogId,
     ): OfferingsSnapshot?
+
+    /** Whether this natural identity has appeared in any revision of this catalog. */
+    fun offeringKeyExistsInHistory(
+        transaction: Transaction,
+        catalogId: OfferingsCatalogId,
+        key: OfferingKey,
+    ): Boolean
+
+    /** Whether this natural category identity has appeared in any revision of this catalog. */
+    fun categoryKeyExistsInHistory(
+        transaction: Transaction,
+        catalogId: OfferingsCatalogId,
+        key: OfferingCategoryKey,
+    ): Boolean
+
+    /** Last representations absent at [reference], in key order. History is bounded by that immutable revision. */
+    fun retrieveRetiredOfferings(
+        transaction: Transaction,
+        reference: OfferingsSnapshotReference,
+    ): List<CatalogResult<Offering>>
+
+    /** Last category representations absent at [reference], in key order, bounded by that immutable revision. */
+    fun retrieveRetiredCategories(
+        transaction: Transaction,
+        reference: OfferingsSnapshotReference,
+    ): List<CatalogResult<OfferingCategory>>
 }
 
 internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository {
@@ -167,6 +194,78 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
                 .one() ?: return null
         return retrieveVersion(transaction, OfferingsSnapshotReference(catalogId, OfferingsRevision.of(revision)))
     }
+
+    override fun offeringKeyExistsInHistory(
+        transaction: Transaction,
+        catalogId: OfferingsCatalogId,
+        key: OfferingKey,
+    ): Boolean =
+        transaction.handle
+            .createQuery("SELECT EXISTS (SELECT 1 FROM commerce.offerings WHERE catalog_id = :catalogId AND offering_key = :key)")
+            .bind("catalogId", catalogId.value)
+            .bind("key", key.value)
+            .mapTo(Boolean::class.java)
+            .one()
+
+    override fun categoryKeyExistsInHistory(
+        transaction: Transaction,
+        catalogId: OfferingsCatalogId,
+        key: OfferingCategoryKey,
+    ): Boolean =
+        transaction.handle
+            .createQuery("SELECT EXISTS (SELECT 1 FROM commerce.offering_categories WHERE catalog_id = :catalogId AND category_key = :key)")
+            .bind("catalogId", catalogId.value)
+            .bind("key", key.value)
+            .mapTo(Boolean::class.java)
+            .one()
+
+    override fun retrieveRetiredOfferings(
+        transaction: Transaction,
+        reference: OfferingsSnapshotReference,
+    ): List<CatalogResult<Offering>> =
+        transaction.handle
+            .createQuery(
+                """SELECT DISTINCT ON (historical.offering_key COLLATE "C") historical.*
+                   FROM commerce.offerings historical
+                   WHERE historical.catalog_id = :catalogId AND historical.revision <= :revision
+                     AND NOT EXISTS (
+                         SELECT 1 FROM commerce.offerings current
+                         WHERE current.catalog_id = historical.catalog_id
+                           AND current.revision = :revision AND current.offering_key = historical.offering_key
+                     )
+                   ORDER BY historical.offering_key COLLATE "C", historical.revision DESC""",
+            ).bind("catalogId", reference.catalogId.value)
+            .bind("revision", reference.revision.number)
+            .map { rows, _ ->
+                CatalogResult(
+                    OfferingsSnapshotReference(reference.catalogId, OfferingsRevision.of(rows.getInt("revision"))),
+                    offering(rows),
+                )
+            }.list()
+
+    override fun retrieveRetiredCategories(
+        transaction: Transaction,
+        reference: OfferingsSnapshotReference,
+    ): List<CatalogResult<OfferingCategory>> =
+        transaction.handle
+            .createQuery(
+                """SELECT DISTINCT ON (historical.category_key COLLATE "C") historical.*
+                   FROM commerce.offering_categories historical
+                   WHERE historical.catalog_id = :catalogId AND historical.revision <= :revision
+                     AND NOT EXISTS (
+                         SELECT 1 FROM commerce.offering_categories current
+                         WHERE current.catalog_id = historical.catalog_id
+                           AND current.revision = :revision AND current.category_key = historical.category_key
+                     )
+                   ORDER BY historical.category_key COLLATE "C", historical.revision DESC""",
+            ).bind("catalogId", reference.catalogId.value)
+            .bind("revision", reference.revision.number)
+            .map { rows, _ ->
+                CatalogResult(
+                    OfferingsSnapshotReference(reference.catalogId, OfferingsRevision.of(rows.getInt("revision"))),
+                    category(rows),
+                )
+            }.list()
 
     private fun category(rows: ResultSet): OfferingCategory =
         OfferingCategory(

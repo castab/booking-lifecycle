@@ -71,6 +71,39 @@ class OfferingsSnapshot private constructor(
 
     fun offeringsIn(category: OfferingCategoryKey): List<Offering> = offerings.filter { it.category == category }
 
+    /** Replaces an existing offering in place, retaining its identity and validating its category. */
+    fun replaceOffering(
+        key: OfferingKey,
+        replacement: Offering,
+    ): OfferingsSnapshot {
+        require(replacement.key == key) { "An offering replacement must retain its key" }
+        require(offering(key) != null) { "Offering ${key.value} is absent from this snapshot" }
+        return revise(categories, offerings.map { if (it.key == key) replacement else it })
+    }
+
+    /** Removes an existing offering only from the immediate successor; other items retain their order. */
+    fun withoutOffering(key: OfferingKey): OfferingsSnapshot {
+        require(offering(key) != null) { "Offering ${key.value} is absent from this snapshot" }
+        return revise(categories, offerings.filterNot { it.key == key })
+    }
+
+    /** Replaces an existing category in place without changing its identity or its offerings. */
+    fun replaceCategory(
+        key: OfferingCategoryKey,
+        replacement: OfferingCategory,
+    ): OfferingsSnapshot {
+        require(replacement.key == key) { "A category replacement must retain its key" }
+        require(category(key) != null) { "Offering category ${key.value} is absent from this snapshot" }
+        return revise(categories.map { if (it.key == key) replacement else it }, offerings)
+    }
+
+    /** Removes an existing empty category only from the immediate successor. Never cascades to offerings. */
+    fun withoutCategory(key: OfferingCategoryKey): OfferingsSnapshot {
+        require(category(key) != null) { "Offering category ${key.value} is absent from this snapshot" }
+        require(offeringsIn(key).isEmpty()) { "Category ${key.value} still contains offerings" }
+        return revise(categories.filterNot { it.key == key }, offerings)
+    }
+
     /** Produces the immediate successor without changing this snapshot. */
     fun revise(
         categories: List<OfferingCategory>,

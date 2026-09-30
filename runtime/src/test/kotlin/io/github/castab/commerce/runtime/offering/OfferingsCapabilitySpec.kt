@@ -494,9 +494,9 @@ class OfferingsCapabilitySpec :
                     .values
                     .flatMap { it.jsonObject.values }
                     .map { operation -> operation.jsonObject["tags"]!!.jsonArray.map { it.jsonPrimitive.content } }
-            operationTags("/catalog-a").size shouldBe 10
+            operationTags("/catalog-a").size shouldBe 18
             operationTags("/catalog-a").forEach { it shouldContainExactly listOf("Catalog A") }
-            operationTags("/catalog-b").size shouldBe 10
+            operationTags("/catalog-b").size shouldBe 18
             operationTags("/catalog-b").forEach { it shouldContainExactly listOf("Catalog B") }
             (operationTags("/catalog-c") + operationTags("/catalog-ro")).forEach { tags ->
                 tags.none { it == "Catalog A" || it == "Catalog B" } shouldBe true
@@ -626,9 +626,25 @@ class OfferingsCapabilitySpec :
             val createRequest = create["requestBody"]!!.jsonObject["content"]!!.jsonObject["application/json"]!!.jsonObject["schema"]!!
             reachesPrice(createRequest) shouldBe true
             listOf(
+                "/catalog-a/offerings/{offeringKey}" to "put",
+                "/catalog-a/offerings/{offeringKey}/restore" to "post",
+            ).forEach { (path, method) ->
+                val schema =
+                    paths[path]!!
+                        .jsonObject[method]!!
+                        .jsonObject["requestBody"]!!
+                        .jsonObject["content"]!!
+                        .jsonObject["application/json"]!!
+                        .jsonObject["schema"]!!
+                reachesPrice(schema) shouldBe true
+            }
+            listOf(
                 Triple("/catalog-a/offerings", "post", "201"),
                 Triple("/catalog-a/offerings/{offeringKey}", "get", "200"),
                 Triple("/catalog-a/offerings", "get", "200"),
+                Triple("/catalog-a/offerings/{offeringKey}", "put", "200"),
+                Triple("/catalog-a/offerings/{offeringKey}/restore", "post", "200"),
+                Triple("/catalog-a/retired/offerings", "get", "200"),
                 Triple("/catalog-a/categories/{categoryKey}/offerings", "get", "200"),
                 Triple("/catalog-a", "get", "200"),
                 Triple("/catalog-a", "post", "201"),
@@ -714,6 +730,157 @@ class OfferingsCapabilitySpec :
             }
             checkExamples(document)
             (checkedPriceExamples > 0) shouldBe true
+        }
+
+        test("every lifecycle mutation is protected, absent from read-only bindings, and documented by OpenAPI") {
+            val viewerToken =
+                context.sessions
+                    .create(viewer)
+                    .token.value
+            val paths = request(Method.GET, "/openapi.json").json()["paths"]!!.jsonObject
+            val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
+            listOf("OfferingMutationDto", "OfferingCategoryMutationDto").forEach { name ->
+                schemas[name]!!.jsonObject["properties"]!!.jsonObject.containsKey("key") shouldBe false
+            }
+            listOf(
+                Triple("offerings/{offeringKey}", Method.PUT, "UpdateOffering"),
+                Triple("offerings/{offeringKey}", Method.DELETE, "RetireOffering"),
+                Triple("offerings/{offeringKey}/restore", Method.POST, "RestoreOffering"),
+                Triple("categories/{categoryKey}", Method.PUT, "UpdateCategory"),
+                Triple("categories/{categoryKey}", Method.DELETE, "RetireCategory"),
+                Triple("categories/{categoryKey}/restore", Method.POST, "RestoreCategory"),
+            ).forEach { (suffix, method, operation) ->
+                val concrete = suffix.replace("{offeringKey}", "missing").replace("{categoryKey}", "missing")
+                request(method, "/catalog-c/$concrete", "{", token = null).status shouldBe Status.UNAUTHORIZED
+                request(method, "/catalog-c/$concrete", "{", token = viewerToken).status shouldBe Status.FORBIDDEN
+                request(method, "/catalog-ro/$concrete", "{").status shouldBe Status.NOT_FOUND
+                val contract = paths["/catalog-a/$suffix"]!!.jsonObject[method.name.lowercase()]!!.jsonObject
+                contract["operationId"]!!.jsonPrimitive.content shouldBe "catalogA$operation"
+                contract["responses"]!!.jsonObject.keys shouldBe
+                    (setOf("200", "401", "403", "404", "409", "422") + if (method == Method.DELETE) emptySet() else setOf("400"))
+                (paths["/catalog-ro/$suffix"]?.jsonObject?.containsKey(method.name.lowercase()) ?: false) shouldBe false
+                if (method != Method.DELETE) {
+                    request(method, "/catalog-b/$concrete", "{").status shouldBe Status.BAD_REQUEST
+                    val invalid =
+                        if (suffix.startsWith("offerings")) {
+                            """{"category":"lifecycle","displayName":" "}"""
+                        } else {
+                            """{"displayName":" ","minimumSelections":-1}"""
+                        }
+                    request(method, "/catalog-b/$concrete", invalid).status shouldBe Status.UNPROCESSABLE_ENTITY
+                    val body =
+                        if (suffix.startsWith("offerings")) {
+                            """{"category":"lifecycle","displayName":"Unknown"}"""
+                        } else {
+                            """{"displayName":"Unknown"}"""
+                        }
+                    request(method, "/catalog-b/$concrete", body).status shouldBe Status.NOT_FOUND
+                } else {
+                    request(method, "/catalog-b/$concrete").status shouldBe Status.NOT_FOUND
+                }
+                val badKeyPath = concrete.replace("missing", "%20")
+                val validBody =
+                    if (suffix.startsWith("offerings")) {
+                        """{"category":"lifecycle","displayName":"Item"}"""
+                    } else {
+                        """{"displayName":"Category"}"""
+                    }
+                request(method, "/catalog-b/$badKeyPath", validBody).status shouldBe Status.UNPROCESSABLE_ENTITY
+            }
+            listOf("offerings", "categories").forEach { kind ->
+                request(Method.GET, "/catalog-ro/retired/$kind", token = null).status shouldBe Status.OK
+                paths["/catalog-a/retired/$kind"]!!
+                    .jsonObject["get"]!!
+                    .jsonObject["operationId"]!!
+                    .jsonPrimitive.content shouldBe
+                    "catalogAListRetired${kind.replaceFirstChar(Char::uppercase)}"
+            }
+        }
+
+        test("HTTP lifecycle preserves exact history and exposes last retired representations and successor revisions") {
+            val base = "/catalog-b"
+            val category = """{"key":"lifecycle","displayName":"Flavors"}"""
+            request(Method.POST, "$base/categories", category).status shouldBe Status.CREATED
+
+            fun body(amount: String) =
+                """{"category":"lifecycle","displayName":"Horchata",
+                    "price":{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}}"""
+            val addBody = body("0.50").replaceFirst("{", """{"key":"horchata", """)
+            request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CREATED
+            val added = request(Method.GET, base).json()
+            val path = "$base/offerings/horchata"
+            request(Method.POST, "$path/restore", body("0.75")).status shouldBe Status.CONFLICT
+            request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CONFLICT
+            // Unknown additive JSON keys follow CommerceJson conventions; they cannot change path identity.
+            request(Method.PUT, path, body("0.75").replaceFirst("{", """{"key":"unrelated", """)).let {
+                it.status shouldBe Status.OK
+                it
+                    .json()["offering"]!!
+                    .jsonObject["key"]!!
+                    .jsonPrimitive.content shouldBe "horchata"
+            }
+            request(Method.GET, "$base/offerings/unrelated").status shouldBe Status.NOT_FOUND
+            val updated = request(Method.GET, base).json()
+            request(Method.DELETE, "$base/categories/lifecycle").status shouldBe Status.CONFLICT
+            request(Method.PUT, path, body("0.75").replace("lifecycle", "missing-category")).status shouldBe Status.NOT_FOUND
+            request(Method.DELETE, path).let {
+                it.status shouldBe Status.OK
+                it
+                    .json()["revision"]!!
+                    .jsonPrimitive.content
+                    .toInt() shouldBe updated["revision"]!!.jsonPrimitive.content.toInt() + 1
+            }
+            val retired = request(Method.GET, base).json()
+            request(Method.GET, path).status shouldBe Status.NOT_FOUND
+            request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CONFLICT
+            request(Method.PUT, path, body("0.75")).status shouldBe Status.CONFLICT
+            request(Method.DELETE, path).status shouldBe Status.CONFLICT
+            request(Method.GET, "$base/retired/offerings").json().let { response ->
+                response["revision"] shouldBe retired["revision"]
+                val entry = response["offerings"]!!.jsonArray.single().jsonObject
+                entry["lastSeenRevision"] shouldBe updated["revision"]
+                entry["offering"]!!
+                    .jsonObject["price"]!!
+                    .jsonObject["amount"]!!
+                    .jsonPrimitive.content shouldBe "0.75"
+            }
+            request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.OK
+            val restored = request(Method.GET, base).json()
+            request(Method.GET, "$base/retired/offerings").json()["offerings"]!!.jsonArray shouldBe JsonArray(emptyList())
+            listOf(added, updated, retired, restored).forEach { snapshot ->
+                request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
+            }
+
+            request(Method.DELETE, path).status shouldBe Status.OK
+            val categoryPath = "$base/categories/lifecycle"
+            val editCategory = """{"displayName":"New Flavors","description":"Changed","minimumSelections":1,"maximumSelections":2}"""
+            request(Method.PUT, categoryPath, editCategory).status shouldBe Status.OK
+            val updatedCategory = request(Method.GET, base).json()
+            request(Method.DELETE, categoryPath).status shouldBe Status.OK
+            val retiredCategory = request(Method.GET, base).json()
+            request(Method.POST, "$base/categories", category).status shouldBe Status.CONFLICT
+            request(Method.PUT, categoryPath, editCategory).status shouldBe Status.CONFLICT
+            request(Method.DELETE, categoryPath).status shouldBe Status.CONFLICT
+            request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.NOT_FOUND
+            request(Method.GET, "$base/retired/categories").json().let { response ->
+                response["revision"] shouldBe retiredCategory["revision"]
+                val entry = response["categories"]!!.jsonArray.single().jsonObject
+                entry["lastSeenRevision"] shouldBe updatedCategory["revision"]
+                entry["category"]!!.jsonObject["displayName"]!!.jsonPrimitive.content shouldBe "New Flavors"
+            }
+            request(Method.POST, "$categoryPath/restore", editCategory).status shouldBe Status.OK
+            request(Method.POST, "$categoryPath/restore", editCategory).status shouldBe Status.CONFLICT
+            request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.OK
+            listOf(updatedCategory, retiredCategory).forEach { snapshot ->
+                request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
+            }
+            request(Method.GET, "$base/retired/categories").json()["categories"]!!.jsonArray shouldBe JsonArray(emptyList())
+            request(Method.POST, "$base/categories", """{"key":"retired","displayName":"Retired is a legal key"}""").status shouldBe
+                Status.CREATED
+            request(Method.GET, "$base/categories/retired").status shouldBe Status.OK
+            request(Method.POST, "$base/offerings", """{"key":"retired","category":"retired","displayName":"Legal key"}""").status shouldBe
+                Status.CREATED
+            request(Method.GET, "$base/offerings/retired").status shouldBe Status.OK
         }
 
         test("path parameter failures match each route's documented error statuses") {
