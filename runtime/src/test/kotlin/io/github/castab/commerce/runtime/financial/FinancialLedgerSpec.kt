@@ -22,6 +22,8 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
 import org.jdbi.v3.core.Jdbi
+import org.jdbi.v3.core.statement.SqlLogger
+import org.jdbi.v3.core.statement.StatementContext
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.math.BigDecimal
 import java.time.Instant
@@ -109,14 +111,46 @@ class FinancialLedgerSpec :
             ledger.history(id).shouldContainExactly(first, changedEstimate, quote, changedQuote, invoice, changedInvoice)
             val versions = ledger.versionHistory(id)
             versions.map { it.document }.shouldContainExactly(first, changedEstimate, quote, changedQuote, invoice, changedInvoice)
+            versions.map { it.document.reference }.distinct().size shouldBe 6
             versions.forEach { stored ->
-                stored.createdAt shouldBe ledger.version(stored.document.reference).createdAt
-                stored.createdAt shouldBe ledger.version(stored.document.reference).createdAt
+                val reread = ledger.version(stored.document.reference)
+                reread.document shouldBe stored.document
+                reread.createdAt shouldBe stored.createdAt
             }
+            ledger.latestVersion(id).document shouldBe changedInvoice
             ledger.latestVersion(id).createdAt shouldBe versions.last().createdAt
             shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueQuote(id) }
             shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueInvoice(id) }
             ledger.history(id).size shouldBe 6
+        }
+
+        test("metadata reads restore each document only once") {
+            val first = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
+            ledger.issueQuote(first.id)
+            ledger.issueInvoice(first.id)
+            val statements = mutableListOf<String>()
+            val probe =
+                object : SqlLogger {
+                    override fun logBeforeExecution(context: StatementContext) {
+                        statements += context.renderedSql.lowercase()
+                    }
+                }
+            val probedLedger = FinancialLedger(Transactor(Jdbi.create(dataSource).setSqlLogger(probe)), documents, payments)
+
+            fun assertReads(
+                expectedLineQueries: Int,
+                block: () -> Unit,
+            ) {
+                statements.clear()
+                block()
+                statements.count { "from commerce.financial_document_snapshots" in it } shouldBe 1
+                statements.count { "from commerce.financial_document_lines" in it } shouldBe expectedLineQueries
+            }
+
+            assertReads(1) { probedLedger.version(first.reference) }
+            assertReads(1) { probedLedger.latestVersion(first.id) }
+            assertReads(3) { probedLedger.versionHistory(first.id) }
+            assertReads(3) { probedLedger.history(first.id) }
         }
 
         test("two successors computed from one source cannot both commit") {

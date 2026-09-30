@@ -14,8 +14,8 @@ import io.github.castab.commerce.payment.RefundAllocation
 import io.github.castab.commerce.payment.RefundRecord
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
-import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
-import io.github.castab.commerce.runtime.persistence.PaymentRepository
+import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository
+import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
@@ -32,8 +32,8 @@ import java.util.UUID
  */
 class FinancialLedger internal constructor(
     private val transactor: Transactor,
-    private val documents: FinancialDocumentRepository,
-    private val payments: PaymentRepository,
+    private val documents: PostgresFinancialDocumentRepository,
+    private val payments: PostgresPaymentRepository,
 ) {
     /** Stores an application-created first snapshot in the caller's transaction. */
     fun create(
@@ -101,7 +101,9 @@ class FinancialLedger internal constructor(
     fun latestVersion(
         transaction: Transaction,
         id: UUID,
-    ): FinancialDocumentVersion = version(transaction, latest(transaction, id).reference)
+    ): FinancialDocumentVersion =
+        documents.latestVersion(transaction, id)
+            ?: throw CommerceFailure.NotFound("Financial document $id was not found")
 
     /** Reads all persisted versions and creation instants in ascending version order. */
     fun versionHistory(id: UUID): List<FinancialDocumentVersion> = transactor.inTransaction { versionHistory(it, id) }
@@ -110,7 +112,8 @@ class FinancialLedger internal constructor(
     fun versionHistory(
         transaction: Transaction,
         id: UUID,
-    ): List<FinancialDocumentVersion> = history(transaction, id).map { version(transaction, it.reference) }
+    ): List<FinancialDocumentVersion> =
+        documents.versionHistory(transaction, id).ifEmpty { throw CommerceFailure.NotFound("Financial document $id was not found") }
 
     /** Applies the domain change order and appends its same-stage successor. */
     fun changeOrder(

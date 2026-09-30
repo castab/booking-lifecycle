@@ -240,8 +240,8 @@ consumer that needs them.
 payments, excludes fully allocated or refunded payments, and orders by receipt time then
 payment id. It stores no available balance. `FinancialLedger.version`, `latestVersion`,
 and `versionHistory` pair each immutable domain snapshot with its database-assigned
-`createdAt` without changing domain transition semantics. V7 backfills old snapshots at
-migration time because their original creation instants were not stored.
+`createdAt` without changing domain transition semantics. V7 rejects a database with
+preexisting financial snapshots; it never assigns a synthetic creation timestamp.
 
 The `Transactor` owns transaction isolation. `Transactor.inTransaction { }` uses the runtime
 default (the pool baseline, `READ COMMITTED`); `Transactor.inTransaction(isolation) { }`

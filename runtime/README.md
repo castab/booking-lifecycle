@@ -435,8 +435,9 @@ status, balance, or other mutable column.
 `V7__financial_document_created_at.sql` adds
 `commerce.financial_document_snapshots.created_at timestamptz NOT NULL` with a
 `clock_timestamp()` default. PostgreSQL assigns the instant once at each snapshot insert;
-reads never generate it. For snapshots already stored before V7, the migration fills the
-column at migration time; their original creation instants cannot be reconstructed.
+reads never generate it. V7 checks for preexisting financial snapshots before altering
+the table and fails if any exist. No migration-time timestamp is fabricated; ephemeral
+pre-V7 databases with financial snapshots must be recreated.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
@@ -567,7 +568,8 @@ the error statuses among these that the route can actually return. It does not e
 an `OfferingsEngine`, own any application catalog contents, or implement update/delete
 commands. Released `V2__offerings_snapshots.sql` remains unchanged.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
-schema node; it operates on schema values before OpenAPI serialization.
+schema node; it operates on schema values before OpenAPI serialization and does not
+traverse example, default, const, or extension payloads as schemas.
 
 ### Financial ledger
 
@@ -582,7 +584,9 @@ the ledger operation.
 `FinancialDocumentVersion(document, createdAt)` read values. History is ordered by
 document version. The domain `FinancialDocument` stays a clock-free immutable financial
 fact; the runtime database owns each version's creation instant. Existing `get`, `latest`,
-and `history` methods still return domain documents.
+and `history` methods still return domain documents. The PostgreSQL repository restores
+each `(document, createdAt)` pair once and unwraps `.document` for those older reads;
+the public `FinancialDocumentRepository` contract remains document-only.
 `FinancialDocumentRepository.asHistory(transaction)` implements the domain
 `FinancialDocumentHistory` SPI for reads within that transaction. It also exposes exact,
 latest, and ordered history reads. The ledger provides `create`, `get`, `latest`,

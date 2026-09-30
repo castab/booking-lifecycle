@@ -138,8 +138,8 @@ orders append a new version; previous versions remain available. A lineage may b
 any of the three stages. The runtime stores exact decimal line facts and derives document
 totals from the domain model when restoring them. `FinancialLedger.version`,
 `latestVersion`, and `versionHistory` return each persisted snapshot with its
-database-assigned `createdAt`. Versions created before migration V7 receive the migration
-instant because their original creation times were not recorded.
+database-assigned `createdAt`. V7 refuses to migrate a database containing older
+financial snapshots, because their original creation times were not recorded.
 
 `PaymentRecord` describes money received. A separate `PaymentAllocation` connects part of
 that money to an exact `(document id, version)` snapshot. An allocation stays attached to

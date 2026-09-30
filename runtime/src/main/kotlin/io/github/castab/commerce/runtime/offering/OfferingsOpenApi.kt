@@ -37,18 +37,18 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         val schema = delegate.toSchema(obj.withCompletePriceShape(), overrideDefinitionId, refModelNamePrefix)
         if ("OfferingPriceDto" !in schema.definitions) {
             return schema.copy(
-                node = schema.node.withoutNullFormats(),
-                definitions = schema.definitions.mapValues { (_, node) -> node.withoutNullFormats() },
+                node = schema.node.withoutNullSchemaFormats(),
+                definitions = schema.definitions.mapValues { (_, node) -> node.withoutNullSchemaFormats() },
             )
         }
         return schema.copy(
-            node = schema.node.withoutNullFormats(),
+            node = schema.node.withoutNullSchemaFormats(),
             definitions =
                 schema.definitions.mapValues { (name, node) ->
                     if (name in priceCarrierNames) {
-                        node.withoutSchemaOnlyExamples().withoutNullFormats()
+                        node.withoutSchemaOnlyExamples().withoutNullSchemaFormats()
                     } else {
-                        node.withoutNullFormats()
+                        node.withoutNullSchemaFormats()
                     }
                 } +
                     mapOf(
@@ -124,21 +124,32 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         return json.parse(strip(Json.parseToJsonElement(json.compact(this))).toString())
     }
 
-    /** http4k emits null for absent formats; omit that optional schema keyword. */
-    private fun NODE.withoutNullFormats(): NODE {
-        fun omit(element: JsonElement): JsonElement =
-            when (element) {
-                is JsonObject ->
-                    JsonObject(
-                        element
-                            .filter { (key, value) ->
-                                key != "format" || value != JsonNull
-                            }.mapValues { omit(it.value) },
-                    )
-                is JsonArray -> JsonArray(element.map(::omit))
-                else -> element
-            }
-        return json.parse(omit(Json.parseToJsonElement(json.compact(this))).toString())
+    /** Only schema positions are traversed; example, default, const, and extension data stay intact. */
+    private fun NODE.withoutNullSchemaFormats(): NODE {
+        fun cleanSchema(element: JsonElement): JsonElement {
+            if (element !is JsonObject) return element
+
+            fun schemaMap(value: JsonElement): JsonElement =
+                if (value is JsonObject) JsonObject(value.mapValues { cleanSchema(it.value) }) else value
+
+            fun schemaArray(value: JsonElement): JsonElement = if (value is JsonArray) JsonArray(value.map(::cleanSchema)) else value
+
+            return JsonObject(
+                element
+                    .filter { (key, value) -> key != "format" || value != JsonNull }
+                    .mapValues { (key, value) ->
+                        when (key) {
+                            "properties", "patternProperties", "definitions", "\$defs", "dependentSchemas" -> schemaMap(value)
+                            "allOf", "anyOf", "oneOf", "prefixItems" -> schemaArray(value)
+                            "items" -> if (value is JsonArray) schemaArray(value) else cleanSchema(value)
+                            "additionalProperties", "unevaluatedProperties", "contains", "not", "if", "then", "else", "propertyNames" ->
+                                cleanSchema(value)
+                            else -> value
+                        }
+                    },
+            )
+        }
+        return json.parse(cleanSchema(Json.parseToJsonElement(json.compact(this))).toString())
     }
 }
 
