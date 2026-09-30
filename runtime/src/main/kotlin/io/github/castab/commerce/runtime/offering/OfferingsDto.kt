@@ -74,9 +74,36 @@ data class OfferingCategoryDto(
         validating { OfferingCategory(OfferingCategoryKey(key), displayName, description, minimumSelections, maximumSelections) }
 }
 
+/** A new natural offering identity appended against the catalog revision the caller observed. */
+@Serializable
+data class AddOfferingDto(
+    val expectedRevision: Int,
+    val key: String,
+    val category: String,
+    val displayName: String,
+    val description: String? = null,
+    val price: OfferingPriceDto? = null,
+) {
+    fun toDomain(): Offering = OfferingDto(key, category, displayName, description, price).toDomain()
+}
+
+/** A new natural category identity appended against the catalog revision the caller observed. */
+@Serializable
+data class AddOfferingCategoryDto(
+    val expectedRevision: Int,
+    val key: String,
+    val displayName: String,
+    val description: String? = null,
+    val minimumSelections: Int = 0,
+    val maximumSelections: Int? = null,
+) {
+    fun toDomain(): OfferingCategory = OfferingCategoryDto(key, displayName, description, minimumSelections, maximumSelections).toDomain()
+}
+
 /** Editable offering properties. Identity comes only from the route/operation key. */
 @Serializable
 data class OfferingMutationDto(
+    val expectedRevision: Int,
     val category: String,
     val displayName: String,
     val description: String? = null,
@@ -88,6 +115,7 @@ data class OfferingMutationDto(
 /** Editable category properties. Identity comes only from the route/operation key. */
 @Serializable
 data class OfferingCategoryMutationDto(
+    val expectedRevision: Int,
     val displayName: String,
     val description: String? = null,
     val minimumSelections: Int = 0,

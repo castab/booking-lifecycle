@@ -161,6 +161,7 @@ private val priceCarrierNames =
         "CategoryOfferingsDto",
         "CatalogCategoryDto",
         "OfferingsCatalogDto",
+        "AddOfferingDto",
         "OfferingMutationDto",
         "RetiredOfferingDto",
         "RetiredOfferingsDto",
@@ -174,6 +175,7 @@ private fun Any.withCompletePriceShape(): Any {
         is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
+        is AddOfferingDto -> copy(price = price?.complete())
         is OfferingMutationDto -> copy(price = price?.complete())
         is RetiredOfferingsDto -> copy(offerings = offerings.map { it.copy(offering = it.offering.complete()) })
         is OfferingResultDto -> copy(offering = offering.complete())

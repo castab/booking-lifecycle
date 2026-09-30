@@ -11,7 +11,6 @@ import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.offering.QuantityDimension
-import io.github.castab.commerce.runtime.offering.CatalogResult
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
@@ -53,13 +52,13 @@ interface OfferingsSnapshotRepository {
     fun retrieveRetiredOfferings(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
-    ): List<CatalogResult<Offering>>
+    ): List<HistoricalCatalogValue<Offering>>
 
     /** Last category representations absent at [reference], in key order, bounded by that immutable revision. */
     fun retrieveRetiredCategories(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
-    ): List<CatalogResult<OfferingCategory>>
+    ): List<HistoricalCatalogValue<OfferingCategory>>
 }
 
 internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository {
@@ -222,7 +221,7 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
     override fun retrieveRetiredOfferings(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
-    ): List<CatalogResult<Offering>> =
+    ): List<HistoricalCatalogValue<Offering>> =
         transaction.handle
             .createQuery(
                 """SELECT DISTINCT ON (historical.offering_key COLLATE "C") historical.*
@@ -237,7 +236,7 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
             ).bind("catalogId", reference.catalogId.value)
             .bind("revision", reference.revision.number)
             .map { rows, _ ->
-                CatalogResult(
+                HistoricalCatalogValue(
                     OfferingsSnapshotReference(reference.catalogId, OfferingsRevision.of(rows.getInt("revision"))),
                     offering(rows),
                 )
@@ -246,7 +245,7 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
     override fun retrieveRetiredCategories(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
-    ): List<CatalogResult<OfferingCategory>> =
+    ): List<HistoricalCatalogValue<OfferingCategory>> =
         transaction.handle
             .createQuery(
                 """SELECT DISTINCT ON (historical.category_key COLLATE "C") historical.*
@@ -261,7 +260,7 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
             ).bind("catalogId", reference.catalogId.value)
             .bind("revision", reference.revision.number)
             .map { rows, _ ->
-                CatalogResult(
+                HistoricalCatalogValue(
                     OfferingsSnapshotReference(reference.catalogId, OfferingsRevision.of(rows.getInt("revision"))),
                     category(rows),
                 )

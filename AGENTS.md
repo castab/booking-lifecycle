@@ -1097,8 +1097,15 @@ rollbacks with application-owned rows.
 `commerce-runtime` owns generic catalog commands and queries in `runtime.offering`.
 Adopters supply explicit catalog IDs; they do not need to reimplement generic catalog
 administration. Commands own `Transactor` boundaries, derive immediate immutable
-successors, and call the append-only `OfferingsSnapshotRepository`. Concurrent successor
-collisions surface as `CommerceFailure.Conflict` without automatic retry or merge. Do
+successors, and call the append-only `OfferingsSnapshotRepository`. Every mutation of an
+existing catalog (add, update, retire, restore for offerings/categories) requires the
+caller's `expectedRevision: OfferingsRevision`. Read latest and compare inside the same
+transaction, before lifecycle checks and successor derivation; stale clients receive
+`CommerceFailure.Conflict` with no new revision. Catalog initialization has no expected
+revision. The separate database concurrency guard remains: transactions that both satisfy
+the same expected revision compete for the same `(catalog_id, revision)` primary key,
+and the losing insert conflicts and rolls back. That constraint alone is insufficient for
+stale browser state. Neither protection retries or merges. Do
 not add mutable update/delete repository methods. Update, retire, and restore are
 explicit successor-revision commands, never edits of stored rows.
 
@@ -1107,11 +1114,19 @@ catalog ID and base path. Its runtime-owned serializable DTOs translate domain v
 domain types stay serialization-free. The original http4k contract routes are the single
 source for execution and host OpenAPI metadata. The runtime does not own the host's
 aggregate OpenAPI document, Swagger UI, or route mount. `ReadOnly` exposes the
-reads only and needs no authorization dependency. `ReadWrite(accessControl)` adds the writes,
-each requiring `CommercePermissions.OfferingsManage` through the application's
-`AccessControl` (`401` without a principal, `403` without the permission). Reads, including
-`/retired/offerings` and `/retired/categories`, keep no permission requirement; the host
-decides where to mount them.
+ordinary active and exact historical reads only and needs no authorization dependency.
+`ReadWrite(accessControl)` adds mutations and `/retired/offerings` and
+`/retired/categories` management discovery, all requiring `CommercePermissions.OfferingsManage`
+through the application's live `AccessControl` (`401` without a principal, `403` without
+the permission). `ReadOnly` never mounts retired management discovery. Ordinary reads
+retain the host's access policy; public historical revisions can still reveal retired
+identities through comparison. Do not silently broaden this into a historical-read redesign.
+PUT/POST mutations carry a required integer `expectedRevision` in their JSON bodies;
+DELETE uses the required integer `expectedRevision` query parameter. Missing/malformed
+preconditions are 400, domain-invalid revisions are 422, valid mismatches are 409.
+Identity on update/restore remains path-owned. Persistence returns its own
+`HistoricalCatalogValue<T>` (exact reference plus value); operations translate to
+`CatalogResult`. Persistence must not import the operation-layer result type.
 Hosts rendering these routes with http4k OpenAPI use `offeringsOpenApiRenderer` so the
 shared `OfferingPriceDto` definition is the three-branch `kind`-discriminated `oneOf`.
 OpenAPI tags are host-supplied per capability instance (`OfferingsHttpBinding.tags`, and
