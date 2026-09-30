@@ -48,6 +48,22 @@ class MigrationLifecycleSpec :
             ApplicationMigrationStream(dataSource, application),
         )
 
+        fun migrateRuntimeThrough(
+            dataSource: DataSource,
+            version: String,
+        ) {
+            Flyway
+                .configure()
+                .dataSource(dataSource)
+                .schemas(RuntimeMigrations.SCHEMA)
+                .createSchemas(true)
+                .table(HISTORY_TABLE)
+                .locations(RuntimeMigrations.LOCATION)
+                .target(version)
+                .load()
+                .migrate()
+        }
+
         test("runtime migrations are discovered internally and own the commerce schema and its history") {
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource).migrate()
@@ -83,45 +99,38 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V6 coexist with application V1 in separate version spaces.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                // Runtime V1 to V7 coexist with application V1 in separate version spaces.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
 
-        test("released runtime migrations are unchanged") {
+        test("canonical runtime migrations V1 through V7 are unchanged") {
             withTestDatabase { _, dataSource ->
                 RuntimeMigrations(dataSource).migrate()
 
-                // Flyway's checksums of the released scripts. A change here means a released
-                // migration was edited; correct it with a new migration instead.
-                val released =
+                // V1-V6 are released and V7 is canonical for the next release. A change to
+                // any of these scripts needs a new migration, not an edited checksum.
+                val canonical =
                     mapOf(
                         "1" to "-1133615564",
                         "2" to "839788254",
                         "3" to "80008543",
                         "4" to "1009054310",
                         "5" to "-265215424",
+                        "6" to "2123768785",
+                        "7" to "1335984745",
                     )
                 dataSource
                     .strings(
-                        "SELECT version || '=' || checksum FROM commerce.$HISTORY_TABLE WHERE version::int <= 5 ORDER BY installed_rank",
-                    ).shouldContainExactly(released.map { (version, checksum) -> "$version=$checksum" })
+                        "SELECT version || '=' || checksum FROM commerce.$HISTORY_TABLE WHERE version::int <= 7 ORDER BY installed_rank",
+                    ).shouldContainExactly(canonical.map { (version, checksum) -> "$version=$checksum" })
             }
         }
 
-        test("a database at the released V5 ledger migrates forward to refunds, keeping its facts") {
+        test("a database at the released V5 ledger migrates through refunds and timestamps, keeping its payment facts") {
             withTestDatabase { _, dataSource ->
-                Flyway
-                    .configure()
-                    .dataSource(dataSource)
-                    .schemas(RuntimeMigrations.SCHEMA)
-                    .createSchemas(true)
-                    .table(HISTORY_TABLE)
-                    .locations(RuntimeMigrations.LOCATION)
-                    .target("5")
-                    .load()
-                    .migrate()
+                migrateRuntimeThrough(dataSource, "5")
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5")
                 dataSource.relationExists("commerce.refund_records") shouldBe false
                 dataSource.execute(
@@ -131,7 +140,7 @@ class MigrationLifecycleSpec :
 
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
@@ -140,6 +149,51 @@ class MigrationLifecycleSpec :
                 val history = dataSource.history(RuntimeMigrations.SCHEMA)
                 MigrationLifecycle(dataSource, testApplication).migrate()
                 dataSource.history(RuntimeMigrations.SCHEMA) shouldBe history
+            }
+        }
+
+        test("an empty V6 ledger migrates to V7 with a non-null PostgreSQL default for new snapshots") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "6")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                RuntimeMigrations(dataSource).migrate()
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
+                dataSource.strings(
+                    """SELECT is_nullable || ':' || column_default
+                       FROM information_schema.columns
+                       WHERE table_schema = 'commerce' AND table_name = 'financial_document_snapshots'
+                         AND column_name = 'created_at'""",
+                ) shouldContainExactly listOf("NO:clock_timestamp()")
+                dataSource.execute(
+                    """INSERT INTO commerce.financial_document_snapshots (document_id, version, stage)
+                       VALUES ('00000000-0000-0000-0000-000000000007', 1, 'ESTIMATE')""",
+                )
+                dataSource.strings(
+                    """SELECT (created_at IS NOT NULL)::text FROM commerce.financial_document_snapshots
+                       WHERE document_id = '00000000-0000-0000-0000-000000000007'""",
+                ) shouldContainExactly listOf("true")
+            }
+        }
+
+        test("V7 rejects preexisting snapshots without adding a column or changing their facts") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "6")
+                dataSource.execute(
+                    """INSERT INTO commerce.financial_document_snapshots (document_id, version, stage)
+                       VALUES ('00000000-0000-0000-0000-000000000006', 1, 'ESTIMATE')""",
+                )
+                shouldThrow<FlywayException> { RuntimeMigrations(dataSource).migrate() }
+                    .message shouldContain "V7 cannot timestamp preexisting financial document snapshots"
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                dataSource.strings(
+                    """SELECT document_id::text || ':' || version || ':' || stage
+                       FROM commerce.financial_document_snapshots""",
+                ) shouldContainExactly listOf("00000000-0000-0000-0000-000000000006:1:ESTIMATE")
+                dataSource.strings(
+                    """SELECT count(*)::text FROM information_schema.columns
+                       WHERE table_schema = 'commerce' AND table_name = 'financial_document_snapshots'
+                         AND column_name = 'created_at'""",
+                ) shouldContainExactly listOf("0")
             }
         }
 
@@ -309,7 +363,7 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe true
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
-                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
+                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

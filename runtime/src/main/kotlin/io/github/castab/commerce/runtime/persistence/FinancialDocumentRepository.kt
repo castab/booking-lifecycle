@@ -6,9 +6,11 @@ import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
+import io.github.castab.commerce.runtime.financial.FinancialDocumentVersion
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
+import java.time.OffsetDateTime
 import java.util.Currency
 import java.util.UUID
 
@@ -99,17 +101,79 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
     override fun retrieveVersion(
         transaction: Transaction,
         reference: FinancialDocumentReference,
-    ): FinancialDocument? {
-        val stage =
-            transaction.handle
-                .createQuery(
-                    """SELECT stage FROM commerce.financial_document_snapshots
-                       WHERE document_id = :id AND version = :version""",
-                ).bind("id", reference.id)
-                .bind("version", reference.version.number)
-                .mapTo(String::class.java)
-                .findOne()
-        if (stage.isEmpty) return null
+    ): FinancialDocument? = version(transaction, reference)?.document
+
+    override fun retrieveLatestVersion(
+        transaction: Transaction,
+        id: UUID,
+    ): FinancialDocument? = latestVersion(transaction, id)?.document
+
+    override fun history(
+        transaction: Transaction,
+        id: UUID,
+    ): List<FinancialDocument> = versionHistory(transaction, id).map { it.document }
+
+    /** Restores the document and its database timestamp together from one persisted version. */
+    fun version(
+        transaction: Transaction,
+        reference: FinancialDocumentReference,
+    ): FinancialDocumentVersion? =
+        transaction.handle
+            .createQuery(
+                """SELECT stage, created_at FROM commerce.financial_document_snapshots
+                   WHERE document_id = :id AND version = :version""",
+            ).bind("id", reference.id)
+            .bind("version", reference.version.number)
+            .map { rows, _ -> rows.getString("stage") to rows.getObject("created_at", OffsetDateTime::class.java) }
+            .findOne()
+            .map { (stage, createdAt) -> restore(transaction, reference, stage, createdAt) }
+            .orElse(null)
+
+    /** Reads only the latest version's metadata before restoring that document once. */
+    fun latestVersion(
+        transaction: Transaction,
+        id: UUID,
+    ): FinancialDocumentVersion? =
+        transaction.handle
+            .createQuery(
+                """SELECT version, stage, created_at FROM commerce.financial_document_snapshots
+                   WHERE document_id = :id ORDER BY version DESC LIMIT 1""",
+            ).bind("id", id)
+            .map { rows, _ ->
+                Triple(
+                    Version.of(rows.getInt("version")),
+                    rows.getString("stage"),
+                    rows.getObject("created_at", OffsetDateTime::class.java),
+                )
+            }.findOne()
+            .map { (version, stage, createdAt) -> restore(transaction, FinancialDocumentReference(id, version), stage, createdAt) }
+            .orElse(null)
+
+    /** Reads ordered metadata once, then restores each version's lines exactly once. */
+    fun versionHistory(
+        transaction: Transaction,
+        id: UUID,
+    ): List<FinancialDocumentVersion> =
+        transaction.handle
+            .createQuery(
+                """SELECT version, stage, created_at FROM commerce.financial_document_snapshots
+                   WHERE document_id = :id ORDER BY version""",
+            ).bind("id", id)
+            .map { rows, _ ->
+                Triple(
+                    Version.of(rows.getInt("version")),
+                    rows.getString("stage"),
+                    rows.getObject("created_at", OffsetDateTime::class.java),
+                )
+            }.list()
+            .map { (version, stage, createdAt) -> restore(transaction, FinancialDocumentReference(id, version), stage, createdAt) }
+
+    private fun restore(
+        transaction: Transaction,
+        reference: FinancialDocumentReference,
+        stage: String,
+        createdAt: OffsetDateTime,
+    ): FinancialDocumentVersion {
         val lines =
             transaction.handle
                 .createQuery(
@@ -120,37 +184,15 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
                 .bind("version", reference.version.number)
                 .map { rows, _ -> line(rows) }
                 .list()
-        return when (stage.get()) {
-            "ESTIMATE" -> FinancialDocument.Estimate.restore(reference.id, reference.version, lines)
-            "QUOTE" -> FinancialDocument.Quote.restore(reference.id, reference.version, lines)
-            "INVOICE" -> FinancialDocument.Invoice.restore(reference.id, reference.version, lines)
-            else -> error("Unsupported financial document stage")
-        }
+        val document =
+            when (stage) {
+                "ESTIMATE" -> FinancialDocument.Estimate.restore(reference.id, reference.version, lines)
+                "QUOTE" -> FinancialDocument.Quote.restore(reference.id, reference.version, lines)
+                "INVOICE" -> FinancialDocument.Invoice.restore(reference.id, reference.version, lines)
+                else -> error("Unsupported financial document stage")
+            }
+        return FinancialDocumentVersion.from(document, createdAt.toInstant())
     }
-
-    override fun retrieveLatestVersion(
-        transaction: Transaction,
-        id: UUID,
-    ): FinancialDocument? {
-        val number =
-            transaction.handle
-                .createQuery("SELECT max(version) FROM commerce.financial_document_snapshots WHERE document_id = :id")
-                .bind("id", id)
-                .map { rows, _ -> rows.getObject(1, Integer::class.java)?.toInt() }
-                .one() ?: return null
-        return retrieveVersion(transaction, FinancialDocumentReference(id, Version.of(number)))
-    }
-
-    override fun history(
-        transaction: Transaction,
-        id: UUID,
-    ): List<FinancialDocument> =
-        transaction.handle
-            .createQuery("SELECT version FROM commerce.financial_document_snapshots WHERE document_id = :id ORDER BY version")
-            .bind("id", id)
-            .map { rows, _ -> Version.of(rows.getInt(1)) }
-            .list()
-            .map { version -> checkNotNull(retrieveVersion(transaction, FinancialDocumentReference(id, version))) }
 
     private fun line(rows: ResultSet): LineItem {
         val currency = Currency.getInstance(rows.getString("price_currency").trim())

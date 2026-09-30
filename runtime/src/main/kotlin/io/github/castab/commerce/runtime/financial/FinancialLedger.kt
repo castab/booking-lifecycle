@@ -14,8 +14,8 @@ import io.github.castab.commerce.payment.RefundAllocation
 import io.github.castab.commerce.payment.RefundRecord
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
-import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
-import io.github.castab.commerce.runtime.persistence.PaymentRepository
+import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository
+import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
@@ -32,8 +32,8 @@ import java.util.UUID
  */
 class FinancialLedger internal constructor(
     private val transactor: Transactor,
-    private val documents: FinancialDocumentRepository,
-    private val payments: PaymentRepository,
+    private val documents: PostgresFinancialDocumentRepository,
+    private val payments: PostgresPaymentRepository,
 ) {
     /** Stores an application-created first snapshot in the caller's transaction. */
     fun create(
@@ -82,6 +82,38 @@ class FinancialLedger internal constructor(
         id: UUID,
     ): List<FinancialDocument> =
         documents.history(transaction, id).ifEmpty { throw CommerceFailure.NotFound("Financial document $id was not found") }
+
+    /** Reads an exact persisted version with its database-assigned creation instant. */
+    fun version(reference: FinancialDocumentReference): FinancialDocumentVersion = transactor.inTransaction { version(it, reference) }
+
+    /** Reads an exact persisted version in the caller's transaction. */
+    fun version(
+        transaction: Transaction,
+        reference: FinancialDocumentReference,
+    ): FinancialDocumentVersion =
+        documents.version(transaction, reference)
+            ?: throw CommerceFailure.NotFound("Financial document $reference was not found")
+
+    /** Reads the latest persisted version with its database-assigned creation instant. */
+    fun latestVersion(id: UUID): FinancialDocumentVersion = transactor.inTransaction { latestVersion(it, id) }
+
+    /** Reads the latest version in the caller's transaction. */
+    fun latestVersion(
+        transaction: Transaction,
+        id: UUID,
+    ): FinancialDocumentVersion =
+        documents.latestVersion(transaction, id)
+            ?: throw CommerceFailure.NotFound("Financial document $id was not found")
+
+    /** Reads all persisted versions and creation instants in ascending version order. */
+    fun versionHistory(id: UUID): List<FinancialDocumentVersion> = transactor.inTransaction { versionHistory(it, id) }
+
+    /** Reads version history in the caller's transaction. */
+    fun versionHistory(
+        transaction: Transaction,
+        id: UUID,
+    ): List<FinancialDocumentVersion> =
+        documents.versionHistory(transaction, id).ifEmpty { throw CommerceFailure.NotFound("Financial document $id was not found") }
 
     /** Applies the domain change order and appends its same-stage successor. */
     fun changeOrder(
@@ -375,6 +407,31 @@ class FinancialLedger internal constructor(
             }.sortedWith(compareBy<PaymentRecord> { it.receivedAt }.thenBy { it.id })
             .map { historyOf(transaction, it) }
     }
+
+    /**
+     * Discovers every payment with kept funds not currently applied to a document, in
+     * [PaymentRecord.receivedAt] then [PaymentRecord.id] order. The derived
+     * [PaymentHistory.reconciliation]'s `unallocated` amount is the available value:
+     * payment amount minus refunds and effective allocations. Fully and partly unapplied
+     * payments are included; a fully allocated or fully refunded payment is excluded.
+     * The complete history and original payment metadata accompany each result.
+     *
+     * This convenience read uses one `REPEATABLE_READ` snapshot without row locks. Inside
+     * an application-owned transaction, use the [Transaction] overload and choose
+     * `REPEATABLE_READ` at its outer boundary for a coherent concurrent read.
+     */
+    fun unappliedPayments(): List<PaymentHistory> = transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { unappliedPayments(it) }
+
+    /** Discovers payments with unapplied value in the caller's transaction. */
+    fun unappliedPayments(transaction: Transaction): List<PaymentHistory> =
+        payments
+            .payments(transaction)
+            .sortedWith(compareBy<PaymentRecord> { it.receivedAt }.thenBy { it.id })
+            .map { historyOf(transaction, it) }
+            .filter {
+                it.reconciliation.unallocated.amount
+                    .signum() > 0
+            }
 
     private fun historyOf(
         transaction: Transaction,

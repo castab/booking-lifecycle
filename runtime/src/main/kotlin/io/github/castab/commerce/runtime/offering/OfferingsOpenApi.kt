@@ -1,8 +1,11 @@
 package io.github.castab.commerce.runtime.offering
 
+import io.github.castab.commerce.runtime.http.ValidationErrorResponse
+import io.github.castab.commerce.runtime.http.ValidationViolationResponse
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import org.http4k.contract.jsonschema.JsonSchema
 import org.http4k.contract.jsonschema.JsonSchemaCreator
@@ -32,14 +35,20 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         // null predecessor, and an empty catalog are filled in. This copy is only a
         // schema input; the route's original object remains the HTTP example.
         val schema = delegate.toSchema(obj.withCompletePriceShape(), overrideDefinitionId, refModelNamePrefix)
-        if ("OfferingPriceDto" !in schema.definitions) return schema
+        if ("OfferingPriceDto" !in schema.definitions) {
+            return schema.copy(
+                node = schema.node.withoutNullSchemaFormats(),
+                definitions = schema.definitions.mapValues { (_, node) -> node.withoutNullSchemaFormats() },
+            )
+        }
         return schema.copy(
+            node = schema.node.withoutNullSchemaFormats(),
             definitions =
                 schema.definitions.mapValues { (name, node) ->
                     if (name in priceCarrierNames) {
-                        node.withoutSchemaOnlyExamples()
+                        node.withoutSchemaOnlyExamples().withoutNullSchemaFormats()
                     } else {
-                        node
+                        node.withoutNullSchemaFormats()
                     }
                 } +
                     mapOf(
@@ -114,6 +123,34 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
             }
         return json.parse(strip(Json.parseToJsonElement(json.compact(this))).toString())
     }
+
+    /** Only schema positions are traversed; example, default, const, and extension data stay intact. */
+    private fun NODE.withoutNullSchemaFormats(): NODE {
+        fun cleanSchema(element: JsonElement): JsonElement {
+            if (element !is JsonObject) return element
+
+            fun schemaMap(value: JsonElement): JsonElement =
+                if (value is JsonObject) JsonObject(value.mapValues { cleanSchema(it.value) }) else value
+
+            fun schemaArray(value: JsonElement): JsonElement = if (value is JsonArray) JsonArray(value.map(::cleanSchema)) else value
+
+            return JsonObject(
+                element
+                    .filter { (key, value) -> key != "format" || value != JsonNull }
+                    .mapValues { (key, value) ->
+                        when (key) {
+                            "properties", "patternProperties", "definitions", "\$defs", "dependentSchemas" -> schemaMap(value)
+                            "allOf", "anyOf", "oneOf", "prefixItems" -> schemaArray(value)
+                            "items" -> if (value is JsonArray) schemaArray(value) else cleanSchema(value)
+                            "additionalProperties", "unevaluatedProperties", "contains", "not", "if", "then", "else", "propertyNames" ->
+                                cleanSchema(value)
+                            else -> value
+                        }
+                    },
+            )
+        }
+        return json.parse(cleanSchema(Json.parseToJsonElement(json.compact(this))).toString())
+    }
 }
 
 private val priceCarrierNames =
@@ -124,6 +161,7 @@ private fun Any.withCompletePriceShape(): Any {
 
     fun OfferingDto.complete() = copy(price = price?.complete())
     return when (this) {
+        is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
         is OfferingResultDto -> copy(offering = offering.complete())

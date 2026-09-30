@@ -17,6 +17,7 @@ import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
+import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
@@ -31,6 +32,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.shouldBe
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -52,11 +54,17 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.with
 import org.http4k.format.Jackson
 import java.math.BigDecimal
 import java.time.Duration
 import java.util.Currency
 import java.util.UUID
+
+@Serializable
+data class HostExampleDto(
+    val payload: JsonObject,
+)
 
 class OfferingsCapabilitySpec :
     FunSpec({
@@ -121,6 +129,8 @@ class OfferingsCapabilitySpec :
                                     supplied,
                                     OfferingsHttpBinding(catalogA, "/catalog-ro", "catalogRo", OfferingsHttpAccess.ReadOnly),
                                 )
+                            val hostExample = HostExampleDto(JsonObject(mapOf("format" to JsonNull)))
+                            val hostExampleBody = jsonBody(HostExampleDto.serializer())
                             val host =
                                 contract {
                                     renderer = OpenApi3(ApiInfo("Host API", "1"), Jackson, apiRenderer = offeringsOpenApiRenderer(Jackson))
@@ -131,8 +141,8 @@ class OfferingsCapabilitySpec :
                                     routes += readOnly.contractRoutes
                                     routes += "/host" meta {
                                         operationId = "hostPing"
-                                        returning(Status.OK)
-                                    } bindContract Method.GET to { _: Request -> Response(Status.OK) }
+                                        returning(Status.OK, hostExampleBody to hostExample)
+                                    } bindContract Method.GET to { _: Request -> Response(Status.OK).with(hostExampleBody of hostExample) }
                                 }
                             listOf(host)
                         },
@@ -500,7 +510,35 @@ class OfferingsCapabilitySpec :
 
         test("OpenAPI price union and every request and response reference match runtime validation") {
             val document = request(Method.GET, "/openapi.json").json()
+
+            fun assertNoNullSchemaFormats(
+                element: JsonElement,
+                path: String = "root",
+            ) {
+                when (element) {
+                    is JsonObject -> {
+                        check(element["format"] != JsonNull) { "format: null at $path" }
+                        element.forEach { (key, value) ->
+                            if (key !in setOf("example", "examples", "default", "const", "enum")) {
+                                assertNoNullSchemaFormats(value, "$path.$key")
+                            }
+                        }
+                    }
+                    is JsonArray -> element.forEachIndexed { index, value -> assertNoNullSchemaFormats(value, "$path[$index]") }
+                    else -> Unit
+                }
+            }
+            assertNoNullSchemaFormats(document)
             val schemas = document["components"]!!.jsonObject["schemas"]!!.jsonObject
+            schemas["ErrorResponse"]!!.jsonObject["properties"]!!.jsonObject.containsKey("violations") shouldBe false
+            schemas["ValidationErrorResponse"]!!.jsonObject["properties"]!!.jsonObject.containsKey("violations") shouldBe true
+            val errorRequired =
+                schemas["ValidationErrorResponse"]!!
+                    .jsonObject["required"]
+                    ?.jsonArray
+                    ?.map { it.jsonPrimitive.content }
+                    .orEmpty()
+            errorRequired.contains("violations") shouldBe false
             val price = schemas["OfferingPriceDto"]!!.jsonObject
             val refs = price["oneOf"]!!.jsonArray.map { it.jsonObject["\$ref"]!!.jsonPrimitive.content }
             refs.shouldContainExactly(
@@ -612,6 +650,8 @@ class OfferingsCapabilitySpec :
                     .jsonObject["application/json"]!!
                     .jsonObject["example"]!!
                     .jsonObject
+
+            responseExample("/host", "get", "200")["payload"]!!.jsonObject["format"] shouldBe JsonNull
 
             val initialized = responseExample("/catalog-a", "post", "201")
             initialized["catalogId"]!!.jsonPrimitive.content shouldBe catalogA.value.toString()

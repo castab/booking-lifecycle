@@ -1,5 +1,9 @@
 package io.github.castab.commerce.runtime.http
 
+import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingsViolation
+import io.github.castab.commerce.offering.StructuralOfferingsViolation
+import io.github.castab.commerce.runtime.offering.offeringsValidationFailed
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
 import io.kotest.assertions.throwables.shouldThrow
@@ -107,5 +111,27 @@ class ErrorHandlingSpec :
             shouldThrow<CommerceFailure.ValidationFailed> {
                 validating { require(false) { "Line item quantity must be positive" } }
             }.message shouldBe "Line item quantity must be positive"
+        }
+
+        test("offering violation codes survive mapping and HTTP while other errors retain two fields") {
+            val violations =
+                listOf<OfferingsViolation>(
+                    StructuralOfferingsViolation.TooManySelections(OfferingCategoryKey("service"), 1, 2),
+                    object : OfferingsViolation {
+                        override val code = "UNSUPPORTED_CURRENCY"
+                    },
+                )
+            val failure = offeringsValidationFailed("Selection cannot be priced", violations)
+            failure.violations.map { it.code } shouldBe listOf("TOO_MANY_SELECTIONS", "UNSUPPORTED_CURRENCY")
+            val response = failing(failure)(Request(Method.POST, "/pricing"))
+            response.status shouldBe Status.UNPROCESSABLE_ENTITY
+            CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()) shouldBe
+                ValidationErrorResponse(
+                    "validation_failed",
+                    "Selection cannot be priced",
+                    listOf(ValidationViolationResponse("TOO_MANY_SELECTIONS"), ValidationViolationResponse("UNSUPPORTED_CURRENCY")),
+                )
+            val plain = failing(CommerceFailure.NotFound("Missing"))(Request(Method.GET, "/missing"))
+            plain.bodyString() shouldNotContain "violations"
         }
     })

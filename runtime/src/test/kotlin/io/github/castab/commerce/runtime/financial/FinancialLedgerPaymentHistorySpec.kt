@@ -136,6 +136,36 @@ class FinancialLedgerPaymentHistorySpec :
                 },
             )
 
+        test("unapplied discovery includes full and partial payments in deterministic order and follows refunds") {
+            val document = invoice()
+            val sameTime = at(50)
+            val untouched = payment("100.00", sameTime)
+            val partial = payment("200.00", sameTime)
+            val fullyAllocated = payment("300.00", sameTime)
+            val refunded = payment("400.00", sameTime)
+            allocate(partial, document, "75.00")
+            allocate(fullyAllocated, document, "300.00")
+            val refundedAllocation = allocate(refunded, document, "400.00")
+
+            val selected = setOf(untouched.id, partial.id, fullyAllocated.id, refunded.id)
+
+            fun discovered() = ledger.unappliedPayments().filter { it.payment.id in selected }
+
+            discovered().map { it.payment.id } shouldBe
+                listOf(untouched.id, partial.id).sorted()
+            discovered().first { it.payment.id == untouched.id }.reconciliation.unallocated shouldBeNumerically "100.00"
+            discovered().first { it.payment.id == partial.id }.reconciliation.unallocated shouldBeNumerically "125.00"
+
+            refund(refunded, "100.00", at(51), refundedAllocation.id to "100.00")
+            refund(partial, "25.00", at(52))
+            val after = discovered()
+            after.map { it.payment.id } shouldBe listOf(untouched.id, partial.id).sorted()
+            after.first { it.payment.id == partial.id }.reconciliation.unallocated shouldBeNumerically "100.00"
+            after.first { it.payment.id == partial.id }.payment shouldBe partial
+            after.first { it.payment.id == partial.id }.allocations.size shouldBe 1
+            after.first { it.payment.id == partial.id }.refunds.size shouldBe 1
+        }
+
         context("a payment by id") {
             test("an unallocated payment has no other facts and is entirely unapplied") {
                 val payment = payment()

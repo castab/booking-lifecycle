@@ -103,6 +103,16 @@ interface PaymentRepository {
 internal class PostgresPaymentRepository(
     private val documents: FinancialDocumentRepository,
 ) : PaymentRepository {
+    /** Includes payments never allocated, for the ledger's derived-value discovery. */
+    fun payments(transaction: Transaction): List<PaymentRecord> =
+        transaction.handle
+            .createQuery(
+                """SELECT payment_id, amount, currency, method, received_at_seconds, received_at_nanos,
+                          external_provider, external_reference FROM commerce.payment_records
+                   ORDER BY received_at_seconds, received_at_nanos, payment_id""",
+            ).map { rows, _ -> payment(rows) }
+            .list()
+
     override fun insertPayment(
         transaction: Transaction,
         payment: PaymentRecord,
