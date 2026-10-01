@@ -16,6 +16,7 @@
   <!-- Session lifecycle events; SessionManagerSpec asserts they never contain a token. -->
   <logger name="io.github.castab.commerce.runtime.session" level="INFO" />
 
-  <!-- Service authentication events; ServiceAccessTokensSpec asserts they never contain a secret or token. -->
-  <logger name="io.github.castab.commerce.runtime.serviceauth" level="INFO" />
+  <!-- Service authentication events at DEBUG, so ServiceAccessTokensSpec can assert each event's level
+       and that no event contains a secret or token. -->
+  <logger name="io.github.castab.commerce.runtime.serviceauth" level="DEBUG" />
 </configuration>

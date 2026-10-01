@@ -304,7 +304,7 @@ database {
 | `sessions.lifetimeMinutes` | `SESSIONS_LIFETIME_MINUTES` | `720` (12 hours) |
 | `serviceTokens.signingKey` | `SERVICE_TOKENS_SIGNING_KEY` | none; enables service access tokens |
 | `serviceTokens.lifetimeMinutes` | `SERVICE_TOKENS_LIFETIME_MINUTES` | `15` |
-| `serviceTokens.issuer` | `SERVICE_TOKENS_ISSUER` | `commerce-runtime` |
+| `serviceTokens.issuer` | `SERVICE_TOKENS_ISSUER` | none; required when service tokens are configured |
 
 `sessions.lifetimeMinutes` is the fixed lifetime of every session, between 1 minute and 1
 year; see [Sessions and authorization](#sessions-and-authorization). It is the only session
@@ -315,14 +315,33 @@ it exists when the file declares a `serviceTokens` block or the environment supp
 `SERVICE_TOKENS_SIGNING_KEY`. The signing key is base64 (standard or URL-safe) of at least
 32 random bytes, for example `openssl rand -base64 32`. It has no default and the runtime
 never generates one; every instance of a deployment shares it, so tokens survive restarts
-and are accepted by every instance. The lifetime is between 1 and 60 minutes. A lifetime or
-issuer variable without a signing key is rejected rather than ignored. Without
-`serviceTokens`, service credentials can still be administered, but an application that
-composes the token endpoint or token authentication fails at startup. The signing key is
-redacted from the configuration's `toString`.
+and are accepted by every instance. The lifetime is between 1 and 60 minutes.
 
-Invalid values fail with a message naming the variable. Secrets come only from the
-environment. The database password is redacted from the configuration's `toString`.
+The issuer is **required** once service tokens are configured, and has no default. It names
+the deployment, not the library: for example `orders-production` and `orders-staging`. It
+is both the `iss` and the `aud` of every token, so a token issued by one deployment is
+rejected by another even if the two share a signing key by mistake. Give every deployment
+its own key *and* its own issuer; the naming scheme is the deployment's. Leading or
+trailing whitespace is rejected.
+
+| Configuration | Result |
+|---|---|
+| No `serviceTokens` block and no `SERVICE_TOKENS_SIGNING_KEY` | Service tokens disabled; no issuer needed |
+| Signing key (file or environment) without an issuer | Fails: `SERVICE_TOKENS_ISSUER is required when service tokens are configured` |
+| `SERVICE_TOKENS_ISSUER` or `SERVICE_TOKENS_LIFETIME_MINUTES` without a signing key | Fails rather than being ignored |
+| Signing key and explicit issuer | Valid |
+
+A file that declares a `serviceTokens` block declares both `signingKey` and `issuer`
+(empty placeholders are fine when the environment fills them), like the `database` block.
+Without `serviceTokens`, service credentials can still be administered, but an application
+that composes the token endpoint or token authentication fails at startup. The signing key
+is redacted from the configuration's `toString`.
+
+Invalid values fail with a message naming the variable. `load()` validates, and
+`commerceRuntime(...)` validates again before it opens the connection pool or anything
+else, so a configuration constructed in Kotlin is held to exactly the same rules. Secrets
+come only from the environment. The database password is redacted from the
+configuration's `toString`.
 
 ### Database and migrations
 
@@ -1400,17 +1419,31 @@ tokens of that type are accepted (never `alg: none` or another algorithm), every
 required, issuer, audience, and kind must match exactly, and expiry is judged by the
 runtime's clock with no skew. Clients treat tokens as opaque.
 
-**Revocation semantics.**
+**Revocation and suspension semantics.**
 
-| Change | Effect on an already issued token |
-|---|---|
-| A role or grant is removed | The next request is authorized against the current roles. |
-| The service is disabled | The token stops authenticating on the next request. |
-| The credential that obtained it is revoked | No new tokens; this token stays valid until it expires (at most `serviceTokens.lifetimeMinutes`). |
+| Change | Credentials | Already issued, unexpired tokens |
+|---|---|---|
+| A role or grant is removed | Unaffected | The next request is authorized against the current roles. |
+| A credential is revoked | That credential can never obtain a token again (permanent) | Stay valid until they expire (at most `serviceTokens.lifetimeMinutes`) |
+| The service is **disabled** | None can obtain a token; none is revoked | Stop authenticating on the next request; none is revoked |
+| The service is **activated again** | Every unrevoked credential works again; revoked ones stay revoked | Every token that has not yet expired authenticates again |
 
-Tokens are not stored, so there is no per-token revocation or deny-list. Like any bearer
-credential, a token can be replayed by whoever holds it until it expires: send it only over
-TLS and never log it.
+`DISABLED` **suspends** a service; it does not revoke anything. (A service's *sessions* are
+the exception: disabling a principal revokes them, as for users.) Access-token revocation
+therefore rests on two things only: the short token lifetime and suspension. Tokens are not
+stored, so there is no per-token revocation or deny-list.
+
+If a service's credentials may be compromised, suspension alone is not enough, because
+reactivating it would revive any token the attacker obtained. Instead:
+
+1. disable the service, so no credential or token of it works;
+2. revoke the compromised credentials and create replacements;
+3. keep the service disabled until `serviceTokens.lifetimeMinutes` has passed since the
+   last moment a compromised credential could have obtained a token;
+4. activate the service again.
+
+Like any bearer credential, a token can be replayed by whoever holds it until it expires:
+send it only over TLS and never log it.
 
 **HTTP.** The application mounts the endpoints and chooses the mechanisms each route
 accepts:
@@ -1450,10 +1483,23 @@ lets its holder authenticate as any service, so it is separate from
 HTTP bearer scheme `serviceAccessToken`; the token route is marked public. It does not
 enforce anything: `AccessControl` does.
 
-The runtime has no rate limiter. Each token request costs one Argon2id verification, so
-deployments rate-limit the token endpoint at their edge. Authentication failures are logged
-with a reason (`unknown_credential`, `secret_mismatch`, `credential_revoked`,
-`service_disabled`, ...) and the service and credential IDs, never the secret or token.
+**Protecting the token endpoint.** The token endpoint is public by design, and every
+syntactically valid attempt costs one memory-hard Argon2id verification (about 19 MiB),
+including attempts for credentials that do not exist, which are checked against a dummy
+hash so timing does not reveal which credentials exist. The runtime has no request rate
+limiter. Production deployments must treat the endpoint as sensitive and, depending on
+their topology, do one or both of:
+
+- rate-limit it at the edge or reverse proxy;
+- expose it only on a private or internal network that its service consumers can reach,
+  rather than to the public internet.
+
+**Logging.** Credential creation and revocation and token issuance are logged at INFO.
+Authentication failures are DEBUG diagnostics only, with a reason (`unknown_credential`,
+`secret_mismatch`, `credential_revoked`, `service_disabled`, ...) and the service and
+credential IDs: an anonymous caller cannot drive an INFO log stream, and failures are not an
+audit trail. No log ever contains a credential secret or verifier, an access token, or the
+signing key.
 
 ### Logging
 
@@ -1643,14 +1689,23 @@ hash-only storage (checked in SQL), several active credentials with independent 
 that users can hold no credential (API and schema), one uniform failure for every bad
 attempt, disabled services, identity-only claims, expiry at the exact boundary, and the
 rejection of modified, wrong-key, other-algorithm, unsigned, wrong-type, wrong-issuer,
-wrong-audience, wrong-kind, and incomplete tokens, plus secret- and token-free logs.
+wrong-audience, wrong-kind, and incomplete tokens, plus secret- and token-free logs with
+failures at DEBUG and administrative events at INFO. Its suspension tests pin that a
+disabled-then-reactivated service gets back its unexpired tokens and unrevoked credentials,
+while a credential revoked during the suspension stays revoked and a token that expired
+during it stays expired. The signer is shown to apply exactly the configuration's
+validation policy.
 `ServiceAuthenticationHttpSpec` composes the runtime with sessions and service tokens on the
 same routes and proves that a token grants nothing by itself: the same unexpired token is
-`403`, then `200` after a role grant, `403` after its removal, and `401` once the service is
-disabled. It also covers the token endpoint's `401`/`400` behavior, cookie login,
+`403`, then `200` after a role grant, `403` after its removal, `401` once the service is
+disabled, and `200` again once it is reactivated. It also covers the token endpoint's `401`/`400` behavior, cookie login,
 permission enforcement, and logout beside service tokens, credential administration
 permissions and rotation, startup failure without a signing key, and the OpenAPI bearer
-scheme.
+scheme. `CommerceRuntimeStartupSpec` proves that `commerceRuntime(...)` rejects an invalid
+configuration constructed in Kotlin (repeated-byte, short, or non-base64 keys, blank or
+padded issuers, out-of-range lifetimes, and general settings) before it touches the
+database, and `CommerceRuntimeConfigurationSpec` covers the required issuer in every
+file and environment combination.
 
 Database specs run against a real PostgreSQL 18 that the build starts through the Docker CLI.
 See [Building and testing](../README.md#building-and-testing).

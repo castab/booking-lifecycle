@@ -279,6 +279,9 @@ frameworks. The runtime rules are:
   `CommerceJson`.
 - Configuration is HOCON through Hoplite plus explicit, documented environment overrides.
   The application supplies the file; the runtime ships none. Never commit secrets.
+  `CommerceRuntimeConfiguration.validate()` is the one validation policy: `load()` calls it
+  and `commerceRuntime(...)` calls it again before opening any resource, so whatever
+  `commerceRuntime` accepts satisfies it, however the configuration was created.
 - Composition is explicit in `commerceRuntime(...)`. No DI framework, no annotation
   scanning. It composes the commerce capabilities with the caller's explicit
   `ApplicationContributions`.
@@ -480,13 +483,30 @@ authentication; authorization still comes only from the service's current roles.
   Every resolution checks that the service exists and is ACTIVE.
 - **Revocation.** Tokens are not stored and are not individually revocable: a token stays
   valid until it expires even after its credential is revoked. The lifetime
-  (`serviceTokens.lifetimeMinutes`, default 15, at most 60) bounds that window. Disabling
-  the service and removing roles or grants take effect on the next request. Do not add a
-  deny-list, refresh tokens, or token persistence without a consumer that needs them.
-- **Configuration.** `serviceTokens` is optional. Its `signingKey`
-  (`SERVICE_TOKENS_SIGNING_KEY`, base64 of at least 32 bytes) has no default and no
-  generated fallback, and `CommerceRuntimeContext.serviceAccessTokens` fails at composition
-  when it is missing. Credentials can be administered without it.
+  (`serviceTokens.lifetimeMinutes`, default 15, at most 60) bounds that window. Removing
+  roles or grants takes effect on the next request. Credential revocation is permanent.
+  Do not add a deny-list, token epochs, `tokensValidAfter`, refresh tokens, cascading
+  credential revocation, or token persistence without a consumer that needs them.
+- **`DISABLED` is suspension, not revocation.** While a service is disabled its credentials
+  cannot obtain tokens and its unexpired tokens do not authenticate; nothing is revoked.
+  Activating it again restores every unrevoked credential and every token that has not
+  expired. (Its sessions, unlike its tokens, are revoked on disable.) This is a deliberate,
+  tested contract (`ServiceAccessTokensSpec` "service suspension is not revocation"); do
+  not change it incidentally, and never document disabling as revoking issued tokens.
+  After a suspected compromise the documented procedure is: disable, revoke the
+  credentials, wait one token lifetime, then reactivate.
+- **Configuration.** `serviceTokens` is optional. When it is configured, its `signingKey`
+  (`SERVICE_TOKENS_SIGNING_KEY`, base64 of at least 32 non-repeating bytes) and its
+  `issuer` (`SERVICE_TOKENS_ISSUER`) are both required: neither has a default, and the key
+  has no generated fallback. The issuer identifies the deployment (never the library),
+  so a signing key reused across environments still cannot carry tokens between them; do
+  not reintroduce a generic default issuer. `ServiceTokens.validatedSigningKey()` is the
+  single validation policy, used by `CommerceRuntimeConfiguration.validate()` and by the
+  token signer; do not duplicate or diverge from it. `commerceRuntime(...)` calls
+  `validate()` before opening any resource, so a configuration constructed in Kotlin is
+  held to the same rules as `load()`. `CommerceRuntimeContext.serviceAccessTokens` fails at
+  composition when service tokens are not configured. Credentials can be administered
+  without them.
 - **HTTP.** `serviceAuthenticationHttpCapability(context, path)` mounts the public token
   endpoint: `401` with one message for every authentication failure, `400` for malformed
   input, `Cache-Control: no-store`. The administration capability mounts
@@ -495,8 +515,15 @@ authentication; authorization still comes only from the service's current roles.
   are not a domain concept). That permission lets its holder authenticate as any service,
   so never fold it into `PrincipalManage`. `serviceAccessTokenOpenApiSecurity` declares the
   HTTP bearer scheme in a host's OpenAPI; it is documentation only and enforces nothing.
-- The runtime has no rate limiter; deployments limit the token endpoint at their edge. Do
-  not add API keys for external clients, mTLS, OAuth flows, or service impersonation of
+- **The token endpoint is sensitive.** Each syntactically valid attempt costs a memory-hard
+  Argon2id verification (also for unknown credentials, through the dummy hash; keep that).
+  The runtime has no general rate-limiting facility, and a one-off limiter for this
+  endpoint would be clutter: do not add one. Documentation tells deployments to rate-limit
+  it at the edge or reverse proxy and/or expose it only on a private network.
+- **Logging.** Per-attempt authentication failures are DEBUG diagnostics, never INFO, so an
+  anonymous caller cannot drive an INFO log stream. Credential creation and revocation and
+  token issuance stay INFO. Never log a secret, verifier, access token, or signing key.
+- Do not add API keys for external clients, mTLS, OAuth flows, or service impersonation of
   users here.
 
 ## Kotlin style
@@ -602,7 +629,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/session/` | `SessionTokenSpec` (token generation, format, redaction, digest, activity), `SessionManagerSpec` (lifecycle on PostgreSQL with a hand-driven clock), and `SessionAuthenticationSpec` (401/403 behavior, current permissions, cookies). `testing/Sessions.kt` holds the test clock and output capture. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/authorization/` | PostgreSQL schema, live resolver, cross-schema transaction, session revocation, HTTP permission, and OpenAPI tests. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/serviceauth/` | `ServiceCredentialSecretSpec` (secret format and Argon2id hash), `ServiceAccessTokensSpec` (credential lifecycle and token verification on PostgreSQL with a hand-driven clock), and `ServiceAuthenticationHttpSpec` (token endpoint, live authorization of service tokens, sessions alongside, credential administration, OpenAPI). `testing/ServiceTokens.kt` holds deterministic test signing material. |
-| `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and a variant without the database block), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
+| `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and variants without the database block and with `serviceTokens` blocks lacking an issuer or holding empty placeholders), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
 | `.github/workflows/publish.yml` | Publish both artifacts to GitHub Packages when a GitHub Release is published. |
 | `README.md`, `domain/README.md`, `runtime/README.md`, `AGENTS.md` | Documentation. Keep all of them in sync with the code. |
@@ -1640,11 +1667,19 @@ dependency just to support CI or publishing.
   uniform authentication failure, disabled services, exact claims with no authority,
   expiry at the boundary, and rejection of modified, wrong-key, other-algorithm,
   unsigned, wrong-type, wrong-issuer, wrong-audience, wrong-kind, and claim-missing tokens,
-  plus secret- and token-free logs. `ServiceAuthenticationHttpSpec` keeps the architectural
+  plus secret- and token-free logs with authentication failures at DEBUG (the test logging
+  configuration enables DEBUG for `serviceauth` so levels can be asserted). Its "service
+  suspension is not revocation" tests keep the disable/reactivate contract: tokens and
+  unrevoked credentials return on reactivation, revoked credentials and expired tokens do
+  not. `ServiceAuthenticationHttpSpec` keeps the architectural
   test: a service's unexpired token is forbidden, then allowed after a role grant, then
-  forbidden after its removal, then unauthenticated after the service is disabled. It also
+  forbidden after its removal, then unauthenticated after the service is disabled, then
+  accepted again after reactivation. It also
   keeps cookie login, permission enforcement, and logout working beside service tokens,
   credential administration permissions, rotation, and the OpenAPI security scheme.
+  `CommerceRuntimeStartupSpec` keeps the proof that `commerceRuntime(...)` validates a
+  directly constructed configuration before opening the pool, and
+  `CommerceRuntimeConfigurationSpec` the required-issuer combinations.
 
 Run:
 

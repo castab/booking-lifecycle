@@ -285,10 +285,17 @@ class ServiceAccessTokensSpec :
                         token = issue(service).token.value
                     }
 
-                output shouldContain "event=service_authentication_failed service=${service.value}"
-                output shouldContain "reason=secret_mismatch"
-                output shouldContain "reason=credential_revoked"
-                output shouldContain "event=service_access_token_issued"
+                val lines = output.lines()
+                val failures = lines.filter { "event=service_authentication_failed service=${service.value}" in it }
+                // Per-attempt failures are DEBUG diagnostics, never an INFO stream an anonymous caller can drive.
+                failures.size shouldBe 2
+                failures.forEach { it shouldContain "level=DEBUG" }
+                failures.single { "reason=secret_mismatch" in it }
+                failures.single { "reason=credential_revoked" in it }
+                lines.none { "level=INFO" in it && "service_authentication_failed" in it } shouldBe true
+                // Administrative and successful events stay at INFO.
+                lines.single { "event=service_credential_revoked" in it } shouldContain "level=INFO"
+                lines.single { "event=service_access_token_issued" in it } shouldContain "level=INFO"
                 output shouldNotContain issued.secret.value.substringAfter('.')
                 output shouldNotContain token
                 output shouldNotContain token.substringAfterLast('.')
@@ -392,15 +399,18 @@ class ServiceAccessTokensSpec :
                 tokens.resolve(token) shouldBe service
             }
 
-            test("an unvalidated configuration still cannot weaken the key or lengthen the lifetime") {
-                fun tokens(configuration: io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.ServiceTokens) =
-                    SignedServiceAccessTokens(configuration, credentials, transactor, principals, clock)
+            test("the signer applies the same validation policy as the configuration") {
+                fun rejected(configuration: io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration.ServiceTokens) =
+                    shouldThrow<IllegalArgumentException> {
+                        SignedServiceAccessTokens(configuration, credentials, transactor, principals, clock)
+                    }.message shouldBe shouldThrow<IllegalArgumentException> { configuration.validatedSigningKey() }.message
 
-                shouldThrow<IllegalArgumentException> { tokens(testServiceTokens(lifetimeMinutes = 61)) }
-                shouldThrow<IllegalArgumentException> { tokens(testServiceTokens(issuer = " ")) }
-                shouldThrow<IllegalArgumentException> {
-                    tokens(testServiceTokens().copy(signingKey = Base64.getEncoder().encodeToString(ByteArray(16) { it.toByte() })))
-                }
+                rejected(testServiceTokens(lifetimeMinutes = 61))
+                rejected(testServiceTokens(lifetimeMinutes = 0))
+                rejected(testServiceTokens(issuer = ""))
+                rejected(testServiceTokens(issuer = " production "))
+                rejected(testServiceTokens().copy(signingKey = Base64.getEncoder().encodeToString(ByteArray(16) { it.toByte() })))
+                rejected(testServiceTokens().copy(signingKey = Base64.getEncoder().encodeToString(ByteArray(32) { 9 })))
             }
 
             test("a runtime configured with another issuer rejects this runtime's tokens even with the same key") {
@@ -411,6 +421,60 @@ class ServiceAccessTokensSpec :
 
                 elsewhere.resolve(token).shouldBeNull()
                 tokens.resolve(token) shouldBe service
+            }
+        }
+
+        // DISABLED suspends a service; it revokes nothing. These tests pin that contract, which
+        // differs from credential revocation and from sessions (revoked when a principal is disabled).
+        context("service suspension is not revocation") {
+            test("reactivation restores an unexpired token issued before the suspension") {
+                val service = persistedService()
+                val token = issue(service).token
+
+                setStatus(service, PrincipalStatus.DISABLED)
+                tokens.resolve(token).shouldBeNull()
+
+                setStatus(service, PrincipalStatus.ACTIVE)
+                tokens.resolve(token) shouldBe service
+            }
+
+            test("reactivation restores an unrevoked credential's ability to obtain tokens") {
+                val service = persistedService()
+                val credential = credentials.create(service, "deploy")
+
+                setStatus(service, PrincipalStatus.DISABLED)
+                tokens.issue(service, credential.secret).shouldBeNull()
+                credentials.list(service).single().active shouldBe true
+
+                setStatus(service, PrincipalStatus.ACTIVE)
+                tokens.issue(service, credential.secret).shouldNotBeNull()
+            }
+
+            test("a credential revoked during a suspension stays revoked after reactivation") {
+                val service = persistedService()
+                val revoked = credentials.create(service, "compromised")
+                val replacement = credentials.create(service, "replacement")
+
+                setStatus(service, PrincipalStatus.DISABLED)
+                credentials.revoke(service, revoked.credential.id)
+                setStatus(service, PrincipalStatus.ACTIVE)
+
+                tokens.issue(service, revoked.secret).shouldBeNull()
+                credentials.list(service).single { it.id == revoked.credential.id }.active shouldBe false
+                tokens.issue(service, replacement.secret).shouldNotBeNull()
+            }
+
+            test("a token that expires during a suspension stays expired after reactivation") {
+                val service = persistedService()
+                val token = issue(service).token
+                val start = clock.now
+
+                setStatus(service, PrincipalStatus.DISABLED)
+                clock.advance(Duration.ofMinutes(15))
+                setStatus(service, PrincipalStatus.ACTIVE)
+
+                tokens.resolve(token).shouldBeNull()
+                clock.now = start
             }
         }
     })

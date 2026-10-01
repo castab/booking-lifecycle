@@ -158,7 +158,12 @@ class CommerceRuntime internal constructor(
 /**
  * Composes the commerce runtime for a concrete application.
  *
- * Composition begins with the migration phase ([MigrationLifecycle]), before anything else
+ * Composition first validates [configuration] ([CommerceRuntimeConfiguration.validate]),
+ * before it opens the connection pool or any other resource, whether the configuration was
+ * loaded or constructed in code. An invalid configuration fails with
+ * [IllegalArgumentException] naming the setting.
+ *
+ * It then runs the migration phase ([MigrationLifecycle]), before anything else
  * is built. With `migrations.onStartup = MIGRATE`, the runtime migrations and then the
  * application migrations are applied. With `VALIDATE`, the default, they are expected to
  * have been applied by a separate migration step, and the phase only validates that both
@@ -180,6 +185,7 @@ fun commerceRuntime(
     configuration: CommerceRuntimeConfiguration,
     application: ApplicationContributions,
 ): CommerceRuntime {
+    configuration.validate()
     val permissionCatalog = PermissionCatalog(commercePermissionDefinitions + application.permissionDefinitions)
     val dataSource = createDataSource(configuration.database)
     try {

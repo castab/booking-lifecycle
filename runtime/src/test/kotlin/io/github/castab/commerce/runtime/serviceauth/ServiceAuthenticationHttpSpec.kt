@@ -321,10 +321,14 @@ class ServiceAuthenticationHttpSpec :
                     Status.NO_CONTENT
                 request(Method.GET, "/app/bookings", bearer = token).status shouldBe Status.FORBIDDEN
 
-                // Disabling the service stops its unexpired token at once.
+                // Disabling the service suspends its unexpired token at once...
                 request(Method.PUT, "$admin/services/${service.value}/status", session = administrator, body = """{"status":"DISABLED"}""")
                     .status shouldBe Status.OK
                 request(Method.GET, "/app/me", bearer = token).status shouldBe Status.UNAUTHORIZED
+                // ...but does not revoke it: activating the service again restores the same token.
+                request(Method.PUT, "$admin/services/${service.value}/status", session = administrator, body = """{"status":"ACTIVE"}""")
+                    .status shouldBe Status.OK
+                request(Method.GET, "/app/me", bearer = token).bodyString() shouldBe service.text()
             }
 
             test("401 without valid authentication, 403 with authentication but without permission") {

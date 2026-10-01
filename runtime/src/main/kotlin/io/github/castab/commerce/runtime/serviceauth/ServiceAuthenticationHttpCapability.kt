@@ -50,8 +50,13 @@ val serviceAccessTokenOpenApiSecurity: Security = BearerAuthSecurity(Filter.NoOp
  * Responses are marked `Cache-Control: no-store`. The route is explicitly public
  * ([NoSecurity]) even in a contract that declares a default security scheme.
  *
- * The runtime has no request rate limiter. Each attempt costs one Argon2id verification, so
- * a deployment exposes this endpoint behind its own rate limiting.
+ * **This is a sensitive endpoint.** Every syntactically valid attempt costs one memory-hard
+ * Argon2id verification (about 19 MiB), including attempts for unknown credentials, which
+ * are checked against a dummy hash so timing does not reveal which credentials exist. The
+ * runtime has no request rate limiter, so a production deployment must protect this route
+ * with rate limiting at its edge or reverse proxy, restrict it to a private or internal
+ * network that only its service consumers can reach, or both. Per-attempt failures are
+ * logged only at DEBUG.
  *
  * Composition fails with [IllegalStateException] when `serviceTokens` is not configured.
  */

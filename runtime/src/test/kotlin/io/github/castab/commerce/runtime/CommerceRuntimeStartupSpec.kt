@@ -16,10 +16,12 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.types.shouldNotBeInstanceOf
 import org.flywaydb.core.api.FlywayException
 import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Status
+import java.util.Base64
 
 /**
  * Startup gating: `commerceRuntime(...)` runs the migration phase before it composes
@@ -36,6 +38,65 @@ class CommerceRuntimeStartupSpec :
                 database = configuration,
                 migrations = CommerceRuntimeConfiguration.Migrations(onStartup = onStartup),
             )
+
+        context("a configuration constructed in code is validated before any resource is opened") {
+            // Nothing listens on port 1: had composition opened the pool first, the failure
+            // would be a connection error rather than the named configuration error.
+            val unreachable = CommerceRuntimeConfiguration.Database("jdbc:postgresql://127.0.0.1:1/none", "commerce", "commerce")
+            val key = Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() })
+
+            fun rejected(configuration: CommerceRuntimeConfiguration): String? =
+                shouldThrow<IllegalArgumentException> { commerceRuntime(configuration, ApplicationContributions()) }.message
+
+            fun withTokens(tokens: CommerceRuntimeConfiguration.ServiceTokens) =
+                CommerceRuntimeConfiguration(database = unreachable, serviceTokens = tokens)
+
+            test("invalid general settings are rejected exactly as load() rejects them") {
+                rejected(CommerceRuntimeConfiguration(database = unreachable.copy(password = ""))) shouldBe "DATABASE_PASSWORD is required"
+                rejected(CommerceRuntimeConfiguration(database = unreachable, sessions = CommerceRuntimeConfiguration.Sessions(0))) shouldBe
+                    "SESSIONS_LIFETIME_MINUTES must be between 1 and 525600"
+            }
+
+            test("every service token rule applies to a directly constructed configuration") {
+                rejected(
+                    withTokens(
+                        CommerceRuntimeConfiguration.ServiceTokens(Base64.getEncoder().encodeToString(ByteArray(32) { 7 }), "orders"),
+                    ),
+                ) shouldBe
+                    "SERVICE_TOKENS_SIGNING_KEY must be random, not a repeated byte"
+                rejected(
+                    withTokens(
+                        CommerceRuntimeConfiguration.ServiceTokens(
+                            Base64.getEncoder().encodeToString(
+                                ByteArray(31) {
+                                    it.toByte()
+                                },
+                            ),
+                            "orders",
+                        ),
+                    ),
+                ) shouldBe
+                    "SERVICE_TOKENS_SIGNING_KEY must encode at least 32 bytes"
+                rejected(withTokens(CommerceRuntimeConfiguration.ServiceTokens("not base64!", "orders"))) shouldBe
+                    "SERVICE_TOKENS_SIGNING_KEY must be base64"
+                rejected(withTokens(CommerceRuntimeConfiguration.ServiceTokens(key, " production "))) shouldBe
+                    "SERVICE_TOKENS_ISSUER must not have surrounding whitespace"
+                rejected(withTokens(CommerceRuntimeConfiguration.ServiceTokens(key, ""))) shouldBe
+                    "SERVICE_TOKENS_ISSUER is required when service tokens are configured"
+                rejected(withTokens(CommerceRuntimeConfiguration.ServiceTokens(key, " "))) shouldBe
+                    "SERVICE_TOKENS_ISSUER is required when service tokens are configured"
+                listOf(0L, 61L).forEach { minutes ->
+                    rejected(withTokens(CommerceRuntimeConfiguration.ServiceTokens(key, "orders", minutes))) shouldBe
+                        "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and 60"
+                }
+            }
+
+            test("a valid configuration passes validation and only then reaches the database") {
+                shouldThrow<Exception> {
+                    commerceRuntime(withTokens(CommerceRuntimeConfiguration.ServiceTokens(key, "orders")), ApplicationContributions())
+                }.shouldNotBeInstanceOf<IllegalArgumentException>()
+            }
+        }
 
         test("a failed runtime migration stream prevents the application migrations and composition") {
             withTestDatabase { database, dataSource ->

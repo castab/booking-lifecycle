@@ -33,9 +33,11 @@ import java.util.Base64
  * | `serviceTokens.issuer` | `SERVICE_TOKENS_ISSUER` |
  *
  * [serviceTokens] is optional: it is configured when the file declares a `serviceTokens`
- * block or the environment supplies `SERVICE_TOKENS_SIGNING_KEY`. Without it, service
- * credentials can still be administered, but no service access token can be issued or
- * accepted, and an application that asks for them fails at composition.
+ * block or the environment supplies `SERVICE_TOKENS_SIGNING_KEY`. Once configured, both the
+ * signing key and the issuer are required; the file may declare either as an empty
+ * placeholder that the environment fills. Without it, service credentials can still be
+ * administered, but no service access token can be issued or accepted, and an application
+ * that asks for them fails at composition.
  */
 data class CommerceRuntimeConfiguration(
     val server: Server = Server(),
@@ -111,24 +113,48 @@ data class CommerceRuntimeConfiguration(
      * that each accepts the tokens the others issued, and stable across restarts. There is
      * no default and no generated fallback. It is unrelated to any service credential.
      *
-     * [issuer] names this deployment in the token's `iss` and `aud` claims; a token whose
-     * claims name another issuer is rejected even if it was signed with the same key.
+     * [issuer] is required and has no default. It names this deployment, for example
+     * `orders-production` or `orders-staging`, in the token's `iss` and `aud` claims; a token
+     * whose claims name another issuer is rejected even if it was signed with the same key.
+     * Give every deployment its own issuer as well as its own key, so that a key reused by
+     * mistake across environments still does not let one environment's tokens into another.
+     * The naming scheme belongs to the deployment.
      */
     data class ServiceTokens(
         val signingKey: String,
+        val issuer: String,
         val lifetimeMinutes: Long = 15,
-        val issuer: String = "commerce-runtime",
     ) {
         /** [lifetimeMinutes] as a [Duration]. */
         val lifetime: Duration get() = Duration.ofMinutes(lifetimeMinutes)
 
-        /** The decoded signing key, or `null` when [signingKey] is not base64. */
+        /**
+         * The one definition of a usable service token configuration, shared by
+         * [CommerceRuntimeConfiguration.validate] and the token signer. Fails with
+         * [IllegalArgumentException] naming the environment variable, and answers the decoded
+         * signing key.
+         */
         @JvmSynthetic
-        internal fun signingKeyBytes(): ByteArray? =
-            signingKey.trim().let { key ->
-                runCatching { Base64.getDecoder().decode(key) }.getOrNull()
-                    ?: runCatching { Base64.getUrlDecoder().decode(key) }.getOrNull()
+        internal fun validatedSigningKey(): ByteArray {
+            require(signingKey.isNotBlank()) { "SERVICE_TOKENS_SIGNING_KEY is required" }
+            require(issuer.isNotBlank()) { "SERVICE_TOKENS_ISSUER is required when service tokens are configured" }
+            require(issuer == issuer.trim()) { "SERVICE_TOKENS_ISSUER must not have surrounding whitespace" }
+            val key =
+                requireNotNull(
+                    signingKey.trim().let { key ->
+                        runCatching { Base64.getDecoder().decode(key) }.getOrNull()
+                            ?: runCatching { Base64.getUrlDecoder().decode(key) }.getOrNull()
+                    },
+                ) { "SERVICE_TOKENS_SIGNING_KEY must be base64" }
+            require(key.size >= MINIMUM_SIGNING_KEY_BYTES) {
+                "SERVICE_TOKENS_SIGNING_KEY must encode at least $MINIMUM_SIGNING_KEY_BYTES bytes"
             }
+            require(key.any { it != key[0] }) { "SERVICE_TOKENS_SIGNING_KEY must be random, not a repeated byte" }
+            require(lifetimeMinutes in 1..MAXIMUM_LIFETIME_MINUTES) {
+                "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and $MAXIMUM_LIFETIME_MINUTES"
+            }
+            return key
+        }
 
         // The signing key never appears in logs or failure messages.
         override fun toString(): String = "ServiceTokens(signingKey=****, lifetimeMinutes=$lifetimeMinutes, issuer=$issuer)"
@@ -142,7 +168,11 @@ data class CommerceRuntimeConfiguration(
         }
     }
 
-    /** Fails with [IllegalArgumentException], naming the environment variable, when a value is unusable. */
+    /**
+     * Fails with [IllegalArgumentException], naming the environment variable, when a value is
+     * unusable. [load] and `commerceRuntime(...)` both call it, so a configuration constructed
+     * in code is held to the same rules as one loaded from the environment.
+     */
     fun validate() {
         require(server.port in 0..65535) { "PORT must be between 0 and 65535" }
         require(database.jdbcUrl.isNotBlank()) { "DATABASE_JDBC_URL is required" }
@@ -158,20 +188,7 @@ data class CommerceRuntimeConfiguration(
         require(sessions.lifetimeMinutes in 1..Sessions.MAXIMUM_LIFETIME_MINUTES) {
             "SESSIONS_LIFETIME_MINUTES must be between 1 and ${Sessions.MAXIMUM_LIFETIME_MINUTES}"
         }
-        serviceTokens?.let { tokens ->
-            require(tokens.signingKey.isNotBlank()) { "SERVICE_TOKENS_SIGNING_KEY is required" }
-            val key = requireNotNull(tokens.signingKeyBytes()) { "SERVICE_TOKENS_SIGNING_KEY must be base64" }
-            require(key.size >= ServiceTokens.MINIMUM_SIGNING_KEY_BYTES) {
-                "SERVICE_TOKENS_SIGNING_KEY must encode at least ${ServiceTokens.MINIMUM_SIGNING_KEY_BYTES} bytes"
-            }
-            require(key.any { it != key[0] }) { "SERVICE_TOKENS_SIGNING_KEY must be random, not a repeated byte" }
-            require(tokens.lifetimeMinutes in 1..ServiceTokens.MAXIMUM_LIFETIME_MINUTES) {
-                "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and ${ServiceTokens.MAXIMUM_LIFETIME_MINUTES}"
-            }
-            require(tokens.issuer.isNotBlank() && tokens.issuer == tokens.issuer.trim()) {
-                "SERVICE_TOKENS_ISSUER must not be blank or padded"
-            }
-        }
+        serviceTokens?.validatedSigningKey()
     }
 
     companion object {
@@ -236,8 +253,11 @@ private val serviceTokenVariables = listOf("SERVICE_TOKENS_SIGNING_KEY", "SERVIC
 private fun CommerceRuntimeConfiguration.ServiceTokens?.withEnvironmentOverrides(
     environment: Environment,
 ): CommerceRuntimeConfiguration.ServiceTokens? {
+    // A missing issuer stays blank here, so validation reports it as required.
     val base =
-        this ?: environment.optional("SERVICE_TOKENS_SIGNING_KEY")?.let { CommerceRuntimeConfiguration.ServiceTokens(signingKey = it) }
+        this ?: environment.optional("SERVICE_TOKENS_SIGNING_KEY")?.let {
+            CommerceRuntimeConfiguration.ServiceTokens(signingKey = it, issuer = "")
+        }
     if (base == null) {
         val stray = serviceTokenVariables.filter { environment.optional(it) != null }
         require(stray.isEmpty()) { "SERVICE_TOKENS_SIGNING_KEY is required when ${stray.joinToString()} is set" }

@@ -30,9 +30,14 @@ private val logger = KotlinLogging.logger {}
  *
  * A credential is used only to obtain a short-lived service access token
  * (`ServiceAccessTokens.issue`). Revoking a credential stops it from obtaining new tokens
- * immediately; a token it already obtained stays valid until that token expires. Disabling
- * the service stops every token and credential of it immediately, and leaves the credentials
- * in place for when the service is activated again.
+ * immediately and permanently; a token it already obtained stays valid until that token
+ * expires.
+ *
+ * Disabling the service is suspension, not revocation: while it is DISABLED none of its
+ * credentials can obtain a token, but nothing is revoked, and activating it again makes every
+ * unrevoked credential usable again. A revoked credential stays revoked whatever the service's
+ * status. To respond to a suspected credential compromise, revoke the credential; disabling
+ * the service alone only pauses it.
  *
  * Methods without a [Transaction] run in their own transaction. The overloads that take one
  * join the caller's transaction, so a credential change commits or rolls back together with
@@ -153,7 +158,7 @@ internal class PersistentServiceCredentials(
      * Succeeds only when the credential exists, belongs to [serviceId], is not revoked, its
      * hash matches, and the service exists and is ACTIVE. Exactly one Argon2id verification
      * runs for every attempt, outside the database transaction. Callers receive no reason;
-     * the log records it, never the secret.
+     * a DEBUG diagnostic records it with the service and credential IDs, never the secret.
      */
     fun authenticate(
         serviceId: ServiceId,
@@ -176,7 +181,9 @@ internal class PersistentServiceCredentials(
                 else -> null
             }
         if (failure != null) {
-            logger.info {
+            // DEBUG, not INFO: the token endpoint is public, so per-attempt failures must not
+            // become an attacker-driven log stream on top of the Argon2id work.
+            logger.debug {
                 "event=service_authentication_failed service=${serviceId.value} credential=${secret.credentialId.value} reason=$failure"
             }
             return null

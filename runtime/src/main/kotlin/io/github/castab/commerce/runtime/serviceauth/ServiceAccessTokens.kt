@@ -100,13 +100,21 @@ data class IssuedServiceAccessToken(
  * [ServiceAccessTokenAuthenticator] then resolves it to the service's `ServiceId`, and the
  * service is authorized through its current roles like any other principal.
  *
- * Revocation semantics:
+ * Revocation and suspension semantics:
  * - A token is not stored and cannot be revoked individually. It stays valid until it
  *   expires, even after the credential that obtained it is revoked; the configured lifetime
  *   (at most one hour) bounds that window.
- * - Every [resolve] checks that the service still exists and is ACTIVE, so disabling a
- *   service stops all of its tokens immediately.
+ * - Every [resolve] checks that the service still exists and is ACTIVE. Disabling a service
+ *   **suspends** its tokens: they stop authenticating on the next request. It does not
+ *   revoke them: if the service is activated again, every token it was issued that has not
+ *   yet expired authenticates again. (A service's sessions, by contrast, are revoked when it
+ *   is disabled.)
  * - Tokens carry no permissions. Removing a role or a grant affects the very next request.
+ *
+ * After a suspected credential compromise: disable the service, revoke the compromised
+ * credentials (and create replacements), and keep the service disabled until the token
+ * lifetime has elapsed since the last token could have been issued to the attacker. Only
+ * then activate it again.
  *
  * A token can be replayed by anyone who obtains it until it expires: it is a bearer
  * credential. Send it only over TLS and never log it.
@@ -152,16 +160,9 @@ internal class SignedServiceAccessTokens(
     private val processor: DefaultJWTProcessor<SecurityContext>
 
     init {
-        val key = checkNotNull(configuration.signingKeyBytes()) { "SERVICE_TOKENS_SIGNING_KEY must be base64" }
-        require(key.size >= CommerceRuntimeConfiguration.ServiceTokens.MINIMUM_SIGNING_KEY_BYTES) {
-            "SERVICE_TOKENS_SIGNING_KEY must encode at least ${CommerceRuntimeConfiguration.ServiceTokens.MINIMUM_SIGNING_KEY_BYTES} bytes"
-        }
-        // Enforced here as well as in CommerceRuntimeConfiguration.validate(), because a
-        // configuration constructed in code is not necessarily validated.
-        require(configuration.lifetimeMinutes in 1..CommerceRuntimeConfiguration.ServiceTokens.MAXIMUM_LIFETIME_MINUTES) {
-            "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and ${CommerceRuntimeConfiguration.ServiceTokens.MAXIMUM_LIFETIME_MINUTES}"
-        }
-        require(issuer.isNotBlank()) { "SERVICE_TOKENS_ISSUER must not be blank" }
+        // The same policy as CommerceRuntimeConfiguration.validate(): this type never signs or
+        // verifies with a configuration that validation would reject.
+        val key = configuration.validatedSigningKey()
         signer = MACSigner(key)
         processor =
             DefaultJWTProcessor<SecurityContext>().apply {

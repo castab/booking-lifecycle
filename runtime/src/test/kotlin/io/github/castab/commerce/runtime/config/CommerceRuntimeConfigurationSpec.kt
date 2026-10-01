@@ -127,17 +127,31 @@ class CommerceRuntimeConfigurationSpec :
                     .getEncoder()
                     .encodeToString(ByteArray(32) { it.toByte() })
 
-            test("service tokens are not configured unless the application asks for them") {
+            test("service tokens, and so an issuer, are not required unless the application configures them") {
                 CommerceRuntimeConfiguration.load(environment = database).serviceTokens shouldBe null
             }
 
-            test("the environment supplies the signing key, and the model supplies the defaults") {
+            test("a signing key without an issuer is a configuration failure, not a library-wide default") {
+                shouldThrow<IllegalArgumentException> {
+                    CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to key))
+                }.message shouldBe "SERVICE_TOKENS_ISSUER is required when service tokens are configured"
+            }
+
+            test("a signing key and an explicit issuer configure service tokens with the default lifetime") {
                 val tokens =
-                    CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to key)).serviceTokens!!
+                    CommerceRuntimeConfiguration
+                        .load(
+                            environment =
+                                database +
+                                    mapOf(
+                                        "SERVICE_TOKENS_SIGNING_KEY" to key,
+                                        "SERVICE_TOKENS_ISSUER" to "orders-staging",
+                                    ),
+                        ).serviceTokens!!
 
                 tokens.signingKey shouldBe key
+                tokens.issuer shouldBe "orders-staging"
                 tokens.lifetime shouldBe Duration.ofMinutes(15)
-                tokens.issuer shouldBe "commerce-runtime"
             }
 
             test("every service token variable overrides its setting") {
@@ -161,11 +175,39 @@ class CommerceRuntimeConfigurationSpec :
                 shouldThrow<IllegalArgumentException> {
                     CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_LIFETIME_MINUTES" to "10"))
                 }.message shouldBe "SERVICE_TOKENS_SIGNING_KEY is required when SERVICE_TOKENS_LIFETIME_MINUTES is set"
+                shouldThrow<IllegalArgumentException> {
+                    CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_ISSUER" to "orders-production"))
+                }.message shouldBe "SERVICE_TOKENS_SIGNING_KEY is required when SERVICE_TOKENS_ISSUER is set"
             }
 
-            test("weak, malformed, or missing signing keys and excessive lifetimes are rejected") {
+            test("a file's serviceTokens block must declare the issuer, which the environment may fill") {
+                // The block declares the signing key but no issuer at all.
+                shouldThrow<Exception> {
+                    CommerceRuntimeConfiguration.load(
+                        environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to key),
+                        resource = "/service-tokens-without-issuer.conf",
+                    )
+                }.message shouldContain "issuer"
+                // The block declares empty placeholders for the environment to fill.
+                shouldThrow<IllegalArgumentException> {
+                    CommerceRuntimeConfiguration.load(
+                        environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to key),
+                        resource = "/service-tokens-placeholders.conf",
+                    )
+                }.message shouldBe "SERVICE_TOKENS_ISSUER is required when service tokens are configured"
+                CommerceRuntimeConfiguration
+                    .load(
+                        environment = database + mapOf("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_ISSUER" to "orders-production"),
+                        resource = "/service-tokens-placeholders.conf",
+                    ).serviceTokens!!
+                    .issuer shouldBe "orders-production"
+            }
+
+            test("weak, malformed, or missing signing keys, bad issuers, and excessive lifetimes are rejected") {
                 fun failure(vararg values: Pair<String, String>) =
-                    shouldThrow<IllegalArgumentException> { CommerceRuntimeConfiguration.load(environment = database + values) }.message
+                    shouldThrow<IllegalArgumentException> {
+                        CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_ISSUER" to "orders") + values)
+                    }.message
 
                 failure("SERVICE_TOKENS_SIGNING_KEY" to "") shouldBe "SERVICE_TOKENS_SIGNING_KEY is required"
                 failure("SERVICE_TOKENS_SIGNING_KEY" to "not base64!") shouldBe "SERVICE_TOKENS_SIGNING_KEY must be base64"
@@ -188,7 +230,9 @@ class CommerceRuntimeConfigurationSpec :
                 failure("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_LIFETIME_MINUTES" to "0") shouldBe
                     "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and 60"
                 failure("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_ISSUER" to " ") shouldBe
-                    "SERVICE_TOKENS_ISSUER must not be blank or padded"
+                    "SERVICE_TOKENS_ISSUER is required when service tokens are configured"
+                failure("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_ISSUER" to " production ") shouldBe
+                    "SERVICE_TOKENS_ISSUER must not have surrounding whitespace"
             }
 
             test("URL-safe base64 keys are accepted, and the key never appears in the configuration's text") {
@@ -197,7 +241,10 @@ class CommerceRuntimeConfigurationSpec :
                         .getUrlEncoder()
                         .withoutPadding()
                         .encodeToString(ByteArray(48) { (250 - it).toByte() })
-                val configuration = CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to urlSafe))
+                val configuration =
+                    CommerceRuntimeConfiguration.load(
+                        environment = database + mapOf("SERVICE_TOKENS_SIGNING_KEY" to urlSafe, "SERVICE_TOKENS_ISSUER" to "orders"),
+                    )
 
                 configuration.serviceTokens!!.signingKey shouldBe urlSafe
                 configuration.toString() shouldNotContain urlSafe
