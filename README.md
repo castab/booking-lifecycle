@@ -144,7 +144,7 @@ reason, returning only `OFFERING_DISABLED` when both apply.
 Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
 list the enums without a cross-field exclusion. Kotlin update and restore operations also
 require both fields explicitly; new domain construction retains enabled/available defaults.
-V8 stores checked non-null values without defaults or legacy backfills; populated pre-V8
+V8 required non-null values without defaults or legacy backfills; populated pre-V8
 offering databases must be recreated.
 Changes append catalog revisions, preserving the selection semantics of historical reads.
 See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
@@ -155,13 +155,23 @@ types, tables, and relationships.
 ## Durable financial ledger
 
 `commerce-runtime` persists immutable `Estimate`, `Quote`, and `Invoice` snapshots in
-`commerce.financial_document_snapshots` with ordered lines. Stage transitions and change
+`commerce.financial_document_snapshots`, each row holding the snapshot's ordered lines as
+JSONB. Stage transitions and change
 orders append a new version; previous versions remain available. A lineage may begin at
 any of the three stages. The runtime stores exact decimal line facts and derives document
 totals from the domain model when restoring them. `FinancialLedger.version`,
 `latestVersion`, and `versionHistory` return each persisted snapshot with its
 database-assigned `createdAt`. V7 refuses to migrate a database containing older
 financial snapshots, because their original creation times were not recorded.
+
+The same persistence rule applies to offerings catalogs: a row is an independently
+meaningful fact or version, and immutable values that only make up a snapshot live in its
+row. A catalog revision is one `commerce.offerings_snapshots` row whose `catalog` JSONB
+holds its ordered categories and offerings, and a financial snapshot's line items are one
+`lines` JSONB value, so reading either is one row and one aggregate. Payments, allocations,
+refunds, principals, roles, and sessions stay relational. V9 does not convert populated
+databases; recreate an ephemeral database that has financial documents or catalogs. See the
+[runtime persistence notes](runtime/README.md#aggregate-snapshot-persistence).
 
 `PaymentRecord` describes money received. A separate `PaymentAllocation` connects part of
 that money to an exact `(document id, version)` snapshot. An allocation stays attached to

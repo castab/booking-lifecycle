@@ -1,23 +1,17 @@
 package io.github.castab.commerce.runtime.persistence
 
-import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
-import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingPrice
-import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.OfferingsSnapshotReference
-import io.github.castab.commerce.offering.QuantityDimension
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
-import java.time.Duration
-import java.util.Currency
+import java.util.UUID
 
 /** Append-only commerce-owned catalog snapshots in caller-owned transactions. */
 interface OfferingsSnapshotRepository {
@@ -69,81 +63,16 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
         snapshot: OfferingsSnapshot,
     ) {
         try {
+            // The revision and everything it contains are one immutable fact: one row, one insert.
             transaction.handle
                 .createUpdate(
-                    """INSERT INTO commerce.offerings_snapshots (catalog_id, revision, previous_revision)
-                       VALUES (:catalogId, :revision, :previousRevision)""",
+                    """INSERT INTO commerce.offerings_snapshots (catalog_id, revision, previous_revision, catalog)
+                       VALUES (:catalogId, :revision, :previousRevision, CAST(:catalog AS jsonb))""",
                 ).bind("catalogId", snapshot.catalogId.value)
                 .bind("revision", snapshot.revision.number)
                 .bind("previousRevision", snapshot.previousRevision?.number)
+                .bind("catalog", toStoredCatalog(snapshot.categories, snapshot.offerings))
                 .execute()
-            snapshot.categories.forEachIndexed { position, category ->
-                transaction.handle
-                    .createUpdate(
-                        """INSERT INTO commerce.offering_categories
-                           (catalog_id, revision, category_key, position, display_name, description,
-                            minimum_selections, maximum_selections)
-                           VALUES (:catalogId, :revision, :key, :position, :name, :description, :minimum, :maximum)""",
-                    ).bind("catalogId", snapshot.catalogId.value)
-                    .bind("revision", snapshot.revision.number)
-                    .bind("key", category.key.value)
-                    .bind("position", position)
-                    .bind("name", category.displayName)
-                    .bind("description", category.description)
-                    .bind("minimum", category.minimumSelections)
-                    .bind("maximum", category.maximumSelections)
-                    .execute()
-            }
-            snapshot.offerings.forEachIndexed { position, offering ->
-                val price = offering.price
-                val amount =
-                    when (price) {
-                        null -> null
-                        is OfferingPrice.Fixed -> price.amount
-                        is OfferingPrice.PerQuantity -> price.amount
-                        is OfferingPrice.PerDuration -> price.amount
-                    }
-                transaction.handle
-                    .createUpdate(
-                        """INSERT INTO commerce.offerings
-                           (catalog_id, revision, offering_key, category_key, position, display_name, description,
-                            price_kind, price_amount, price_currency, quantity_dimension, duration_seconds, duration_nanos, selection_state, availability)
-                           VALUES (:catalogId, :revision, :key, :category, :position, :name, :description,
-                                   :priceKind, :priceAmount, :priceCurrency, :dimension, :seconds, :nanos, :selectionState, :availability)""",
-                    ).bind("catalogId", snapshot.catalogId.value)
-                    .bind("revision", snapshot.revision.number)
-                    .bind("key", offering.key.value)
-                    .bind("category", offering.category.value)
-                    .bind("position", position)
-                    .bind("name", offering.displayName)
-                    .bind("description", offering.description)
-                    .bind(
-                        "priceKind",
-                        when (price) {
-                            null -> null
-                            is OfferingPrice.Fixed -> "FIXED"
-                            is OfferingPrice.PerQuantity -> "PER_QUANTITY"
-                            is OfferingPrice.PerDuration -> "PER_DURATION"
-                        },
-                    ).bind("priceAmount", amount?.amount)
-                    .bind("priceCurrency", amount?.currency?.currencyCode)
-                    .bind("dimension", (price as? OfferingPrice.PerQuantity)?.dimension?.value)
-                    .bind("seconds", (price as? OfferingPrice.PerDuration)?.interval?.seconds)
-                    .bind("nanos", (price as? OfferingPrice.PerDuration)?.interval?.nano)
-                    .bind(
-                        "selectionState",
-                        when (offering.selectionState) {
-                            OfferingSelectionState.ENABLED -> "ENABLED"
-                            OfferingSelectionState.DISABLED -> "DISABLED"
-                        },
-                    ).bind(
-                        "availability",
-                        when (offering.availability) {
-                            OfferingAvailability.AVAILABLE -> "AVAILABLE"
-                            OfferingAvailability.UNAVAILABLE -> "UNAVAILABLE"
-                        },
-                    ).execute()
-            }
         } catch (e: UnableToExecuteStatementException) {
             if (e.isUniqueViolation()) throw CommerceFailure.Conflict("Offerings snapshot ${snapshot.reference} already exists", e)
             throw e
@@ -153,180 +82,134 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
     override fun retrieveVersion(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
-    ): OfferingsSnapshot? {
-        val previous =
-            transaction.handle
-                .createQuery(
-                    """SELECT revision, previous_revision FROM commerce.offerings_snapshots
-                   WHERE catalog_id = :catalogId AND revision = :revision""",
-                ).bind("catalogId", reference.catalogId.value)
-                .bind("revision", reference.revision.number)
-                .map { rows, _ ->
-                    rows.getInt("revision") to rows.getObject("previous_revision", Integer::class.java)?.toInt()
-                }.findOne()
-        if (previous.isEmpty) return null
-        val categories =
-            transaction.handle
-                .createQuery(
-                    """SELECT category_key, display_name, description, minimum_selections, maximum_selections
-                   FROM commerce.offering_categories WHERE catalog_id = :catalogId AND revision = :revision
-                   ORDER BY position""",
-                ).bind("catalogId", reference.catalogId.value)
-                .bind("revision", reference.revision.number)
-                .map { rows, _ -> category(rows) }
-                .list()
-        val offerings =
-            transaction.handle
-                .createQuery(
-                    """SELECT offering_key, category_key, display_name, description, price_kind, price_amount,
-                          price_currency, quantity_dimension, duration_seconds, duration_nanos, selection_state, availability
-                   FROM commerce.offerings WHERE catalog_id = :catalogId AND revision = :revision
-                   ORDER BY position""",
-                ).bind("catalogId", reference.catalogId.value)
-                .bind("revision", reference.revision.number)
-                .map { rows, _ -> offering(rows) }
-                .list()
-        return OfferingsSnapshot.restore(
-            reference.catalogId,
-            reference.revision,
-            previous.get().second?.let(OfferingsRevision::of),
-            categories,
-            offerings,
-        )
-    }
+    ): OfferingsSnapshot? =
+        transaction.handle
+            .createQuery(
+                """SELECT catalog_id, revision, previous_revision, catalog::text AS catalog
+                   FROM commerce.offerings_snapshots WHERE catalog_id = :catalogId AND revision = :revision""",
+            ).bind("catalogId", reference.catalogId.value)
+            .bind("revision", reference.revision.number)
+            .map { rows, _ -> snapshot(rows) }
+            .findOne()
+            .orElse(null)
 
     override fun retrieveLatestVersion(
         transaction: Transaction,
         catalogId: OfferingsCatalogId,
-    ): OfferingsSnapshot? {
-        val revision =
-            transaction.handle
-                .createQuery("SELECT max(revision) FROM commerce.offerings_snapshots WHERE catalog_id = :catalogId")
-                .bind("catalogId", catalogId.value)
-                .map { rows, _ -> rows.getObject(1, Integer::class.java)?.toInt() }
-                .one() ?: return null
-        return retrieveVersion(transaction, OfferingsSnapshotReference(catalogId, OfferingsRevision.of(revision)))
-    }
+    ): OfferingsSnapshot? =
+        transaction.handle
+            .createQuery(
+                """SELECT catalog_id, revision, previous_revision, catalog::text AS catalog
+                   FROM commerce.offerings_snapshots WHERE catalog_id = :catalogId ORDER BY revision DESC LIMIT 1""",
+            ).bind("catalogId", catalogId.value)
+            .map { rows, _ -> snapshot(rows) }
+            .findOne()
+            .orElse(null)
 
+    // History questions are answered from the immutable revisions of one catalog, which the
+    // primary key (catalog_id, revision) already bounds. Containment of {"key": ...} in the
+    // `offerings` or `categories` array compares the key exactly and needs no index of its own.
     override fun offeringKeyExistsInHistory(
         transaction: Transaction,
         catalogId: OfferingsCatalogId,
         key: OfferingKey,
-    ): Boolean =
-        transaction.handle
-            .createQuery("SELECT EXISTS (SELECT 1 FROM commerce.offerings WHERE catalog_id = :catalogId AND offering_key = :key)")
-            .bind("catalogId", catalogId.value)
-            .bind("key", key.value)
-            .mapTo(Boolean::class.java)
-            .one()
+    ): Boolean = keyExistsInHistory(transaction, catalogId, "offerings", key.value)
 
     override fun categoryKeyExistsInHistory(
         transaction: Transaction,
         catalogId: OfferingsCatalogId,
         key: OfferingCategoryKey,
-    ): Boolean =
-        transaction.handle
-            .createQuery("SELECT EXISTS (SELECT 1 FROM commerce.offering_categories WHERE catalog_id = :catalogId AND category_key = :key)")
-            .bind("catalogId", catalogId.value)
-            .bind("key", key.value)
-            .mapTo(Boolean::class.java)
-            .one()
+    ): Boolean = keyExistsInHistory(transaction, catalogId, "categories", key.value)
 
     override fun retrieveRetiredOfferings(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
     ): List<HistoricalCatalogValue<Offering>> =
-        transaction.handle
-            .createQuery(
-                """SELECT DISTINCT ON (historical.offering_key COLLATE "C") historical.*
-                   FROM commerce.offerings historical
-                   WHERE historical.catalog_id = :catalogId AND historical.revision <= :revision
-                     AND NOT EXISTS (
-                         SELECT 1 FROM commerce.offerings current
-                         WHERE current.catalog_id = historical.catalog_id
-                           AND current.revision = :revision AND current.offering_key = historical.offering_key
-                     )
-                   ORDER BY historical.offering_key COLLATE "C", historical.revision DESC""",
-            ).bind("catalogId", reference.catalogId.value)
-            .bind("revision", reference.revision.number)
-            .map { rows, _ ->
-                HistoricalCatalogValue(
-                    OfferingsSnapshotReference(reference.catalogId, OfferingsRevision.of(rows.getInt("revision"))),
-                    offering(rows),
-                )
-            }.list()
+        retired(transaction, reference, "offerings").map { (revision, json) ->
+            HistoricalCatalogValue(
+                OfferingsSnapshotReference(reference.catalogId, revision),
+                restoreStoredOffering("offering in catalog ${reference.catalogId.value} $revision", json),
+            )
+        }
 
     override fun retrieveRetiredCategories(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
     ): List<HistoricalCatalogValue<OfferingCategory>> =
-        transaction.handle
+        retired(transaction, reference, "categories").map { (revision, json) ->
+            HistoricalCatalogValue(
+                OfferingsSnapshotReference(reference.catalogId, revision),
+                restoreStoredCategory("category in catalog ${reference.catalogId.value} $revision", json),
+            )
+        }
+
+    private fun keyExistsInHistory(
+        transaction: Transaction,
+        catalogId: OfferingsCatalogId,
+        array: String,
+        key: String,
+    ): Boolean {
+        require(array == "offerings" || array == "categories") { "Unsupported catalog array: $array" }
+        return transaction.handle
             .createQuery(
-                """SELECT DISTINCT ON (historical.category_key COLLATE "C") historical.*
-                   FROM commerce.offering_categories historical
-                   WHERE historical.catalog_id = :catalogId AND historical.revision <= :revision
-                     AND NOT EXISTS (
-                         SELECT 1 FROM commerce.offering_categories current
-                         WHERE current.catalog_id = historical.catalog_id
-                           AND current.revision = :revision AND current.category_key = historical.category_key
-                     )
-                   ORDER BY historical.category_key COLLATE "C", historical.revision DESC""",
+                """SELECT EXISTS (
+                       SELECT 1 FROM commerce.offerings_snapshots
+                       WHERE catalog_id = :catalogId
+                         AND catalog -> '$array' @> jsonb_build_array(jsonb_build_object('key', CAST(:key AS text))))""",
+            ).bind("catalogId", catalogId.value)
+            .bind("key", key)
+            .mapTo(Boolean::class.java)
+            .one()
+    }
+
+    /**
+     * The last stored element of [array] (`offerings` or `categories`) for every key that
+     * appears in a revision up to [reference] but not in [reference] itself, in key order
+     * (byte order, independent of database collation), with the revision it came from.
+     */
+    private fun retired(
+        transaction: Transaction,
+        reference: OfferingsSnapshotReference,
+        array: String,
+    ): List<Pair<OfferingsRevision, String>> {
+        require(array == "offerings" || array == "categories") { "Unsupported catalog array: $array" }
+        return transaction.handle
+            .createQuery(
+                """WITH current_snapshot AS (
+                       SELECT catalog -> '$array' AS elements FROM commerce.offerings_snapshots
+                       WHERE catalog_id = :catalogId AND revision = :revision),
+                   historical AS (
+                       SELECT s.revision, e.element, e.element ->> 'key' AS key
+                       FROM commerce.offerings_snapshots s
+                       CROSS JOIN LATERAL jsonb_array_elements(s.catalog -> '$array') AS e(element)
+                       WHERE s.catalog_id = :catalogId AND s.revision <= :revision)
+                   SELECT DISTINCT ON (key COLLATE "C") revision, element::text AS element
+                   FROM historical
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM current_snapshot
+                       WHERE current_snapshot.elements @> jsonb_build_array(jsonb_build_object('key', historical.key)))
+                   ORDER BY key COLLATE "C", revision DESC""",
             ).bind("catalogId", reference.catalogId.value)
             .bind("revision", reference.revision.number)
-            .map { rows, _ ->
-                HistoricalCatalogValue(
-                    OfferingsSnapshotReference(reference.catalogId, OfferingsRevision.of(rows.getInt("revision"))),
-                    category(rows),
-                )
-            }.list()
+            .map { rows, _ -> OfferingsRevision.of(rows.getInt("revision")) to rows.getString("element") }
+            .list()
+    }
 
-    private fun category(rows: ResultSet): OfferingCategory =
-        OfferingCategory(
-            OfferingCategoryKey(rows.getString("category_key")),
-            rows.getString("display_name"),
-            rows.getString("description"),
-            rows.getInt("minimum_selections"),
-            rows.getObject("maximum_selections", Integer::class.java)?.toInt(),
-        )
-
-    private fun offering(rows: ResultSet): Offering {
-        val kind = rows.getString("price_kind")
-        val amount =
-            if (kind ==
-                null
-            ) {
-                null
-            } else {
-                Money(rows.getBigDecimal("price_amount"), Currency.getInstance(rows.getString("price_currency").trim()))
-            }
-        val price =
-            when (kind) {
-                null -> null
-                "FIXED" -> OfferingPrice.Fixed(amount!!)
-                "PER_QUANTITY" -> OfferingPrice.PerQuantity(amount!!, QuantityDimension(rows.getString("quantity_dimension")))
-                "PER_DURATION" ->
-                    OfferingPrice.PerDuration(
-                        amount!!,
-                        Duration.ofSeconds(rows.getLong("duration_seconds"), rows.getInt("duration_nanos").toLong()),
-                    )
-                else -> error("Unsupported offerings price kind: $kind")
-            }
-        return Offering(
-            OfferingKey(rows.getString("offering_key")),
-            OfferingCategoryKey(rows.getString("category_key")),
-            rows.getString("display_name"),
-            rows.getString("description"),
-            price,
-            when (val selectionState = rows.getString("selection_state")) {
-                "ENABLED" -> OfferingSelectionState.ENABLED
-                "DISABLED" -> OfferingSelectionState.DISABLED
-                else -> error("Unsupported offering selection state: $selectionState")
-            },
-            when (val availability = rows.getString("availability")) {
-                "AVAILABLE" -> OfferingAvailability.AVAILABLE
-                "UNAVAILABLE" -> OfferingAvailability.UNAVAILABLE
-                else -> error("Unsupported offering availability: $availability")
-            },
-        )
+    private fun snapshot(rows: ResultSet): OfferingsSnapshot {
+        val catalogId = OfferingsCatalogId(rows.getObject("catalog_id", UUID::class.java))
+        val revision = OfferingsRevision.of(rows.getInt("revision"))
+        val what = "offerings catalog ${catalogId.value} $revision"
+        val (categories, offerings) = restoreStoredCatalog(what, rows.getString("catalog"))
+        try {
+            return OfferingsSnapshot.restore(
+                catalogId,
+                revision,
+                rows.getInt("previous_revision").takeUnless { rows.wasNull() }?.let(OfferingsRevision::of),
+                categories,
+                offerings,
+            )
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException("Persisted $what violates a domain invariant: ${e.message}", e)
+        }
     }
 }

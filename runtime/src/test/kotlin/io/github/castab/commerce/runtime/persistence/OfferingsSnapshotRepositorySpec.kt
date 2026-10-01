@@ -17,10 +17,15 @@ import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.math.BigDecimal
@@ -100,7 +105,7 @@ class OfferingsSnapshotRepositorySpec :
                 reference,
             )
 
-        test("selection columns round trip all four combinations and SQL rejects null and unknown values") {
+        test("selection state and availability round trip all four combinations") {
             val first =
                 OfferingsSnapshot.create(
                     catalogId(),
@@ -117,42 +122,30 @@ class OfferingsSnapshotRepositorySpec :
                 )
             transactor.inTransaction { repository.insert(it, first) }
             transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
-            listOf(
-                "selection_state = NULL",
-                "availability = NULL",
-                "selection_state = 'OTHER'",
-                "availability = 'OTHER'",
-            ).forEach { assignment ->
-                shouldThrow<UnableToExecuteStatementException> {
-                    transactor.inTransaction { transaction ->
-                        transaction.handle
-                            .createUpdate(
-                                "UPDATE commerce.offerings SET $assignment WHERE catalog_id = :id AND offering_key = 'normal'",
-                            ).bind("id", first.catalogId.value)
-                            .execute()
-                    }
-                }
-                transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
-            }
         }
 
-        test("unknown stored selection values fail loudly when database checks are bypassed") {
+        test("null, unknown, and missing stored selection values fail loudly instead of defaulting") {
             val first = OfferingsSnapshot.create(catalogId(), listOf(category("choice")), listOf(offering("item", "choice")))
             transactor.inTransaction { repository.insert(it, first) }
-            val columns = listOf("selection_state" to "offering_selection_state", "availability" to "offering_availability")
-            columns.forEach { (column, constraint) ->
-                shouldThrow<IllegalStateException> {
-                    transactor.inTransaction { transaction ->
-                        transaction.handle.execute("ALTER TABLE commerce.offerings DROP CONSTRAINT $constraint")
-                        transaction.handle
-                            .createUpdate("UPDATE commerce.offerings SET $column = 'OTHER' WHERE catalog_id = :id")
-                            .bind("id", first.catalogId.value)
-                            .execute()
-                        repository.retrieveVersion(transaction, first.reference)
-                    }
+            listOf("selectionState", "availability").forEach { property ->
+                listOf(
+                    "jsonb_set(catalog, '{offerings,0,$property}', 'null'::jsonb)",
+                    "jsonb_set(catalog, '{offerings,0,$property}', '\"OTHER\"'::jsonb)",
+                    "jsonb_set(catalog, '{offerings,0,$property}', '\"enabled\"'::jsonb)",
+                    "catalog #- '{offerings,0,$property}'",
+                ).forEach { corruption ->
+                    shouldThrow<IllegalStateException> {
+                        transactor.inTransaction { transaction ->
+                            transaction.handle
+                                .createUpdate("UPDATE commerce.offerings_snapshots SET catalog = $corruption WHERE catalog_id = :id")
+                                .bind("id", first.catalogId.value)
+                                .execute()
+                            repository.retrieveVersion(transaction, first.reference)
+                        }
+                    }.message shouldContain "Malformed persisted offerings catalog"
+                    // PostgreSQL rolls the corruption back with the failed transaction.
+                    transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
                 }
-                // PostgreSQL rolls the temporary constraint removal and corruption back together.
-                transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
             }
         }
 
@@ -212,6 +205,219 @@ class OfferingsSnapshotRepositorySpec :
             shouldThrow<UnableToExecuteStatementException> {
                 transactor.inTransaction { repository.insert(it, absentPredecessor) }
             }
+        }
+
+        fun storedCatalog(reference: OfferingsSnapshotReference): JsonElement =
+            transactor.inTransaction { transaction ->
+                Json.parseToJsonElement(
+                    transaction.handle
+                        .createQuery(
+                            "SELECT catalog::text FROM commerce.offerings_snapshots WHERE catalog_id = :id AND revision = :revision",
+                        ).bind("id", reference.catalogId.value)
+                        .bind("revision", reference.revision.number)
+                        .mapTo(String::class.java)
+                        .one(),
+                )
+            }
+
+        test("one row stores the whole revision in an explicit, stable representation") {
+            val first =
+                OfferingsSnapshot.create(
+                    catalogId(),
+                    listOf(category("second", "shown first"), category("first").copy(minimumSelections = 1, maximumSelections = null)),
+                    listOf(
+                        offering("none", "second"),
+                        offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00"))),
+                        offering("quantity", "first", price = OfferingPrice.PerQuantity(money("0.7500", eur), QuantityDimension("item")))
+                            .copy(selectionState = OfferingSelectionState.DISABLED),
+                        offering(
+                            "duration",
+                            "second",
+                            price = OfferingPrice.PerDuration(money("50.125"), Duration.ofSeconds(3600, 123456789)),
+                        ).copy(availability = OfferingAvailability.UNAVAILABLE),
+                    ),
+                )
+            transactor.inTransaction { repository.insert(it, first) }
+
+            // jsonb does not preserve key order, so the comparison is on the parsed document.
+            storedCatalog(first.reference) shouldBe
+                Json.parseToJsonElement(
+                    """{"categories": [
+                        {"key": "second", "displayName": "second", "description": "shown first",
+                         "minimumSelections": 0, "maximumSelections": 3},
+                        {"key": "first", "displayName": "first", "description": null,
+                         "minimumSelections": 1, "maximumSelections": null}],
+                       "offerings": [
+                        {"key": "none", "category": "second", "displayName": "none", "description": null, "price": null,
+                         "selectionState": "ENABLED", "availability": "AVAILABLE"},
+                        {"key": "fixed", "category": "first", "displayName": "fixed", "description": "a fixed price",
+                         "price": {"kind": "FIXED", "amount": "120.00", "currency": "USD"},
+                         "selectionState": "ENABLED", "availability": "AVAILABLE"},
+                        {"key": "quantity", "category": "first", "displayName": "quantity", "description": null,
+                         "price": {"kind": "PER_QUANTITY", "amount": "0.7500", "currency": "EUR", "dimension": "item"},
+                         "selectionState": "DISABLED", "availability": "AVAILABLE"},
+                        {"key": "duration", "category": "second", "displayName": "duration", "description": null,
+                         "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
+                                   "seconds": 3600, "nanos": 123456789},
+                         "selectionState": "ENABLED", "availability": "UNAVAILABLE"}]}""",
+                )
+            transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
+        }
+
+        test("a malformed stored catalog fails loudly and never defaults") {
+            val first =
+                OfferingsSnapshot.create(
+                    catalogId(),
+                    listOf(category("choice"), category("other")),
+                    listOf(
+                        offering("item", "choice", price = OfferingPrice.Fixed(money("1.00"))),
+                        offering("timed", "choice", price = OfferingPrice.PerDuration(money("2.00"), Duration.ofMinutes(5))),
+                    ),
+                )
+            transactor.inTransaction { repository.insert(it, first) }
+            val price = "{offerings,0,price}"
+            listOf(
+                // wrong shape
+                "catalog || '{\"unexpected\": 1}'::jsonb",
+                "catalog #- '{offerings,0,description}'",
+                "jsonb_set(catalog, '{offerings,0,unexpected}', '1'::jsonb)",
+                "jsonb_set(catalog, '{categories,0,minimumSelections}', '\"0\"'::jsonb)",
+                "jsonb_set(catalog, '{categories,0,minimumSelections}', 'null'::jsonb)",
+                // unsupported price variants, and values that are not exact decimals or currencies
+                "jsonb_set(catalog, '$price', '{\"kind\": \"PER_GUEST\", \"amount\": \"1.00\", \"currency\": \"USD\"}'::jsonb)",
+                "jsonb_set(catalog, '$price', '{\"amount\": \"1.00\", \"currency\": \"USD\"}'::jsonb)",
+                "jsonb_set(catalog, '$price', '{\"kind\": \"FIXED\", \"amount\": 1.00, \"currency\": \"USD\"}'::jsonb)",
+                "jsonb_set(catalog, '$price', '{\"kind\": \"FIXED\", \"amount\": \"1e2\", \"currency\": \"USD\"}'::jsonb)",
+                "jsonb_set(catalog, '$price', '{\"kind\": \"FIXED\", \"amount\": \"1.00\", \"currency\": \"usd\"}'::jsonb)",
+                "jsonb_set(catalog, '$price', '{\"kind\": \"FIXED\", \"amount\": \"1.00\", \"currency\": \"ZZZ\"}'::jsonb)",
+                "jsonb_set(catalog, '$price', '{\"kind\": \"FIXED\", \"amount\": \"1.00\", \"currency\": \"USD\", \"dimension\": \"x\"}'::jsonb)",
+                "jsonb_set(catalog, '{offerings,1,price,nanos}', '1000000000'::jsonb)",
+                "jsonb_set(catalog, '{offerings,1,price,seconds}', '0'::jsonb) #- '{offerings,1,price,nanos}'",
+                // each value is well formed but a domain invariant is broken
+                "jsonb_set(catalog, '{offerings,0,key}', '\"has space\"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,displayName}', '\" \"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,1,key}', '\"item\"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,category}', '\"absent\"'::jsonb)",
+                "jsonb_set(catalog, '{categories,1,key}', '\"choice\"'::jsonb)",
+                "jsonb_set(catalog, '{categories,0,maximumSelections}', '-1'::jsonb)",
+                "jsonb_set(jsonb_set(catalog, '{offerings,1,price,seconds}', '0'::jsonb), '{offerings,1,price,nanos}', '0'::jsonb)",
+            ).forEach { corruption ->
+                withClue(corruption) {
+                    shouldThrow<IllegalStateException> {
+                        transactor.inTransaction { transaction ->
+                            transaction.handle
+                                .createUpdate("UPDATE commerce.offerings_snapshots SET catalog = $corruption WHERE catalog_id = :id")
+                                .bind("id", first.catalogId.value)
+                                .execute()
+                            repository.retrieveVersion(transaction, first.reference)
+                        }
+                    }.message shouldContain first.catalogId.value.toString()
+                }
+                transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
+            }
+        }
+
+        test("the database refuses a revision without a catalog object holding both arrays") {
+            val id = catalogId().value
+            listOf(
+                "'[]'",
+                "'{}'",
+                "'null'",
+                "'{\"categories\": [], \"offerings\": {}}'",
+                "'{\"categories\": {}, \"offerings\": []}'",
+                "'{\"categories\": [], \"offerings\": null}'",
+            ).forEach { catalog ->
+                shouldThrow<UnableToExecuteStatementException> {
+                    transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO commerce.offerings_snapshots (catalog_id, revision, catalog) VALUES (:id, 1, $catalog::jsonb)",
+                            ).bind("id", id)
+                            .execute()
+                    }
+                }
+            }
+            shouldThrow<UnableToExecuteStatementException> {
+                transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createUpdate("INSERT INTO commerce.offerings_snapshots (catalog_id, revision) VALUES (:id, 1)")
+                        .bind("id", id)
+                        .execute()
+                }
+            }
+        }
+
+        test("history questions follow the immutable revisions of one catalog") {
+            val choice = category("choice")
+            val extras = category("extras")
+            val r1 =
+                OfferingsSnapshot.create(
+                    catalogId(),
+                    listOf(choice, extras),
+                    listOf(offering("alpha", "choice"), offering("beta", "extras"), offering("gamma", "extras", "first gamma")),
+                )
+            // r2 retires beta and gamma and the extras category; r3 restores gamma with a different representation.
+            val r2 = r1.revise(listOf(choice), listOf(offering("alpha", "choice", "edited")))
+            val r3 =
+                r2.revise(
+                    listOf(choice, extras),
+                    listOf(offering("alpha", "choice", "edited"), offering("gamma", "extras", "second gamma")),
+                )
+            val r4 = r3.revise(listOf(choice), listOf(offering("alpha", "choice", "edited")))
+            val other = OfferingsSnapshot.create(catalogId(), listOf(category("elsewhere")), listOf(offering("delta", "elsewhere")))
+            transactor.inTransaction { transaction ->
+                listOf(r1, r2, r3, r4, other).forEach { repository.insert(transaction, it) }
+            }
+
+            transactor.inTransaction { transaction ->
+                listOf("alpha", "beta", "gamma").forEach {
+                    repository.offeringKeyExistsInHistory(transaction, r1.catalogId, OfferingKey(it)) shouldBe true
+                }
+                // Exact keys only: a prefix, another catalog's key, and an unused key never exist.
+                listOf("alph", "alphabet", "delta", "ALPHA").forEach {
+                    repository.offeringKeyExistsInHistory(transaction, r1.catalogId, OfferingKey(it)) shouldBe false
+                }
+                repository.offeringKeyExistsInHistory(transaction, other.catalogId, OfferingKey("delta")) shouldBe true
+                repository.categoryKeyExistsInHistory(transaction, r1.catalogId, OfferingCategoryKey("extras")) shouldBe true
+                repository.categoryKeyExistsInHistory(transaction, r1.catalogId, OfferingCategoryKey("elsewhere")) shouldBe false
+                repository.categoryKeyExistsInHistory(transaction, other.catalogId, OfferingCategoryKey("elsewhere")) shouldBe true
+
+                fun retiredOfferings(snapshot: OfferingsSnapshot) =
+                    repository.retrieveRetiredOfferings(transaction, snapshot.reference).map {
+                        Triple(it.value.key.value, it.reference.revision.number, it.value.description)
+                    }
+
+                fun retiredCategories(snapshot: OfferingsSnapshot) =
+                    repository.retrieveRetiredCategories(transaction, snapshot.reference).map {
+                        it.value.key.value to it.reference.revision.number
+                    }
+                // Retirement is relative to the requested revision, and each value keeps the revision it was last stored in.
+                retiredOfferings(r1).shouldBeEmpty()
+                retiredOfferings(r2).shouldContainExactly(Triple("beta", 1, null), Triple("gamma", 1, "first gamma"))
+                retiredOfferings(r3).shouldContainExactly(Triple("beta", 1, null))
+                retiredOfferings(r4).shouldContainExactly(Triple("beta", 1, null), Triple("gamma", 3, "second gamma"))
+                retiredCategories(r1).shouldBeEmpty()
+                retiredCategories(r2).shouldContainExactly("extras" to 1)
+                retiredCategories(r3).shouldBeEmpty()
+                retiredCategories(r4).shouldContainExactly("extras" to 3)
+                repository.retrieveRetiredOfferings(transaction, other.reference).shouldBeEmpty()
+                // A catalog with no stored revision has nothing to retire.
+                repository
+                    .retrieveRetiredOfferings(transaction, OfferingsSnapshotReference(catalogId(), OfferingsRevision.INITIAL))
+                    .shouldBeEmpty()
+            }
+        }
+
+        test("retired values are ordered by key bytes, not by database collation or UTF-16 code units") {
+            val keys = listOf("b", "B", "a", "_", "😀", "～", "A")
+            val full = OfferingsSnapshot.create(catalogId(), listOf(category("choice")), keys.map { offering(it, "choice") })
+            val empty = full.revise(listOf(category("choice")), emptyList())
+            transactor.inTransaction { repository.insert(it, full) }
+            transactor.inTransaction { repository.insert(it, empty) }
+            transactor
+                .inTransaction { repository.retrieveRetiredOfferings(it, empty.reference) }
+                .map { it.value.key.value }
+                .shouldContainExactly("A", "B", "_", "a", "b", "～", "😀")
         }
 
         test("one caller transaction atomically commits and rolls back commerce and application rows") {

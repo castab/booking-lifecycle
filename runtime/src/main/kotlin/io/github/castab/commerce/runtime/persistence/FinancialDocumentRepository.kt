@@ -3,15 +3,12 @@ package io.github.castab.commerce.runtime.persistence
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentHistory
 import io.github.castab.commerce.financial.FinancialDocumentReference
-import io.github.castab.commerce.financial.LineItem
-import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.runtime.financial.FinancialDocumentVersion
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
 import java.time.OffsetDateTime
-import java.util.Currency
 import java.util.UUID
 
 /** Append-only financial snapshots in a caller-owned transaction. */
@@ -60,36 +57,18 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
             throw CommerceFailure.Conflict("Financial document ${snapshot.reference} has an invalid stage successor")
         }
         try {
+            // The snapshot and its ordered lines are one immutable fact: one row, one insert.
             transaction.handle
                 .createUpdate(
                     """INSERT INTO commerce.financial_document_snapshots
-                       (document_id, version, previous_version, stage)
-                       VALUES (:id, :version, :previous, :stage)""",
+                       (document_id, version, previous_version, stage, lines)
+                       VALUES (:id, :version, :previous, :stage, CAST(:lines AS jsonb))""",
                 ).bind("id", snapshot.id)
                 .bind("version", snapshot.version.number)
                 .bind("previous", snapshot.previousVersion?.number)
                 .bind("stage", snapshot.stageName())
+                .bind("lines", snapshot.lineItems.toStoredLines())
                 .execute()
-            snapshot.lineItems.forEachIndexed { position, line ->
-                transaction.handle
-                    .createUpdate(
-                        """INSERT INTO commerce.financial_document_lines
-                           (document_id, version, position, line_id, description, sub_description,
-                            quantity, price_amount, price_currency, tax_amount)
-                           VALUES (:id, :version, :position, :lineId, :description, :subDescription,
-                                   :quantity, :price, :currency, :tax)""",
-                    ).bind("id", snapshot.id)
-                    .bind("version", snapshot.version.number)
-                    .bind("position", position)
-                    .bind("lineId", line.id)
-                    .bind("description", line.description)
-                    .bind("subDescription", line.subDescription)
-                    .bind("quantity", line.quantity)
-                    .bind("price", line.price.amount)
-                    .bind("currency", line.currency.currencyCode)
-                    .bind("tax", line.taxAmount.amount)
-                    .execute()
-            }
         } catch (e: UnableToExecuteStatementException) {
             if (e.isUniqueViolation()) {
                 throw CommerceFailure.Conflict("Financial document ${snapshot.reference} already has this snapshot or successor", e)
@@ -113,97 +92,68 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
         id: UUID,
     ): List<FinancialDocument> = versionHistory(transaction, id).map { it.document }
 
-    /** Restores the document and its database timestamp together from one persisted version. */
+    /** Restores the document and its database timestamp together from the one row of that version. */
     fun version(
         transaction: Transaction,
         reference: FinancialDocumentReference,
     ): FinancialDocumentVersion? =
         transaction.handle
             .createQuery(
-                """SELECT stage, created_at FROM commerce.financial_document_snapshots
+                """SELECT document_id, version, stage, created_at, lines::text AS lines
+                   FROM commerce.financial_document_snapshots
                    WHERE document_id = :id AND version = :version""",
             ).bind("id", reference.id)
             .bind("version", reference.version.number)
-            .map { rows, _ -> rows.getString("stage") to rows.getObject("created_at", OffsetDateTime::class.java) }
+            .map { rows, _ -> restore(rows) }
             .findOne()
-            .map { (stage, createdAt) -> restore(transaction, reference, stage, createdAt) }
             .orElse(null)
 
-    /** Reads only the latest version's metadata before restoring that document once. */
+    /** Restores the highest version's row. */
     fun latestVersion(
         transaction: Transaction,
         id: UUID,
     ): FinancialDocumentVersion? =
         transaction.handle
             .createQuery(
-                """SELECT version, stage, created_at FROM commerce.financial_document_snapshots
+                """SELECT document_id, version, stage, created_at, lines::text AS lines
+                   FROM commerce.financial_document_snapshots
                    WHERE document_id = :id ORDER BY version DESC LIMIT 1""",
             ).bind("id", id)
-            .map { rows, _ ->
-                Triple(
-                    Version.of(rows.getInt("version")),
-                    rows.getString("stage"),
-                    rows.getObject("created_at", OffsetDateTime::class.java),
-                )
-            }.findOne()
-            .map { (version, stage, createdAt) -> restore(transaction, FinancialDocumentReference(id, version), stage, createdAt) }
+            .map { rows, _ -> restore(rows) }
+            .findOne()
             .orElse(null)
 
-    /** Reads ordered metadata once, then restores each version's lines exactly once. */
+    /** Restores every version of the lineage, oldest first, each from its own row, in one query. */
     fun versionHistory(
         transaction: Transaction,
         id: UUID,
     ): List<FinancialDocumentVersion> =
         transaction.handle
             .createQuery(
-                """SELECT version, stage, created_at FROM commerce.financial_document_snapshots
+                """SELECT document_id, version, stage, created_at, lines::text AS lines
+                   FROM commerce.financial_document_snapshots
                    WHERE document_id = :id ORDER BY version""",
             ).bind("id", id)
-            .map { rows, _ ->
-                Triple(
-                    Version.of(rows.getInt("version")),
-                    rows.getString("stage"),
-                    rows.getObject("created_at", OffsetDateTime::class.java),
-                )
-            }.list()
-            .map { (version, stage, createdAt) -> restore(transaction, FinancialDocumentReference(id, version), stage, createdAt) }
+            .map { rows, _ -> restore(rows) }
+            .list()
 
-    private fun restore(
-        transaction: Transaction,
-        reference: FinancialDocumentReference,
-        stage: String,
-        createdAt: OffsetDateTime,
-    ): FinancialDocumentVersion {
-        val lines =
-            transaction.handle
-                .createQuery(
-                    """SELECT line_id, description, sub_description, quantity, price_amount, price_currency, tax_amount
-                       FROM commerce.financial_document_lines
-                       WHERE document_id = :id AND version = :version ORDER BY position""",
-                ).bind("id", reference.id)
-                .bind("version", reference.version.number)
-                .map { rows, _ -> line(rows) }
-                .list()
+    private fun restore(rows: ResultSet): FinancialDocumentVersion {
+        val id = rows.getObject("document_id", UUID::class.java)
+        val version = Version.of(rows.getInt("version"))
+        val what = "financial document $id version ${version.number}"
+        val lines = restoreStoredLines("lines of $what", rows.getString("lines"))
         val document =
-            when (stage) {
-                "ESTIMATE" -> FinancialDocument.Estimate.restore(reference.id, reference.version, lines)
-                "QUOTE" -> FinancialDocument.Quote.restore(reference.id, reference.version, lines)
-                "INVOICE" -> FinancialDocument.Invoice.restore(reference.id, reference.version, lines)
-                else -> error("Unsupported financial document stage")
+            try {
+                when (val stage = rows.getString("stage")) {
+                    "ESTIMATE" -> FinancialDocument.Estimate.restore(id, version, lines)
+                    "QUOTE" -> FinancialDocument.Quote.restore(id, version, lines)
+                    "INVOICE" -> FinancialDocument.Invoice.restore(id, version, lines)
+                    else -> error("Unsupported financial document stage: $stage")
+                }
+            } catch (e: IllegalArgumentException) {
+                throw IllegalStateException("Persisted $what violates a domain invariant: ${e.message}", e)
             }
-        return FinancialDocumentVersion.from(document, createdAt.toInstant())
-    }
-
-    private fun line(rows: ResultSet): LineItem {
-        val currency = Currency.getInstance(rows.getString("price_currency").trim())
-        return LineItem(
-            rows.getObject("line_id", UUID::class.java),
-            rows.getString("description"),
-            rows.getString("sub_description"),
-            rows.getBigDecimal("quantity"),
-            Money(rows.getBigDecimal("price_amount"), currency),
-            Money(rows.getBigDecimal("tax_amount"), currency),
-        )
+        return FinancialDocumentVersion.from(document, rows.getObject("created_at", OffsetDateTime::class.java).toInstant())
     }
 
     private fun FinancialDocument.stageName(): String =
