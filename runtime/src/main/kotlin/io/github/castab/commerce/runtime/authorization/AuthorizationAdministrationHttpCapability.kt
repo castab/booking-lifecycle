@@ -5,6 +5,11 @@ import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
+import io.github.castab.commerce.runtime.serviceauth.IssuedServiceCredentialDto
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentialDto
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentialWriteDto
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentialsDto
+import io.github.castab.commerce.runtime.serviceauth.dto
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.ServiceId
@@ -34,7 +39,13 @@ class AuthorizationAdministrationHttpCapability internal constructor(
  * Runtime-owned principal/RBAC administration. The host chooses placement and supplies
  * authentication through [accessControl]; each route declares its own commerce permission.
  * [tags] are the host's OpenAPI grouping for every route; when empty, http4k's default
- * grouping applies. No credential, cookie, login, or bootstrap policy is included.
+ * grouping applies.
+ *
+ * Service credentials are administered under `<basePath>/services/{serviceId}/credentials`:
+ * listing their metadata needs `PrincipalRead`, and creating or revoking one needs
+ * `RuntimePermissions.ServiceCredentialManage`. Secrets are returned only by creation, with
+ * `Cache-Control: no-store`, and hashes never. Human user credentials, cookies, login, and
+ * bootstrap policy remain the application's.
  * `GET {basePath}/permissions` is the same route [permissionCatalogHttpCapability] provides.
  */
 fun authorizationAdministrationHttpCapability(
@@ -71,6 +82,30 @@ fun authorizationAdministrationHttpCapability(
     val sampleUser = UserDto(UUID(0, 1).toString(), "staff", "Staff", "Member", "Staff Member", "ACTIVE", listOf("commerce.manager"))
     val sampleService = ServiceDto(UUID(0, 2).toString(), "worker", "ACTIVE", listOf("commerce.manager"))
     val sampleRole = RoleDto("commerce.manager", "Manager", "Manages staff", listOf(CommercePermissions.PrincipalRead.value))
+    val credentials = context.serviceCredentials
+    val credentialPath = Path.of("credentialId")
+    val credentialsBody = jsonBody(ServiceCredentialsDto.serializer())
+    val credentialWrite = jsonBody(ServiceCredentialWriteDto.serializer())
+    val issuedCredentialBody = jsonBody(IssuedServiceCredentialDto.serializer())
+    val sampleCredential =
+        ServiceCredentialDto(UUID(0, 3).toString(), sampleService.id, "production deployment", "2026-01-01T00:00:00Z", false)
+    val sampleRevokedCredential =
+        ServiceCredentialDto(
+            UUID(0, 4).toString(),
+            sampleService.id,
+            "previous deployment",
+            "2025-10-01T00:00:00Z",
+            true,
+            "2026-01-02T00:00:00Z",
+        )
+    val sampleIssuedCredential =
+        IssuedServiceCredentialDto(
+            sampleCredential.credentialId,
+            sampleService.id,
+            sampleCredential.label,
+            sampleCredential.createdAt,
+            "<secret>",
+        )
 
     fun RouteMetaDsl.protected(
         id: String,
@@ -88,6 +123,7 @@ fun authorizationAdministrationHttpCapability(
     val readRole = guard(CommercePermissions.RoleRead)
     val manageRole = guard(CommercePermissions.RoleManage)
     val assignRole = guard(CommercePermissions.RoleAssign)
+    val manageCredential = guard(RuntimePermissions.ServiceCredentialManage)
 
     val routes = mutableListOf<ContractRoute>()
     routes += "$basePath/users" meta {
@@ -251,6 +287,42 @@ fun authorizationAdministrationHttpCapability(
     } bindContract Method.DELETE to { id: String, _: String, key: String ->
         assignRole.then { _: Request ->
             directory.unassignRole(id.serviceId(), key.roleKey())
+            Response(Status.NO_CONTENT)
+        }
+    }
+
+    routes += "$basePath/services" / servicePath / "credentials" meta {
+        protected("ServiceCredentials", "List a service identity's credentials")
+        description = "Credential metadata only, active and revoked. Secrets and their hashes are never returned."
+        returning(Status.OK, credentialsBody to ServiceCredentialsDto(listOf(sampleRevokedCredential)))
+    } bindContract Method.GET to { id: String, _: String ->
+        readPrincipal.then { _: Request ->
+            Response(Status.OK).with(credentialsBody of ServiceCredentialsDto(credentials.list(id.serviceId()).map { it.dto() }))
+        }
+    }
+    routes += "$basePath/services" / servicePath / "credentials" meta {
+        protected("CreateServiceCredential", "Create a service credential")
+        description =
+            "Creates an additional active credential, so a consumer can move to it before the old one is revoked. " +
+            "The secret is returned only in this response and cannot be read again."
+        preFlightExtraction = PreFlightExtraction.IgnoreBody
+        receiving(credentialWrite to ServiceCredentialWriteDto("production deployment"))
+        returning(Status.CREATED, issuedCredentialBody to sampleIssuedCredential)
+    } bindContract Method.POST to { id: String, _: String ->
+        manageCredential.then { request: Request ->
+            val issued = credentials.create(id.serviceId(), credentialWrite(request).label)
+            Response(Status.CREATED).with(issuedCredentialBody of issued.dto()).header("Cache-Control", "no-store")
+        }
+    }
+    routes += "$basePath/services" / servicePath / "credentials" / credentialPath meta {
+        protected("RevokeServiceCredential", "Revoke a service credential")
+        description =
+            "Permanently stops the credential from obtaining access tokens. Tokens it already obtained stay valid until they " +
+            "expire. Idempotent."
+        returning(Status.NO_CONTENT)
+    } bindContract Method.DELETE to { id: String, _: String, credentialId: String ->
+        manageCredential.then { _: Request ->
+            credentials.revoke(id.serviceId(), credentialId.serviceCredentialId())
             Response(Status.NO_CONTENT)
         }
     }

@@ -110,6 +110,21 @@ class PermissionCatalog(
     }
 }
 
+/**
+ * Permissions of runtime capabilities that are not commerce-domain operations, and so are
+ * not part of the domain's `CommercePermissions`. Each is defined in
+ * [commercePermissionDefinitions] like every other runtime permission.
+ */
+object RuntimePermissions {
+    /**
+     * Create and revoke service credentials. A credential authenticates as its service, with
+     * all of that service's current roles, so this is as sensitive as `RoleAssign`: grant it
+     * only to principals trusted to act as any service. Reading credential metadata needs
+     * `PrincipalRead`.
+     */
+    val ServiceCredentialManage: PermissionKey = PermissionKey("commerce.service-credential.manage")
+}
+
 private val bookings = PermissionGroup("commerce.bookings")
 private val financialDocuments = PermissionGroup("commerce.financial-documents")
 private val offerings = PermissionGroup("commerce.offerings")
@@ -118,9 +133,10 @@ private val principals = PermissionGroup("commerce.principals")
 private val roles = PermissionGroup("commerce.roles")
 
 /**
- * The runtime's own permission vocabulary: every [CommercePermissions] key, described.
+ * The runtime's own permission vocabulary: every [CommercePermissions] and
+ * [RuntimePermissions] key, described.
  * These keys denote code capabilities, never database-created permissions. Runtime routes
- * enforce the offerings, principal, and role keys; the booking, financial-document, payment,
+ * enforce the offerings, principal, role, and service-credential keys; the booking, financial-document, payment,
  * and refund keys are conventional names for operations that applications enforce.
  *
  * Every permission a runtime capability enforces must be defined here, including runtime
@@ -182,5 +198,11 @@ val commercePermissionDefinitions: List<PermissionDefinition> =
             "Assign roles",
             "Assign roles to, and remove roles from, staff users and service identities.",
             roles,
+        ),
+        PermissionDefinition(
+            RuntimePermissions.ServiceCredentialManage,
+            "Manage service credentials",
+            "Create and revoke the credentials with which service identities authenticate.",
+            principals,
         ),
     )

@@ -1,8 +1,9 @@
 package io.github.castab.commerce.runtime.session
 
-import io.github.castab.commerce.runtime.http.hasAuthenticatedPrincipal
-import io.github.castab.commerce.runtime.http.unauthenticatedResponse
-import io.github.castab.commerce.runtime.http.withAuthenticatedPrincipal
+import io.github.castab.commerce.runtime.http.RequestAuthenticator
+import io.github.castab.commerce.runtime.http.authentication
+import io.github.castab.commerce.runtime.http.bearerCredential
+import io.github.castab.commerce.staff.PrincipalId
 import org.http4k.core.Filter
 import org.http4k.core.Request
 import org.http4k.core.cookie.Cookie
@@ -18,14 +19,13 @@ fun interface SessionTokenExtractor {
     fun extract(request: Request): SessionToken?
 }
 
-/** Reads the token from `Authorization: Bearer <token>`. The scheme is case-insensitive. */
+/**
+ * Reads the token from `Authorization: Bearer <token>`. The scheme is case-insensitive. A
+ * bearer credential in another format, such as a service access token, is not a session
+ * token and yields `null`.
+ */
 object BearerSessionToken : SessionTokenExtractor {
-    override fun extract(request: Request): SessionToken? {
-        val authorization = request.header("Authorization")?.trim() ?: return null
-        val scheme = authorization.substringBefore(' ')
-        if (!scheme.equals("Bearer", ignoreCase = true)) return null
-        return SessionToken.parse(authorization.substringAfter(' ').trim())
-    }
+    override fun extract(request: Request): SessionToken? = request.bearerCredential()?.let(SessionToken::parse)
 }
 
 /**
@@ -72,7 +72,22 @@ class SessionCookie(
 }
 
 /**
- * Authenticates each request through a session, or rejects it.
+ * The session authentication mechanism: [extractor] finds the request's token and
+ * [sessions] resolves it to the principal of an active session, or `null`.
+ *
+ * Use it directly with [authentication] to accept sessions alongside other mechanisms, for
+ * example service access tokens; [sessionAuthentication] is the single-mechanism filter.
+ */
+class SessionAuthenticator(
+    private val sessions: SessionManager,
+    private val extractor: SessionTokenExtractor,
+) : RequestAuthenticator {
+    override fun authenticate(request: Request): PrincipalId? = extractor.extract(request)?.let(sessions::resolve)
+}
+
+/**
+ * Authenticates each request through a session, or rejects it. It is
+ * [authentication] with one [SessionAuthenticator].
  *
  * If a runtime authentication filter has already established the request's
  * [authenticatedPrincipal][io.github.castab.commerce.runtime.http.authenticatedPrincipal],
@@ -101,16 +116,4 @@ class SessionCookie(
 fun sessionAuthentication(
     sessions: SessionManager,
     extractor: SessionTokenExtractor,
-): Filter =
-    Filter { next ->
-        { request ->
-            if (request.hasAuthenticatedPrincipal()) {
-                next(request)
-            } else {
-                when (val principal = extractor.extract(request)?.let(sessions::resolve)) {
-                    null -> unauthenticatedResponse()
-                    else -> next(request.withAuthenticatedPrincipal(principal))
-                }
-            }
-        }
-    }
+): Filter = authentication(SessionAuthenticator(sessions, extractor))

@@ -19,9 +19,14 @@ import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRe
 import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
+import io.github.castab.commerce.runtime.persistence.ServiceCredentialRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.persistence.isReachable
+import io.github.castab.commerce.runtime.serviceauth.PersistentServiceCredentials
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokens
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentials
+import io.github.castab.commerce.runtime.serviceauth.SignedServiceAccessTokens
 import io.github.castab.commerce.runtime.session.PersistentSessionManager
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.PermissionDefinition
@@ -53,6 +58,13 @@ private val logger = KotlinLogging.logger {}
  * data model, so relationships between application entities and commerce facts stay in
  * application repositories.
  *
+ * [serviceCredentials] administers the long-lived credentials of SERVICE principals, and
+ * [serviceAccessTokens] exchanges them for short-lived bearer tokens and resolves those
+ * tokens on later requests (see `ServiceAccessTokenAuthenticator`). Unlike human users,
+ * whose credentials the application owns, service authentication is runtime-owned so that
+ * every consuming application authenticates its services the same way. Both were added for
+ * a backend-for-frontend that calls a commerce application as a service principal.
+ *
  * Part of the provisional application-extension seam; see [ApplicationContributions].
  */
 class CommerceRuntimeContext internal constructor(
@@ -64,7 +76,21 @@ class CommerceRuntimeContext internal constructor(
     val financialLedger: FinancialLedger,
     val sessions: SessionManager,
     val authorization: AuthorizationDirectory,
-)
+    val serviceCredentials: ServiceCredentials,
+    private val configuredServiceAccessTokens: ServiceAccessTokens?,
+) {
+    /**
+     * Service access tokens. Available only when `serviceTokens` (its signing key) is
+     * configured; otherwise reading it fails with [IllegalStateException], so an application
+     * that composes service authentication without a signing key fails at startup rather than
+     * running with a weaker fallback.
+     */
+    val serviceAccessTokens: ServiceAccessTokens
+        get() =
+            checkNotNull(configuredServiceAccessTokens) {
+                "Service access tokens are not configured; set serviceTokens.signingKey (SERVICE_TOKENS_SIGNING_KEY)"
+            }
+}
 
 /**
  * What a concrete application adds to the commerce runtime.
@@ -134,7 +160,12 @@ class CommerceRuntime internal constructor(
 /**
  * Composes the commerce runtime for a concrete application.
  *
- * Composition begins with the migration phase ([MigrationLifecycle]), before anything else
+ * Composition first validates [configuration] ([CommerceRuntimeConfiguration.validate]),
+ * before it opens the connection pool or any other resource, whether the configuration was
+ * loaded or constructed in code. An invalid configuration fails with
+ * [IllegalArgumentException] naming the setting.
+ *
+ * It then runs the migration phase ([MigrationLifecycle]), before anything else
  * is built. With `migrations.onStartup = MIGRATE`, the runtime migrations and then the
  * application migrations are applied. With `VALIDATE`, the default, they are expected to
  * have been applied by a separate migration step, and the phase only validates that both
@@ -156,6 +187,7 @@ fun commerceRuntime(
     configuration: CommerceRuntimeConfiguration,
     application: ApplicationContributions,
 ): CommerceRuntime {
+    configuration.validate()
     val permissionCatalog = PermissionCatalog.of(commercePermissionDefinitions, application.permissionDefinitions)
     val dataSource = createDataSource(configuration.database)
     try {
@@ -177,6 +209,11 @@ fun commerceRuntime(
                 configuration.sessions.lifetime,
             )
         val authorization = AuthorizationDirectory(transactor, authorizationRepository, sessions, permissionCatalog)
+        val serviceCredentials = PersistentServiceCredentials(transactor, ServiceCredentialRepository(), authorizationRepository)
+        val serviceAccessTokens =
+            configuration.serviceTokens?.let {
+                SignedServiceAccessTokens(it, serviceCredentials, transactor, authorizationRepository)
+            }
         val financialDocuments = PostgresFinancialDocumentRepository()
         val payments = PostgresPaymentRepository(financialDocuments)
         val context =
@@ -189,6 +226,8 @@ fun commerceRuntime(
                 FinancialLedger(transactor, financialDocuments, payments),
                 sessions,
                 authorization,
+                serviceCredentials,
+                serviceAccessTokens,
             )
 
         val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))

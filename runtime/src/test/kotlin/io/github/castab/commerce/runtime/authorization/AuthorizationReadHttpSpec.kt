@@ -166,7 +166,7 @@ class AuthorizationReadHttpSpec :
                 response.status shouldBe Status.OK
                 val body = Json.decodeFromString(PermissionsDto.serializer(), response.bodyString())
                 body.revision shouldBe catalog.revision
-                body.permissions.size shouldBe 15
+                body.permissions.size shouldBe 16
                 body.permissions.map { it.key } shouldBe body.permissions.map { it.key }.sorted()
                 body.permissions shouldContainExactly
                     catalog.definitions.map { PermissionDto(it.key.value, it.group.value, it.displayName, it.description) }
