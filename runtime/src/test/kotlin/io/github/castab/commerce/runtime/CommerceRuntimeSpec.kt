@@ -155,7 +155,12 @@ private object TestIdentities {
  * application proves identity, the runtime issues and resolves the session.
  */
 private fun testAuthenticationRoutes(context: CommerceRuntimeContext): RoutingHttpHandler {
-    val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), TestIdentities.permissions)
+    val access =
+        AccessControl(
+            sessionAuthentication(context.sessions, BearerSessionToken),
+            context.authorization.permissionCatalog,
+            TestIdentities.permissions,
+        )
     val principal = { request: Request ->
         val userId = authenticatedPrincipal(request) as UserId
         Response(Status.OK).with(principalResponse of PrincipalResponse(userId.value.toString()))

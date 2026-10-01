@@ -23,30 +23,34 @@ class PermissionCatalogHttpCapability internal constructor(
 )
 
 /**
- * Read-only exposure of the running application's [catalog] at `GET {basePath}/permissions`,
- * for hosts that want the authorization vocabulary without mounting principal and role
- * administration. [authorizationAdministrationHttpCapability] already includes the same
- * route; mount one or the other at a given base path.
+ * Read-only exposure of the running application's permission catalog at
+ * `GET {basePath}/permissions`, for hosts that want the authorization vocabulary without
+ * mounting principal and role administration. [authorizationAdministrationHttpCapability]
+ * includes this same route; mount one or the other at a given base path.
  *
- * The route requires `CommercePermissions.RoleRead` through the application's
- * [accessControl]: `401` without a principal, `403` without the permission. Reading the
- * vocabulary is distinct from changing roles (`RoleManage`). Permission keys are not
- * secrets, and the catalog confers no authority; every protected operation still enforces
- * its own permission. [tags] are the host's OpenAPI grouping for the route.
+ * The catalog served is [accessControl]'s [AccessControl.permissionCatalog]: exactly the
+ * vocabulary its route declarations and effective permissions are validated against, so the
+ * route can never describe a different catalog than the one enforcing.
+ *
+ * The route requires `CommercePermissions.RoleRead` through [accessControl]: `401` without a
+ * principal, `403` without the permission. Reading the vocabulary is distinct from changing
+ * roles (`RoleManage`). Permission keys are not secrets, and the catalog confers no
+ * authority; every protected operation still enforces its own permission. A client that
+ * only needs to detect vocabulary changes can compare `permissionCatalogRevision` from
+ * [currentPrincipalHttpCapability] instead. [tags] are the host's OpenAPI grouping.
  */
 fun permissionCatalogHttpCapability(
-    catalog: PermissionCatalog,
     accessControl: AccessControl,
     basePath: String,
     tags: Set<Tag> = emptySet(),
 ): PermissionCatalogHttpCapability {
     requireRoutePath(basePath) { "Invalid permission catalog base path" }
     requireTagNames(tags)
-    return PermissionCatalogHttpCapability(listOf(permissionCatalogRoute(catalog, accessControl, basePath, tags)))
+    return PermissionCatalogHttpCapability(listOf(permissionCatalogRoute(accessControl, basePath, tags)))
 }
 
+/** The one catalog route implementation, shared with the administration capability. */
 internal fun permissionCatalogRoute(
-    catalog: PermissionCatalog,
     accessControl: AccessControl,
     basePath: String,
     tags: Set<Tag>,
@@ -54,7 +58,7 @@ internal fun permissionCatalogRoute(
     val permissionsBody = jsonBody(PermissionsDto.serializer())
     val sample = PermissionCatalog(commercePermissionDefinitions.filter { it.key == CommercePermissions.RoleRead }).dto()
     // The catalog is immutable, so its response is built once.
-    val response = catalog.dto()
+    val response = accessControl.permissionCatalog.dto()
     return "$basePath/permissions" meta {
         operationId = "authorizationListPermissions"
         summary = "List the permission catalog"

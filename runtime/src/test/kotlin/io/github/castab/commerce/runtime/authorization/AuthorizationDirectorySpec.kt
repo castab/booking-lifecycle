@@ -277,7 +277,7 @@ class AuthorizationDirectorySpec :
                                 val access =
                                     AccessControl(
                                         sessionAuthentication(supplied.sessions, BearerSessionToken),
-                                        supplied.authorization.permissionResolver,
+                                        supplied.authorization,
                                     )
                                 host =
                                     contract {
@@ -423,7 +423,7 @@ class AuthorizationDirectorySpec :
                         .single()
                         .jsonObject["description"]!!
                         .jsonPrimitive.content shouldBe "Principals and roles"
-                    val blankTagAccess = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), auth.permissionResolver)
+                    val blankTagAccess = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), auth)
                     listOf("", " ").forEach { name ->
                         shouldThrow<IllegalArgumentException> {
                             authorizationAdministrationHttpCapability(context, blankTagAccess, "/admin/other", setOf(Tag(name)))

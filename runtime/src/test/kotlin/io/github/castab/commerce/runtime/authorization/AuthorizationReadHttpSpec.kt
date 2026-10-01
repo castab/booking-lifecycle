@@ -1,11 +1,15 @@
 package io.github.castab.commerce.runtime.authorization
 
+import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.CommerceRuntime
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.AccessControl
+import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
+import io.github.castab.commerce.runtime.offering.OfferingsHttpBinding
+import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
@@ -40,7 +44,9 @@ import org.http4k.core.Method
 import org.http4k.core.Request
 import org.http4k.core.Response
 import org.http4k.core.Status
+import org.http4k.core.then
 import org.http4k.format.Jackson
+import org.http4k.routing.bind
 import java.util.UUID
 
 private val inquiries = PermissionGroup("catering.inquiries")
@@ -114,7 +120,7 @@ private fun withHost(
                         val access =
                             AccessControl(
                                 sessionAuthentication(supplied.sessions, BearerSessionToken),
-                                supplied.authorization.permissionResolver,
+                                supplied.authorization,
                             )
                         val tags = setOf(Tag("Access"))
                         if (!mount) {
@@ -125,13 +131,9 @@ private fun withHost(
                                     renderer = OpenApi3(ApiInfo("Host", "1"), Jackson)
                                     descriptionPath = "/openapi.json"
                                     routes +=
-                                        permissionCatalogHttpCapability(
-                                            supplied.authorization.permissionCatalog,
-                                            access,
-                                            "/authorization",
-                                            tags,
-                                        ).contractRoutes
-                                    routes += currentPrincipalHttpCapability(supplied, access, "/me", tags).contractRoutes
+                                        permissionCatalogHttpCapability(access, "/authorization", tags).contractRoutes
+                                    routes += currentPrincipalHttpCapability(access, "/me", tags).contractRoutes
+                                    routes += authorizationAdministrationHttpCapability(supplied, access, "/admin/access").contractRoutes
                                 },
                             )
                         }
@@ -333,22 +335,155 @@ class AuthorizationReadHttpSpec :
                 val access =
                     AccessControl(
                         sessionAuthentication(host.context.sessions, BearerSessionToken),
-                        host.context.authorization.permissionResolver,
+                        host.context.authorization,
                     )
-                val catalog = host.context.authorization.permissionCatalog
                 listOf("", "/", "authorization", "/authorization/", "/a//b", "/{id}", "/a?b").forEach { path ->
-                    shouldThrow<IllegalArgumentException> { permissionCatalogHttpCapability(catalog, access, path) }
-                    shouldThrow<IllegalArgumentException> { currentPrincipalHttpCapability(host.context, access, path) }
+                    shouldThrow<IllegalArgumentException> { permissionCatalogHttpCapability(access, path) }
+                    shouldThrow<IllegalArgumentException> { currentPrincipalHttpCapability(access, path) }
                 }
                 shouldThrow<IllegalArgumentException> {
                     permissionCatalogHttpCapability(
-                        catalog,
                         access,
                         "/authorization",
                         setOf(Tag(" ")),
                     )
                 }
-                shouldThrow<IllegalArgumentException> { currentPrincipalHttpCapability(host.context, access, "/me", setOf(Tag(""))) }
+                shouldThrow<IllegalArgumentException> { currentPrincipalHttpCapability(access, "/me", setOf(Tag(""))) }
+            }
+        }
+
+        test("the standalone and administration catalog routes serve one identical representation of the running catalog") {
+            withHost { host ->
+                val (_, reader) = host.user("reader", setOf(CommercePermissions.RoleRead))
+                val (_, nobody) = host.user("nobody")
+                val standalone = host.get("/authorization/permissions", reader)
+                val administration = host.get("/admin/access/permissions", reader)
+
+                standalone.status shouldBe Status.OK
+                administration.bodyString() shouldBe standalone.bodyString()
+                Json.decodeFromString(PermissionsDto.serializer(), standalone.bodyString()) shouldBe
+                    host.context.authorization.permissionCatalog
+                        .dto()
+                host.get("/admin/access/permissions").status shouldBe Status.UNAUTHORIZED
+                host.get("/admin/access/permissions", nobody).status shouldBe Status.FORBIDDEN
+                host
+                    .get("/me", reader)
+                    .json()["permissionCatalogRevision"]!!
+                    .jsonPrimitive.content shouldBe
+                    standalone.json()["revision"]!!.jsonPrimitive.content
+            }
+        }
+
+        test("a capability cannot be wired to authorization state other than the runtime's") {
+            withHost { host ->
+                val foreign =
+                    AccessControl(
+                        sessionAuthentication(host.context.sessions, BearerSessionToken),
+                        PermissionCatalog(commercePermissionDefinitions),
+                        host.context.authorization.permissionResolver,
+                    )
+
+                shouldThrow<IllegalArgumentException> {
+                    authorizationAdministrationHttpCapability(host.context, foreign, "/admin/other")
+                }.message shouldBe "AccessControl must be built from this runtime's authorization directory"
+            }
+        }
+
+        test("every permission declared by the runtime's own routes is in a runtime-only catalog") {
+            // No application permissions: composing each runtime capability declares every
+            // permission its routes enforce, and AccessControl rejects any key the catalog lacks.
+            val database = TestDatabase.create()
+            try {
+                val configuration =
+                    CommerceRuntimeConfiguration(
+                        server = CommerceRuntimeConfiguration.Server(0),
+                        database = database.configuration,
+                        migrations = CommerceRuntimeConfiguration.Migrations(CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE),
+                    )
+                var composed = 0
+                commerceRuntime(
+                    configuration,
+                    ApplicationContributions(routes = { context ->
+                        val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), context.authorization)
+                        context.authorization.permissionCatalog.definitions shouldBe commercePermissionDefinitions.sortedBy { it.key.value }
+                        val routes =
+                            authorizationAdministrationHttpCapability(context, access, "/admin").contractRoutes +
+                                permissionCatalogHttpCapability(access, "/authorization").contractRoutes +
+                                currentPrincipalHttpCapability(access, "/me").contractRoutes +
+                                offeringsHttpCapability(
+                                    context,
+                                    OfferingsHttpBinding(
+                                        OfferingsCatalogId(UUID.randomUUID()),
+                                        "/offerings",
+                                        "runtimeCatalog",
+                                        OfferingsHttpAccess.ReadWrite(access),
+                                    ),
+                                ).contractRoutes
+                        composed = routes.size
+                        listOf(contract { this.routes += routes })
+                    }),
+                ).close()
+                (composed > 0) shouldBe true
+            } finally {
+                database.close()
+            }
+        }
+
+        test("a route declaring an unregistered permission fails runtime composition") {
+            val database = TestDatabase.create()
+            try {
+                val configuration =
+                    CommerceRuntimeConfiguration(
+                        server = CommerceRuntimeConfiguration.Server(0),
+                        database = database.configuration,
+                        migrations = CommerceRuntimeConfiguration.Migrations(CommerceRuntimeConfiguration.Migrations.OnStartup.MIGRATE),
+                    )
+
+                fun compose(permission: PermissionKey) =
+                    commerceRuntime(
+                        configuration,
+                        ApplicationContributions(
+                            permissionDefinitions = applicationPermissions,
+                            routes = { context ->
+                                val access =
+                                    AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), context.authorization)
+                                listOf("/guarded" bind Method.GET to access.requirePermission(permission).then { Response(Status.OK) })
+                            },
+                        ),
+                    )
+
+                shouldThrow<IllegalArgumentException> { compose(PermissionKey("commerce.principal.reed")) }.message shouldBe
+                    "Permission is not registered in the running PermissionCatalog: commerce.principal.reed"
+                shouldThrow<IllegalArgumentException> { compose(PermissionKey("catering.inquries.read")) }.message shouldBe
+                    "Permission is not registered in the running PermissionCatalog: catering.inquries.read"
+                compose(PermissionKey("catering.inquiries.read")).close()
+                compose(CommercePermissions.PrincipalRead).close()
+            } finally {
+                database.close()
+            }
+        }
+
+        test("an unknown grant stored after startup fails enforcement and the current principal closed") {
+            withHost { host ->
+                val (user, token) = host.user("reader", setOf(CommercePermissions.RoleRead))
+                host.get("/authorization/permissions", token).status shouldBe Status.OK
+                host.context.transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createUpdate(
+                            "INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES ('example.reader', 'Legacy.Key')",
+                        ).execute()
+                }
+
+                host.get("/authorization/permissions", token).status shouldBe Status.INTERNAL_SERVER_ERROR
+                val reported = host.get("/me", token)
+                reported.status shouldBe Status.INTERNAL_SERVER_ERROR
+                reported.bodyString().contains("Legacy.Key") shouldBe false
+                shouldThrow<IllegalStateException> {
+                    host.context.authorization.permissionResolver.permissionsFor(
+                        user.id,
+                    )
+                }.message shouldBe
+                    "Stored role permissions missing from PermissionCatalog: Legacy.Key"
             }
         }
     })

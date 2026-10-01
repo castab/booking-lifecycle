@@ -134,8 +134,8 @@ new identity; update retains its key and position; retire removes it from the su
 restore reactivates the same identity at the end of the current list. Retired discovery
 returns each last representation and its revision without reconstructing history on the
 client. Categories containing offerings cannot be retired. Writes require the
-`commerce.offerings.manage` permission, evaluated with the supplied `PermissionResolver`
-(normally `context.authorization.permissionResolver`);
+`commerce.offerings.manage` permission, evaluated through the supplied `AccessControl`
+(normally bound to `context.authorization`);
 retired discovery is also protected by this permission and absent from read-only bindings.
 Ordinary active and historical reads are as public as the host mounts them.
 

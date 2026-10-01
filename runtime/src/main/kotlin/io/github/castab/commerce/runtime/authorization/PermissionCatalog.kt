@@ -62,6 +62,16 @@ class PermissionCatalog(
         if (unknown.isNotEmpty()) throw CommerceFailure.ValidationFailed("Unknown permissions: ${unknown.joinToString()}")
     }
 
+    /**
+     * Fails closed when effective permissions resolved for enforcement or reporting include a
+     * key this catalog does not define. Unknown keys are never filtered out: a resolver that
+     * disagrees with the catalog is a broken configuration, not a principal without a grant.
+     */
+    internal fun requireEffective(keys: Set<PermissionKey>) {
+        val unknown = keys.filterNot { it in byKey }.map { it.value }.sorted()
+        check(unknown.isEmpty()) { "Effective permissions include keys missing from PermissionCatalog: ${unknown.joinToString()}" }
+    }
+
     /** Fails closed when stored grants name a key, well-formed or not, that this catalog does not define. */
     internal fun validatePersisted(storedKeys: Collection<String>) {
         val known = byKey.keys.mapTo(HashSet()) { it.value }
@@ -112,6 +122,12 @@ private val roles = PermissionGroup("commerce.roles")
  * These keys denote code capabilities, never database-created permissions. Runtime routes
  * enforce the offerings, principal, and role keys; the booking, financial-document, payment,
  * and refund keys are conventional names for operations that applications enforce.
+ *
+ * Every permission a runtime capability enforces must be defined here, including runtime
+ * infrastructure permissions that are not [CommercePermissions] (for example the
+ * administration of service credentials), with a group and a description. Omitting one is
+ * not silent: `AccessControl.requirePermission` rejects an unregistered key when the
+ * capability is composed.
  */
 val commercePermissionDefinitions: List<PermissionDefinition> =
     listOf(

@@ -37,12 +37,27 @@ class AuthorizationDirectory internal constructor(
     val permissionCatalog: PermissionCatalog,
 ) {
     val principalResolver = PrincipalResolver { id -> transactor.inTransaction { repository.principal(it, id) } }
-    val roleResolver = RoleResolver { key -> transactor.inTransaction { repository.role(it, key) } }
-    private val roleBasedPermissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
-    val permissionResolver: PermissionResolver =
-        PermissionResolver { id ->
-            roleBasedPermissionResolver.permissionsFor(id).also { keys -> permissionCatalog.validatePersisted(keys.map { it.value }) }
+
+    /**
+     * Live role definitions. Stored grants are checked against [permissionCatalog] as raw
+     * values first, so a stale or malformed key fails closed with the stored-grant diagnostic
+     * naming it, never as a role silently missing a permission.
+     */
+    val roleResolver =
+        RoleResolver { key ->
+            transactor.inTransaction {
+                permissionCatalog.validatePersisted(repository.storedPermissionKeys(it, key))
+                repository.role(it, key)
+            }
         }
+    private val roleBasedPermissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
+
+    /**
+     * Live effective permissions, resolved on every call. The result is always a subset of
+     * [permissionCatalog]; anything else fails closed with [IllegalStateException].
+     */
+    val permissionResolver: PermissionResolver =
+        PermissionResolver { id -> roleBasedPermissionResolver.permissionsFor(id).also(permissionCatalog::requireEffective) }
 
     fun listUsers(): List<User> = transactor.inTransaction { repository.users(it) }
 

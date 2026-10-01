@@ -627,10 +627,10 @@ and then race to insert one successor.
 
 The HTTP capability is opt-in. A concrete application can bind a catalog and compose its
 original http4k contract routes into its own contract. A write-capable binding carries the
-application's `AccessControl` (its authentication filter and live `PermissionResolver`):
+application's `AccessControl` (its authentication filter, bound to the runtime's authorization directory):
 
 ```kotlin
-val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), permissionResolver)
+val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), context.authorization)
 val catalog =
     offeringsHttpCapability(
         context,
@@ -1092,7 +1092,7 @@ HTTP request
 ```
 
 ```kotlin
-val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), context.authorization.permissionResolver)
+val access = AccessControl(sessionAuthentication(context.sessions, sessionCookie), context.authorization)
 
 routes(
     "/auth/login" bind Method.POST to access.public().then(login),
@@ -1150,7 +1150,7 @@ on sessions that are already active.
 | `SessionTokenExtractor`, `BearerSessionToken`, `SessionCookie` | Where a request carries its token. Transport only; they decide nothing about validity. |
 | `sessionAuthentication(sessions, extractor)` | The filter that resolves the token and sets `authenticatedPrincipal`, or answers `401`. |
 | `runtime.http`: `authenticatedPrincipal` | The read-only request lens handlers use. Only the runtime's authentication filters set it. |
-| `runtime.http`: `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl` | Authorization filters and the declarative `public()` / `authenticated()` / `requirePermission(...)` route protection. |
+| `runtime.http`: `requireAuthenticatedPrincipal`, `AccessControl` | Authorization filters and the declarative `public()` / `authenticated()` / `requirePermission(...)` route protection, bound to the running permission catalog. |
 
 **Sessions authenticate only known, ACTIVE runtime principals.** `create` checks the
 runtime directory in its transaction: an unknown principal raises `NotFound`, and a
@@ -1192,12 +1192,23 @@ Security decisions:
 **Runtime capabilities declare permissions; applications supply `AccessControl`.** A
 runtime-provided HTTP capability that exposes protected operations declares the commerce
 permission each one requires and receives the application's `AccessControl` explicitly
-when composed. The application chooses its authentication transport and may use
-`context.authorization.permissionResolver` for persistent RBAC. `commerceRuntime(...)`
-takes no global resolver: public capabilities need none, and a protected capability
-cannot be composed without `AccessControl`. Evaluation always
-goes through `PrincipalId.can`, and nothing about missing authorization configuration ever
-means "allow".
+when composed. The application chooses its authentication transport and builds
+`AccessControl(authentication, context.authorization)`, which binds the permission catalog,
+the live effective permissions, and principal identity from the one running authorization
+directory; they cannot be supplied from unrelated sources. `commerceRuntime(...)` takes no
+global resolver: public capabilities need none, and a protected capability cannot be
+composed without `AccessControl`. Evaluation always goes through `PrincipalId.can`, and
+nothing about missing authorization configuration ever means "allow".
+
+**Every enforced permission is in the catalog.** `AccessControl.requirePermission(key)`
+rejects a key the running `PermissionCatalog` does not define when the route is composed,
+with `IllegalArgumentException: Permission is not registered in the running
+PermissionCatalog: <key>`. A typo such as `commerce.principal.reed` therefore fails
+`commerceRuntime(...)` instead of producing a route nobody can ever be granted. Effective
+permissions are checked against the catalog on every resolution: a key outside it fails
+closed with an internal error (`500 internal_failure`, logged), is never filtered out, and
+never authorizes. The catalog is fixed for the life of the process; grants and effective
+permissions stay live.
 
 **Principal persistence contract.** commerce-runtime persists an explicit set of supported
 `PrincipalId` representations: today `UserId` as `USER` and `ServiceId` as `SERVICE`, each
@@ -1280,7 +1291,7 @@ The host mounts the opt-in contract routes and its own session transport:
 ```kotlin
 val access = AccessControl(
     sessionAuthentication(context.sessions, appSessionCookie),
-    context.authorization.permissionResolver,
+    context.authorization,
 )
 val admin = authorizationAdministrationHttpCapability(
     context = context,
@@ -1329,7 +1340,7 @@ Four questions stay separate:
 | Question | Answered by |
 |---|---|
 | Which permissions exist? | `PermissionCatalog` (`context.authorization.permissionCatalog`) |
-| Which permissions does principal X hold now? | `PermissionResolver` (`context.authorization.permissionResolver`) |
+| Which permissions does principal X hold now? | `PermissionResolver` (`context.authorization.permissionResolver`), always a subset of the catalog |
 | May principal X perform operation Y? | `AccessControl.requirePermission` / `PrincipalId.can`, on every request |
 | Which known permissions does role R grant? | Role administration (`AuthorizationDirectory`) |
 
@@ -1346,10 +1357,19 @@ and never persisted. Its `revision` (`sha256:` plus a hex digest of the canonica
 changes whenever a definition is added, removed, or changed, and never otherwise; it is
 for diagnostics and frontend compatibility checks, not authorization.
 
-The catalog is the authority for "is this key known to this application?": role creation
-and grant replacement reject unknown keys, and startup and live resolution fail closed on
-stored grants it does not define. It is never the authority for whether a principal holds
-a permission, and knowing a key confers nothing.
+The catalog is the authority for "is this key known to this application?": route
+declarations (`AccessControl.requirePermission`) reject unknown keys at composition, role
+creation and grant replacement reject them at mutation, and startup and live resolution
+fail closed on stored grants it does not define, naming the stored value even when it is
+not a well-formed key (`Legacy.Key`). Effective permissions outside the catalog fail
+closed. It is never the authority for whether a principal holds a permission, and knowing
+a key confers nothing.
+
+Every permission a runtime capability enforces must be defined in
+`commercePermissionDefinitions`, including runtime infrastructure permissions that are not
+`CommercePermissions`. Composing a capability that declares an undefined key fails, and
+`AuthorizationReadHttpSpec` composes every runtime capability against a runtime-only
+catalog to keep it so.
 
 The runtime describes every key in `CommercePermissions`. Its own routes enforce
 `OfferingsManage`, `PrincipalRead`, `PrincipalManage`, `RoleRead`, `RoleManage`, and
@@ -1370,17 +1390,13 @@ object CateringPermissions {
 val runtime = commerceRuntime(configuration, ApplicationContributions(
     permissionDefinitions = CateringPermissions.definitions,
     routes = { context ->
-        val access = AccessControl(
-            sessionAuthentication(context.sessions, appSessionCookie),
-            context.authorization.permissionResolver,
-        )
+        val access = AccessControl(sessionAuthentication(context.sessions, appSessionCookie), context.authorization)
         val tags = setOf(Tag("Access"))
         listOf(contract {
             renderer = OpenApi3(ApiInfo("Catering", "1"), Jackson)
             descriptionPath = "/openapi.json"
-            routes += permissionCatalogHttpCapability(
-                context.authorization.permissionCatalog, access, "/authorization", tags).contractRoutes
-            routes += currentPrincipalHttpCapability(context, access, "/me", tags).contractRoutes
+            routes += permissionCatalogHttpCapability(access, "/authorization", tags).contractRoutes
+            routes += currentPrincipalHttpCapability(access, "/me", tags).contractRoutes
             // Enforcement uses the same key the catalog describes.
             routes += "/inquiries" / Path.of("id") / "assignee" bindContract PUT to { id: String, _: String ->
                 access.requirePermission(CateringPermissions.AssignInquiry).then(assignInquiry(id))
@@ -1393,10 +1409,17 @@ val runtime = commerceRuntime(configuration, ApplicationContributions(
 `PermissionCatalog.of(commercePermissionDefinitions, CateringPermissions.definitions)`
 builds the same catalog outside the runtime, for example in a unit test.
 
-Neither route exists unless the host mounts it. `permissionCatalogHttpCapability` serves
-`GET {basePath}/permissions` and requires `RoleRead`, which reads roles and the vocabulary
-without the right to change them (`RoleManage`). `authorizationAdministrationHttpCapability`
-already includes the same route, so mount one or the other at a base path:
+Neither route exists unless the host mounts it. Both take only the `AccessControl`, and
+serve the catalog, identity, and effective permissions of the authorization it enforces,
+so they cannot describe different authorization state than the one protecting the routes.
+`authorizationAdministrationHttpCapability` likewise rejects an `AccessControl` built from
+another directory.
+
+`permissionCatalogHttpCapability` serves `GET {basePath}/permissions` and requires
+`RoleRead`, which reads roles and the vocabulary without the right to change them
+(`RoleManage`). `authorizationAdministrationHttpCapability` includes the same route
+implementation, with the same representation and protection, so mount one or the other at
+a base path:
 
 ```json
 {
@@ -1412,9 +1435,15 @@ already includes the same route, so mount one or the other at a base path:
 }
 ```
 
+`RoleRead` stays the catalog permission deliberately. Permission keys are not secrets, so
+the only reason for a narrower permission would be a principal that needs the full
+vocabulary without seeing role definitions. Building or checking a role-management UI
+needs both anyway, and a client that only wants to detect a vocabulary change compares
+`permissionCatalogRevision` from the current principal route, which needs no permission.
+
 `currentPrincipalHttpCapability` serves `GET {path}` to any authenticated principal (`401`
 otherwise) and returns its identity and its **effective** permissions, resolved on every
-request through `AccessControl.permissionResolver`, the resolver that enforces every
+request through the `AccessControl`, the same resolution that enforces every
 `requirePermission`. A principal without grants gets `[]`. Role keys are deliberately
 absent, so clients never derive authority from role names:
 
@@ -1428,6 +1457,23 @@ absent, so clients never derive authority from role names:
 
 `kind` is `USER` or `SERVICE`; a service's `displayName` is its name. Both routes declare
 every field as required and non-null in OpenAPI.
+
+**The current principal is the request's principal, not the human at a screen.** The route
+describes whichever principal authenticated the backend request. With a
+backend-for-frontend in between:
+
+```text
+browser user
+    → frontend / BFF
+        → commerce backend, authenticated as the BFF's own SERVICE principal
+```
+
+a `GET /me` made by the BFF with its own service credential correctly returns the BFF's
+service identity and the service's permissions. It does not recover the browser user's
+identity, and nothing in the runtime does: there is no delegation, impersonation,
+forwarded-user header, or act-as semantics, and a service is not trusted for being one.
+A BFF that needs its user's identity or permissions must obtain them through its own,
+separately designed means.
 
 **Frontend checks are user experience, not security.** A frontend may hide an "Add user"
 control when `permissions` lacks a key, and may compare the keys it references with the
@@ -1633,7 +1679,15 @@ definition. `AuthorizationReadHttpSpec` proves the catalog and current principal
 over real HTTP: `401`, `403` (including for `RoleManage` alone), complete metadata in key
 order, routes absent unless mounted, live effective permissions with an empty list for a
 principal without grants, services and users alike, and OpenAPI schemas whose required,
-non-nullable properties are exactly those of the live responses.
+non-nullable properties are exactly those of the live responses. It also composes every
+runtime capability against a runtime-only catalog (the completeness guard), proves that a
+typo such as `commerce.principal.reed` fails `commerceRuntime(...)`, that the standalone and
+administration catalog routes serve one identical body, that an `AccessControl` from
+another directory is rejected, and that an unknown grant stored after startup fails both
+enforcement and the current principal route closed. `AccessControlCatalogSpec` proves,
+without a database, composition-time rejection of unregistered keys, fail-closed handling
+of a resolver that returns a key outside the catalog (for enforcement and for the current
+principal), and live per-request resolution.
 
 Database specs run against a real PostgreSQL 18 that the build starts through the Docker CLI.
 See [Building and testing](../README.md#building-and-testing).

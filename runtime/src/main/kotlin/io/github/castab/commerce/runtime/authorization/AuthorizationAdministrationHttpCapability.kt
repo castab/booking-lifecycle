@@ -47,6 +47,11 @@ fun authorizationAdministrationHttpCapability(
     requireTagNames(tags)
     val routeTags = tags
     val directory = context.authorization
+    // Role mutations validate against the directory's catalog; enforcement and the catalog
+    // route use the AccessControl's. They must be one and the same.
+    require(accessControl.permissionCatalog === directory.permissionCatalog) {
+        "AccessControl must be built from this runtime's authorization directory"
+    }
     val userPath = Path.of("userId")
     val servicePath = Path.of("serviceId")
     val rolePath = Path.of("roleKey")
@@ -307,7 +312,7 @@ fun authorizationAdministrationHttpCapability(
             Response(Status.OK).with(roleBody of directory.replaceRolePermissions(key.roleKey(), keys).dto())
         }
     }
-    routes += permissionCatalogRoute(directory.permissionCatalog, accessControl, basePath, routeTags)
+    routes += permissionCatalogRoute(accessControl, basePath, routeTags)
 
     return AuthorizationAdministrationHttpCapability(routes)
 }

@@ -1,8 +1,11 @@
 package io.github.castab.commerce.runtime.http
 
+import io.github.castab.commerce.runtime.authorization.AuthorizationDirectory
+import io.github.castab.commerce.runtime.authorization.PermissionCatalog
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.PrincipalId
+import io.github.castab.commerce.staff.PrincipalResolver
 import io.github.castab.commerce.staff.can
 import org.http4k.core.Filter
 import org.http4k.core.HttpHandler
@@ -63,8 +66,11 @@ val requireAuthenticatedPrincipal: Filter =
  * is cached, and nothing was captured when the session began, so role and principal
  * changes apply to sessions that are already active. It works for every kind of
  * `PrincipalId`, human or service.
+ *
+ * Internal: applications enforce permissions through [AccessControl.requirePermission],
+ * which binds the declaration to the running `PermissionCatalog`.
  */
-fun requirePermission(
+internal fun requirePermission(
     permission: PermissionKey,
     permissionResolver: PermissionResolver,
 ): Filter =
@@ -84,6 +90,23 @@ fun requirePermission(
  * Declarative route protection: every route states whether it is [public], merely
  * [authenticated], or requires a permission ([requirePermission]).
  *
+ * **One authorization universe.** An `AccessControl` is built from the application's
+ * [AuthorizationDirectory] (`context.authorization`), which supplies the vocabulary
+ * ([permissionCatalog]), the live effective permissions, and principal identity together.
+ * They cannot come from unrelated sources, and the runtime capabilities that take an
+ * `AccessControl` describe exactly the authorization it enforces.
+ *
+ * **Declarations are catalog-valid.** [requirePermission] rejects a key the running
+ * catalog does not define when the route is composed, so a typo such as
+ * `commerce.principal.reed` fails application startup instead of producing a route nobody
+ * can ever be granted.
+ *
+ * **Authorization is live and catalog-bounded.** Effective permissions are resolved through
+ * `PrincipalId.can` on every request, including when the principal was reused. Nothing is
+ * cached, so role and grant changes apply to existing sessions. A resolution that includes
+ * a key outside [permissionCatalog] fails closed with an internal error; it is never
+ * filtered, and it never authorizes.
+ *
  * **Authentication is conditional.** [authentication] is a fallback: it runs only when no
  * runtime authentication filter has already established [authenticatedPrincipal] for the
  * request. Once one has, nested `AccessControl` instances reuse that principal and never
@@ -94,21 +117,16 @@ fun requirePermission(
  * not inspected. A request carrying credentials for two different principals is
  * authenticated as whichever the responsible filter established; nothing reconciles them.
  *
- * **Authorization is live.** [permissionResolver], the application's, is consulted through
- * `PrincipalId.can` on every request, including when the principal was reused. Nothing is
- * cached.
- *
  * Protection fails closed: the protected declarations re-check the principal after
  * authentication, so a lenient [authentication] still cannot expose them.
  *
  * @param authentication Establishes [authenticatedPrincipal] when the request is not yet
  *   authenticated, for example `sessionAuthentication(context.sessions, SessionCookie("app_session"))`.
- * @property permissionResolver The application's source of current permissions: the one
- *   every [requirePermission] declaration consults, and therefore the source a capability
- *   uses to report a principal's effective permissions.
+ * @property permissionCatalog The running vocabulary every [requirePermission] declaration
+ *   and every effective permission must belong to.
  *
  * ```kotlin
- * val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), permissionResolver)
+ * val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), context.authorization)
  * routes(
  *     "/login" bind POST to access.public().then(login),
  *     "/logout" bind POST to access.authenticated().then(logout),
@@ -116,10 +134,23 @@ fun requirePermission(
  * )
  * ```
  */
-class AccessControl(
+class AccessControl internal constructor(
     private val authentication: Filter,
-    val permissionResolver: PermissionResolver,
+    val permissionCatalog: PermissionCatalog,
+    permissionResolver: PermissionResolver,
+    @get:JvmSynthetic internal val principalResolver: PrincipalResolver = PrincipalResolver { null },
 ) {
+    /** Binds [authentication] to the catalog, live permissions, and principals of [authorization]. */
+    constructor(
+        authentication: Filter,
+        authorization: AuthorizationDirectory,
+    ) : this(authentication, authorization.permissionCatalog, authorization.permissionResolver, authorization.principalResolver)
+
+    /** Live effective permissions, bounded by [permissionCatalog]: an unknown key fails closed. */
+    @get:JvmSynthetic
+    internal val permissionResolver =
+        PermissionResolver { id -> permissionResolver.permissionsFor(id).also(permissionCatalog::requireEffective) }
+
     /**
      * [authentication] as a fallback: skipped when the request already carries a
      * runtime-established [authenticatedPrincipal], so the session is resolved once per
@@ -141,7 +172,16 @@ class AccessControl(
     /** Any authenticated principal, without a particular permission. */
     fun authenticated(): Filter = authenticateUnlessAuthenticated.then(requireAuthenticatedPrincipal)
 
-    /** An authenticated principal that currently holds [permission]. */
-    fun requirePermission(permission: PermissionKey): Filter =
-        authenticateUnlessAuthenticated.then(requirePermission(permission, permissionResolver))
+    /**
+     * An authenticated principal that currently holds [permission].
+     *
+     * @throws IllegalArgumentException when [permission] is not registered in
+     *   [permissionCatalog], at composition, before any request is served.
+     */
+    fun requirePermission(permission: PermissionKey): Filter {
+        require(permission in permissionCatalog) {
+            "Permission is not registered in the running PermissionCatalog: ${permission.value}"
+        }
+        return authenticateUnlessAuthenticated.then(requirePermission(permission, permissionResolver))
+    }
 }

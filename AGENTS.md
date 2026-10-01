@@ -391,11 +391,22 @@ are validated lowercase dot-separated segments and are never normalized. A
 immutable, key-ordered, code-defined, and never persisted; do not add a table for it. Its
 `revision` is a SHA-256 digest of its canonical contents, for diagnostics only. Every
 `CommercePermissions` key has a definition; describe a new runtime key when adding it.
-`permissionCatalogHttpCapability` (also included in the administration capability) requires
-`RoleRead`, not `RoleManage`. `currentPrincipalHttpCapability` reports a principal's
-effective permissions through `AccessControl.permissionResolver`, the resolver that
-enforces, and never role keys. Both are mounted only by the application. Frontend checks
-are user experience; never relax server-side enforcement because of them. `PrincipalRead` and `PrincipalManage` cover both principal
+`AccessControl(authentication, context.authorization)` binds the catalog, live effective
+permissions, and principal identity from one directory; do not reintroduce a public
+constructor or free `requirePermission` that accepts an unrelated resolver or catalog. Its
+`requirePermission` rejects a key outside the catalog at composition, and effective
+permissions outside the catalog fail closed (never filtered). Every permission a runtime
+capability enforces, including runtime infrastructure permissions that are not
+`CommercePermissions` (such as service-credential administration), must be in
+`commercePermissionDefinitions` with a group and description. `permissionCatalogHttpCapability`
+and `currentPrincipalHttpCapability` take only the `AccessControl`, so they describe the
+authorization it enforces; the administration capability shares the same catalog route and
+rejects an `AccessControl` from another directory. The catalog route requires `RoleRead`,
+not `RoleManage`. The current principal route reports the request's authenticated
+principal, `USER` or `SERVICE` (a BFF calling with its own credential sees itself), with
+effective permissions and never role keys; do not add delegation or forwarded-user
+semantics to it. Both are mounted only by the application. Frontend checks are user
+experience; never relax server-side enforcement because of them. `PrincipalRead` and `PrincipalManage` cover both principal
 kinds; `RoleRead`, `RoleManage`, and `RoleAssign` are distinct. Disabling either kind
 revokes all its sessions in the same transaction. An assigned role cannot be deleted.
 No conventional role, including `Administrator`, has implicit grants.
@@ -436,8 +447,8 @@ hierarchy in this version.
   runtime HTTP capability that exposes protected operations declares the commerce
   permission each requires and receives the application's `AccessControl` explicitly at
   composition, as `OfferingsHttpAccess.ReadWrite` does for
-  `CommercePermissions.OfferingsManage`. The application can use
-  `context.authorization.permissionResolver`. Never add a global resolver to
+  `CommercePermissions.OfferingsManage`. The application builds it from
+  `context.authorization`. Never add a global resolver to
   `commerceRuntime(...)`, never let missing authorization mean
   "allow", and keep public capabilities free of an irrelevant resolver.
 - **HTTP.** `SessionTokenExtractor` (transport) is separate from `SessionManager`
