@@ -173,13 +173,3 @@ internal fun restoreStoredCatalog(
     restoreStored(what, OfferingsCatalogJson.serializer(), json) { catalog ->
         catalog.categories.map { it.restore() } to catalog.offerings.map { it.restore() }
     }
-
-internal fun restoreStoredOffering(
-    what: String,
-    json: String,
-): Offering = restoreStored(what, OfferingJson.serializer(), json) { it.restore() }
-
-internal fun restoreStoredCategory(
-    what: String,
-    json: String,
-): OfferingCategory = restoreStored(what, OfferingCategoryJson.serializer(), json) { it.restore() }

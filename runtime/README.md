@@ -494,11 +494,13 @@ and currency agreement are enforced by the domain constructors on every read, as
 on every write.
 
 Catalog history is answered from the immutable revisions of one catalog, which the primary
-key already bounds. `offeringKeyExistsInHistory` and `categoryKeyExistsInHistory` use JSONB
-containment of `{"key": ...}` in the revision arrays; `retrieveRetiredOfferings` and
-`retrieveRetiredCategories` expand the arrays up to the requested revision, exclude keys
-present in it, keep each key's last representation with the revision it came from, and order
-by key bytes. There is no JSONB index because no query needs one beyond the primary key.
+key already bounds. Every history method restores each revision it consults through the same
+strict path as `retrieveVersion` and computes in Kotlin, so a corrupt revision fails the
+question with an `IllegalStateException` instead of influencing its answer. Key existence
+checks every revision. Retirement considers the revisions up to the requested one, treats the
+restored snapshot at that revision as what is present (an unstored revision has nothing
+present), keeps each absent key's last representation with the revision it came from, and
+orders by UTF-8 byte order, matching PostgreSQL `"C"`. There is no projection or JSONB index.
 
 V9 does not convert populated databases. Like V7 and V8, it fails and leaves the schema
 untouched when a financial snapshot or an offerings revision already exists; recreate the

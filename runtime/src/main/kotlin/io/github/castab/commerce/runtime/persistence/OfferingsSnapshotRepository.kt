@@ -11,6 +11,7 @@ import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
+import java.util.Arrays
 import java.util.UUID
 
 /** Append-only commerce-owned catalog snapshots in caller-owned transactions. */
@@ -106,93 +107,96 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
             .findOne()
             .orElse(null)
 
-    // History questions are answered from the immutable revisions of one catalog, which the
-    // primary key (catalog_id, revision) already bounds. Containment of {"key": ...} in the
-    // `offerings` or `categories` array compares the key exactly and needs no index of its own.
+    // History questions reason about immutable revisions, so they work only from complete,
+    // strictly restored snapshots: every revision they consult goes through the same
+    // restoration as retrieveVersion, and a corrupt revision fails the question rather than
+    // being skipped or half-read. Catalog revisions are few, and one catalog's are bounded
+    // by the primary key (catalog_id, revision).
     override fun offeringKeyExistsInHistory(
         transaction: Transaction,
         catalogId: OfferingsCatalogId,
         key: OfferingKey,
-    ): Boolean = keyExistsInHistory(transaction, catalogId, "offerings", key.value)
+    ): Boolean = snapshots(transaction, catalogId, through = null).any { it.offering(key) != null }
 
     override fun categoryKeyExistsInHistory(
         transaction: Transaction,
         catalogId: OfferingsCatalogId,
         key: OfferingCategoryKey,
-    ): Boolean = keyExistsInHistory(transaction, catalogId, "categories", key.value)
+    ): Boolean = snapshots(transaction, catalogId, through = null).any { it.category(key) != null }
 
     override fun retrieveRetiredOfferings(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
     ): List<HistoricalCatalogValue<Offering>> =
-        retired(transaction, reference, "offerings").map { (revision, json) ->
-            HistoricalCatalogValue(
-                OfferingsSnapshotReference(reference.catalogId, revision),
-                restoreStoredOffering("offering in catalog ${reference.catalogId.value} $revision", json),
-            )
-        }
+        retired(
+            snapshots(transaction, reference.catalogId, through = reference.revision),
+            reference,
+            elements = { it.offerings },
+            keyOf = { it.key.value },
+        )
 
     override fun retrieveRetiredCategories(
         transaction: Transaction,
         reference: OfferingsSnapshotReference,
     ): List<HistoricalCatalogValue<OfferingCategory>> =
-        retired(transaction, reference, "categories").map { (revision, json) ->
-            HistoricalCatalogValue(
-                OfferingsSnapshotReference(reference.catalogId, revision),
-                restoreStoredCategory("category in catalog ${reference.catalogId.value} $revision", json),
-            )
-        }
-
-    private fun keyExistsInHistory(
-        transaction: Transaction,
-        catalogId: OfferingsCatalogId,
-        array: String,
-        key: String,
-    ): Boolean {
-        require(array == "offerings" || array == "categories") { "Unsupported catalog array: $array" }
-        return transaction.handle
-            .createQuery(
-                """SELECT EXISTS (
-                       SELECT 1 FROM commerce.offerings_snapshots
-                       WHERE catalog_id = :catalogId
-                         AND catalog -> '$array' @> jsonb_build_array(jsonb_build_object('key', CAST(:key AS text))))""",
-            ).bind("catalogId", catalogId.value)
-            .bind("key", key)
-            .mapTo(Boolean::class.java)
-            .one()
-    }
+        retired(
+            snapshots(transaction, reference.catalogId, through = reference.revision),
+            reference,
+            elements = { it.categories },
+            keyOf = { it.key.value },
+        )
 
     /**
-     * The last stored element of [array] (`offerings` or `categories`) for every key that
-     * appears in a revision up to [reference] but not in [reference] itself, in key order
-     * (byte order, independent of database collation), with the revision it came from.
+     * Every stored revision of the catalog, oldest first and restored, up to and including
+     * [through] when given. Asking about a revision that is not stored is permitted: the
+     * revisions that exist up to it are returned.
      */
-    private fun retired(
+    private fun snapshots(
         transaction: Transaction,
-        reference: OfferingsSnapshotReference,
-        array: String,
-    ): List<Pair<OfferingsRevision, String>> {
-        require(array == "offerings" || array == "categories") { "Unsupported catalog array: $array" }
-        return transaction.handle
+        catalogId: OfferingsCatalogId,
+        through: OfferingsRevision?,
+    ): List<OfferingsSnapshot> =
+        transaction.handle
             .createQuery(
-                """WITH current_snapshot AS (
-                       SELECT catalog -> '$array' AS elements FROM commerce.offerings_snapshots
-                       WHERE catalog_id = :catalogId AND revision = :revision),
-                   historical AS (
-                       SELECT s.revision, e.element, e.element ->> 'key' AS key
-                       FROM commerce.offerings_snapshots s
-                       CROSS JOIN LATERAL jsonb_array_elements(s.catalog -> '$array') AS e(element)
-                       WHERE s.catalog_id = :catalogId AND s.revision <= :revision)
-                   SELECT DISTINCT ON (key COLLATE "C") revision, element::text AS element
-                   FROM historical
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM current_snapshot
-                       WHERE current_snapshot.elements @> jsonb_build_array(jsonb_build_object('key', historical.key)))
-                   ORDER BY key COLLATE "C", revision DESC""",
-            ).bind("catalogId", reference.catalogId.value)
-            .bind("revision", reference.revision.number)
-            .map { rows, _ -> OfferingsRevision.of(rows.getInt("revision")) to rows.getString("element") }
+                """SELECT catalog_id, revision, previous_revision, catalog::text AS catalog
+                   FROM commerce.offerings_snapshots
+                   WHERE catalog_id = :catalogId AND (CAST(:through AS integer) IS NULL OR revision <= :through)
+                   ORDER BY revision""",
+            ).bind("catalogId", catalogId.value)
+            .bind("through", through?.number)
+            .map { rows, _ -> snapshot(rows) }
             .list()
+
+    /**
+     * The last representation of every key that appears in a revision up to [reference] but
+     * not in the snapshot at [reference], with the revision it came from, in key byte order.
+     * Presence is defined by the restored snapshot at [reference]; when that revision is not
+     * stored, nothing is present and every historical key is retired.
+     */
+    private fun <T> retired(
+        history: List<OfferingsSnapshot>,
+        reference: OfferingsSnapshotReference,
+        elements: (OfferingsSnapshot) -> List<T>,
+        keyOf: (T) -> String,
+    ): List<HistoricalCatalogValue<T>> {
+        val current =
+            history
+                .lastOrNull { it.revision == reference.revision }
+                ?.let(elements)
+                .orEmpty()
+                .map(keyOf)
+                .toSet()
+        val lastSeen = HashMap<String, HistoricalCatalogValue<T>>()
+        history.forEach { snapshot ->
+            elements(snapshot).forEach { element ->
+                lastSeen[keyOf(element)] = HistoricalCatalogValue(snapshot.reference, element)
+            }
+        }
+        return lastSeen
+            .filterKeys { it !in current }
+            .entries
+            .sortedWith(compareBy(Utf8ByteOrder) { it.key })
+            .map { it.value }
     }
 
     private fun snapshot(rows: ResultSet): OfferingsSnapshot {
@@ -212,4 +216,16 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
             throw IllegalStateException("Persisted $what violates a domain invariant: ${e.message}", e)
         }
     }
+}
+
+/**
+ * Orders strings by their UTF-8 bytes, which is code point order and matches PostgreSQL's
+ * `"C"` collation. Kotlin's own String ordering compares UTF-16 code units and differs for
+ * supplementary characters.
+ */
+private object Utf8ByteOrder : Comparator<String> {
+    override fun compare(
+        a: String,
+        b: String,
+    ): Int = Arrays.compareUnsigned(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
 }

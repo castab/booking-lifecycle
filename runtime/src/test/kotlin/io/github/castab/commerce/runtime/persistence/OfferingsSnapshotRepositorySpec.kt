@@ -56,6 +56,8 @@ private fun offering(
 
 private fun catalogId() = OfferingsCatalogId(UUID.randomUUID())
 
+private class RollBack : RuntimeException()
+
 class OfferingsSnapshotRepositorySpec :
     FunSpec({
         lateinit var database: TestDatabase
@@ -418,6 +420,102 @@ class OfferingsSnapshotRepositorySpec :
                 .inTransaction { repository.retrieveRetiredOfferings(it, empty.reference) }
                 .map { it.value.key.value }
                 .shouldContainExactly("A", "B", "_", "a", "b", "～", "😀")
+        }
+
+        test("a revision that is not stored retires every historical key, as before") {
+            val r1 = OfferingsSnapshot.create(catalogId(), listOf(category("choice")), listOf(offering("alpha", "choice")))
+            val r2 = r1.revise(listOf(category("choice")), listOf(offering("alpha", "choice", "later")))
+            transactor.inTransaction { transaction ->
+                repository.insert(transaction, r1)
+                repository.insert(transaction, r2)
+                val absent = OfferingsSnapshotReference(r1.catalogId, OfferingsRevision.of(5))
+                repository
+                    .retrieveRetiredOfferings(transaction, absent)
+                    .map { it.value.key.value to it.reference.revision.number }
+                    .shouldContainExactly("alpha" to 2)
+                repository
+                    .retrieveRetiredCategories(transaction, absent)
+                    .map { it.value.key.value to it.reference.revision.number }
+                    .shouldContainExactly("choice" to 2)
+            }
+        }
+
+        test("every history question fails loudly when a revision it consults is not a valid snapshot") {
+            val choice = category("choice")
+            val other = category("other")
+            val r1 =
+                OfferingsSnapshot.create(
+                    catalogId(),
+                    listOf(choice, other),
+                    listOf(
+                        offering("item", "choice", price = OfferingPrice.Fixed(money("1.00"))),
+                        offering("timed", "other", price = OfferingPrice.PerDuration(money("2.00"), Duration.ofMinutes(5))),
+                    ),
+                )
+            val r2 = r1.revise(listOf(choice), listOf(offering("item", "choice")))
+            val r3 = r2.revise(listOf(choice), listOf(offering("item", "choice")))
+            transactor.inTransaction { transaction -> listOf(r1, r2, r3).forEach { repository.insert(transaction, it) } }
+
+            val questions =
+                mapOf<String, (Transaction) -> Any?>(
+                    "offering key exists" to { repository.offeringKeyExistsInHistory(it, r1.catalogId, OfferingKey("item")) },
+                    "category key exists" to { repository.categoryKeyExistsInHistory(it, r1.catalogId, OfferingCategoryKey("choice")) },
+                    "retired offerings" to { repository.retrieveRetiredOfferings(it, r3.reference) },
+                    "retired categories" to { repository.retrieveRetiredCategories(it, r3.reference) },
+                )
+            // Each corruption is valid JSON for its own property but not part of a valid snapshot or a supported representation.
+            listOf(
+                "jsonb_set(catalog, '{offerings,0,category}', '\"absent\"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,1,key}', catalog #> '{offerings,0,key}')",
+                "jsonb_set(catalog, '{categories,1,key}', catalog #> '{categories,0,key}')",
+                "jsonb_set(catalog, '{offerings,0,selectionState}', '\"OTHER\"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,availability}', 'null'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,price}', '{\"kind\": \"PER_GUEST\", \"amount\": \"1.00\", \"currency\": \"USD\"}'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,price,amount}', '1.00'::jsonb)",
+                "jsonb_set(catalog, '{categories,0,minimumSelections}', '\"0\"'::jsonb)",
+                "catalog #- '{categories,0,displayName}'",
+            ).forEach { corruption ->
+                questions.forEach { (name, ask) ->
+                    withClue("$name with $corruption") {
+                        shouldThrow<IllegalStateException> {
+                            transactor.inTransaction { transaction ->
+                                transaction.handle
+                                    .createUpdate(
+                                        "UPDATE commerce.offerings_snapshots SET catalog = $corruption WHERE catalog_id = :id AND revision = 1",
+                                    ).bind("id", r1.catalogId.value)
+                                    .execute()
+                                ask(transaction)
+                            }
+                        }.message shouldContain r1.catalogId.value.toString()
+                    }
+                }
+            }
+
+            // A corrupt revision after the one asked about is outside a bounded question, but not the whole-history ones.
+            shouldThrow<RollBack> {
+                transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createUpdate(
+                            "UPDATE commerce.offerings_snapshots " +
+                                "SET catalog = jsonb_set(catalog, '{offerings,0,category}', '\"absent\"'::jsonb) " +
+                                "WHERE catalog_id = :id AND revision = 3",
+                        ).bind("id", r1.catalogId.value)
+                        .execute()
+                    repository.retrieveRetiredOfferings(transaction, r2.reference).map { it.value.key.value } shouldContainExactly
+                        listOf("timed")
+                    repository.retrieveRetiredCategories(transaction, r2.reference).map { it.value.key.value } shouldContainExactly
+                        listOf("other")
+                    shouldThrow<IllegalStateException> {
+                        repository.offeringKeyExistsInHistory(transaction, r1.catalogId, OfferingKey("item"))
+                    }
+                    shouldThrow<IllegalStateException> {
+                        repository.categoryKeyExistsInHistory(transaction, r1.catalogId, OfferingCategoryKey("choice"))
+                    }
+                    shouldThrow<IllegalStateException> { repository.retrieveRetiredOfferings(transaction, r3.reference) }
+                    // Roll back the corruption so the stored revisions stay as inserted.
+                    throw RollBack()
+                }
+            }
         }
 
         test("one caller transaction atomically commits and rolls back commerce and application rows") {

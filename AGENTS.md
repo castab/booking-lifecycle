@@ -1231,11 +1231,13 @@ are a secondary concern for projections, not a reason to normalize.
   uniqueness, currency agreement, positive durations) are enforced by the domain
   constructors and `restore` factories on every read. SQL only checks the structural shape
   (`lines` is an array; `catalog` is an object with `categories` and `offerings` arrays).
-- Catalog history questions are answered from the immutable revisions of one catalog: key
-  existence by JSONB containment (`catalog -> 'offerings' @> [{"key": ...}]`), and retired
-  values by expanding the arrays up to the requested revision and excluding keys present in
-  it, ordered by key in `COLLATE "C"`. The primary key already bounds each query to one
-  catalog. Add a JSONB index only for a runtime query that needs it.
+- Catalog history questions (key existence, retired values) reason only about complete,
+  strictly restored `OfferingsSnapshot`s. They read the catalog's revisions (bounded by the
+  primary key and, for retirement, by the requested revision) and restore each through the
+  same path as `retrieveVersion`, then compute in Kotlin. They never interpret raw catalog
+  JSON, and a corrupt revision they consult fails the question rather than being skipped.
+  Retired values are ordered by UTF-8 byte order, matching PostgreSQL `"C"`. Add a
+  projection or JSONB index only when catalog history is measurably too large.
 - V9 does not convert populated databases. It fails with a message naming the data and
   requires recreating the ephemeral database, like V7 and V8.
 
