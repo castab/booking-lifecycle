@@ -124,7 +124,7 @@ class FinancialLedgerSpec :
             ledger.history(id).size shouldBe 6
         }
 
-        test("metadata reads restore each document only once") {
+        test("every read restores each document from its own snapshot row in one query") {
             val first = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
             ledger.issueQuote(first.id)
             ledger.issueInvoice(first.id)
@@ -137,20 +137,18 @@ class FinancialLedgerSpec :
                 }
             val probedLedger = FinancialLedger(Transactor(Jdbi.create(dataSource).setSqlLogger(probe)), documents, payments)
 
-            fun assertReads(
-                expectedLineQueries: Int,
-                block: () -> Unit,
-            ) {
+            fun assertReads(block: () -> Unit) {
                 statements.clear()
                 block()
+                // One query, against the snapshot table alone: no child rows exist to load.
+                statements.count { "from commerce." in it } shouldBe 1
                 statements.count { "from commerce.financial_document_snapshots" in it } shouldBe 1
-                statements.count { "from commerce.financial_document_lines" in it } shouldBe expectedLineQueries
             }
 
-            assertReads(1) { probedLedger.version(first.reference) }
-            assertReads(1) { probedLedger.latestVersion(first.id) }
-            assertReads(3) { probedLedger.versionHistory(first.id) }
-            assertReads(3) { probedLedger.history(first.id) }
+            assertReads { probedLedger.version(first.reference) }
+            assertReads { probedLedger.latestVersion(first.id) }
+            assertReads { probedLedger.versionHistory(first.id) }
+            assertReads { probedLedger.history(first.id) }
         }
 
         test("two successors computed from one source cannot both commit") {

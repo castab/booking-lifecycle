@@ -99,8 +99,9 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V8 coexist with application V1 in separate version spaces.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
+                // Runtime V1 to V9 coexist with application V1 in separate version spaces.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
@@ -140,7 +141,8 @@ class MigrationLifecycleSpec :
 
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
@@ -157,7 +159,8 @@ class MigrationLifecycleSpec :
                 migrateRuntimeThrough(dataSource, "6")
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
                 RuntimeMigrations(dataSource).migrate()
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
                 dataSource.strings(
                     """SELECT is_nullable || ':' || column_default
                        FROM information_schema.columns
@@ -165,8 +168,8 @@ class MigrationLifecycleSpec :
                          AND column_name = 'created_at'""",
                 ) shouldContainExactly listOf("NO:clock_timestamp()")
                 dataSource.execute(
-                    """INSERT INTO commerce.financial_document_snapshots (document_id, version, stage)
-                       VALUES ('00000000-0000-0000-0000-000000000007', 1, 'ESTIMATE')""",
+                    """INSERT INTO commerce.financial_document_snapshots (document_id, version, stage, lines)
+                       VALUES ('00000000-0000-0000-0000-000000000007', 1, 'ESTIMATE', '[]')""",
                 )
                 dataSource.strings(
                     """SELECT (created_at IS NOT NULL)::text FROM commerce.financial_document_snapshots
@@ -199,8 +202,7 @@ class MigrationLifecycleSpec :
 
         test("V8 adds required selection columns without defaults and refuses to invent historical state") {
             withTestDatabase { _, dataSource ->
-                migrateRuntimeThrough(dataSource, "7")
-                RuntimeMigrations(dataSource).migrate()
+                migrateRuntimeThrough(dataSource, "8")
                 dataSource
                     .strings(
                         """SELECT column_name || ':' || is_nullable || ':' || coalesce(column_default, 'NONE')
@@ -230,6 +232,115 @@ class MigrationLifecycleSpec :
                        WHERE table_schema = 'commerce' AND table_name = 'offerings'
                          AND column_name IN ('selection_state', 'availability')""",
                     ).shouldContainExactly("0")
+            }
+        }
+
+        test("V9 stores aggregate-owned values in their snapshot rows and drops the child tables") {
+            withTestDatabase { _, dataSource ->
+                RuntimeMigrations(dataSource).migrate()
+
+                listOf("financial_document_lines", "offerings", "offering_categories").forEach {
+                    dataSource.relationExists("commerce.$it") shouldBe false
+                }
+                // The parent snapshots stay relational, and their identity and the payment reference to it remain.
+                dataSource
+                    .strings(
+                        """SELECT table_name || '.' || column_name || ':' || data_type || ':' || is_nullable || ':' ||
+                                  coalesce(column_default, 'NONE')
+                           FROM information_schema.columns
+                           WHERE table_schema = 'commerce'
+                             AND ((table_name = 'financial_document_snapshots' AND column_name = 'lines') OR
+                                  (table_name = 'offerings_snapshots' AND column_name = 'catalog'))
+                           ORDER BY table_name""",
+                    ).shouldContainExactly(
+                        "financial_document_snapshots.lines:jsonb:NO:NONE",
+                        "offerings_snapshots.catalog:jsonb:NO:NONE",
+                    )
+                dataSource
+                    .strings(
+                        """SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+                           FROM pg_constraint c
+                           CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                           WHERE c.contype = 'p' AND c.conrelid IN
+                               ('commerce.financial_document_snapshots'::regclass, 'commerce.offerings_snapshots'::regclass)
+                           GROUP BY c.conrelid ORDER BY c.conrelid::regclass::text""",
+                    ).shouldContainExactly("document_id,version", "catalog_id,revision")
+                dataSource
+                    .strings(
+                        """SELECT f.relname FROM pg_constraint c JOIN pg_class f ON f.oid = c.confrelid
+                           WHERE c.contype = 'f' AND c.conrelid = 'commerce.payment_allocations'::regclass AND f.relname LIKE '%snapshots'""",
+                    ).shouldContainExactly("financial_document_snapshots")
+
+                // The stored shapes are checked structurally; their element contents belong to the repositories.
+                val id = "00000000-0000-0000-0000-000000000009"
+                listOf("'{}'", "'null'", "'\"x\"'").forEach { lines ->
+                    shouldThrow<java.sql.SQLException> {
+                        dataSource.execute(
+                            "INSERT INTO commerce.financial_document_snapshots (document_id, version, stage, lines) VALUES ('$id', 1, 'ESTIMATE', $lines)",
+                        )
+                    }
+                }
+                shouldThrow<java.sql.SQLException> {
+                    dataSource.execute(
+                        "INSERT INTO commerce.financial_document_snapshots (document_id, version, stage) VALUES ('$id', 1, 'ESTIMATE')",
+                    )
+                }
+                dataSource.execute(
+                    "INSERT INTO commerce.financial_document_snapshots (document_id, version, stage, lines) VALUES ('$id', 1, 'ESTIMATE', '[]')",
+                )
+                dataSource.strings("SELECT jsonb_typeof(lines) FROM commerce.financial_document_snapshots").shouldContainExactly("array")
+            }
+        }
+
+        test("V9 refuses preexisting financial document snapshots and leaves their lines intact") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "8")
+                val id = "00000000-0000-0000-0000-00000000000a"
+                dataSource.execute(
+                    "INSERT INTO commerce.financial_document_snapshots (document_id, version, stage) VALUES ('$id', 1, 'ESTIMATE')",
+                )
+                dataSource.execute(
+                    """INSERT INTO commerce.financial_document_lines
+                       (document_id, version, position, line_id, description, price_amount, price_currency, tax_amount)
+                       VALUES ('$id', 1, 0, '$id', 'Line', 1.00, 'USD', 0)""",
+                )
+                shouldThrow<FlywayException> { RuntimeMigrations(dataSource).migrate() }
+                    .message shouldContain "V9 cannot move preexisting financial document lines"
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldContainExactly("1", "2", "3", "4", "5", "6", "7", "8")
+                dataSource.strings("SELECT description FROM commerce.financial_document_lines").shouldContainExactly("Line")
+                dataSource.relationExists("commerce.offerings") shouldBe true
+            }
+        }
+
+        test("V9 refuses preexisting offerings catalog revisions and leaves their rows intact") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "8")
+                val id = "00000000-0000-0000-0000-00000000000b"
+                dataSource.execute("INSERT INTO commerce.offerings_snapshots (catalog_id, revision) VALUES ('$id', 1)")
+                dataSource.execute(
+                    """INSERT INTO commerce.offering_categories (catalog_id, revision, category_key, position, display_name, minimum_selections)
+                       VALUES ('$id', 1, 'choice', 0, 'Choice', 0)""",
+                )
+                dataSource.execute(
+                    """INSERT INTO commerce.offerings
+                       (catalog_id, revision, offering_key, category_key, position, display_name, selection_state, availability)
+                       VALUES ('$id', 1, 'item', 'choice', 0, 'Item', 'ENABLED', 'AVAILABLE')""",
+                )
+                shouldThrow<FlywayException> { RuntimeMigrations(dataSource).migrate() }
+                    .message shouldContain "V9 cannot move preexisting offerings catalog contents"
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldContainExactly("1", "2", "3", "4", "5", "6", "7", "8")
+                dataSource.strings("SELECT offering_key FROM commerce.offerings").shouldContainExactly("item")
+                dataSource.relationExists("commerce.financial_document_lines") shouldBe true
+            }
+        }
+
+        test("an empty V8 database migrates through V9 with the new columns in place") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "8")
+                RuntimeMigrations(dataSource).migrate()
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).last() shouldBe "9"
+                dataSource.relationExists("commerce.offerings") shouldBe false
             }
         }
 
@@ -399,7 +510,8 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe true
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
-                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
+                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

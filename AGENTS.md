@@ -188,8 +188,8 @@ offering snapshots and application-owned rows commit or roll back together. The 
 migration stream has the empty `V1__commerce_baseline.sql`, the offerings `V2` migration,
 the principal sessions `V3` migration, the authorization directory `V4` migration, the
 financial ledger `V5` migration, the refunds `V6` migration, the document timestamp
-`V7` migration, and the offering selection/availability `V8` migration. Do not create
-placeholder commerce tables or fake repositories.
+`V7` migration, the offering selection/availability `V8` migration, and the aggregate
+snapshots `V9` migration. Do not create placeholder commerce tables or fake repositories.
 
 The first financial-ledger slice persists immutable financial-document snapshots,
 payment records, and payment allocations in the runtime-owned `commerce` schema. The
@@ -535,9 +535,10 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes, and `Authorization.kt` (the `authenticatedPrincipal` lens, `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, `V5` financial ledger, `V6` refunds, and `V7` document timestamps; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, `V5` financial ledger, `V6` refunds, `V7` document timestamps, `V8` offering selection and availability, and `V9` aggregate snapshots; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
-| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, revision rejection, and cross-schema atomicity. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, the stored JSON shape and malformed-JSON rejection, historical key and retired-value queries, revision rejection, and cross-schema atomicity. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/FinancialDocumentRepositorySpec.kt` | One-row snapshot round trips, the stored lines shape, malformed-lines rejection, history and latest reads, successor conflicts, and payment allocations' exact-version reference. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/offering/OfferingsCapabilitySpec.kt` | Generic operation, real HTTP, historical revision, conflict, multiple catalog, read-only, price, and host OpenAPI composition checks. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/PrincipalSessionRepositorySpec.kt` | Session table and indexes, `UserId` and `ServiceId` round trips, digest-only storage and uniqueness, revocation, and caller-transaction atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/session/` | `SessionTokenSpec` (token generation, format, redaction, digest, activity), `SessionManagerSpec` (lifecycle on PostgreSQL with a hand-driven clock), and `SessionAuthenticationSpec` (401/403 behavior, current permissions, cookies). `testing/Sessions.kt` holds the test clock and output capture. |
@@ -1148,9 +1149,13 @@ the `tags` parameter of `authorizationAdministrationHttpCapability`) and applied
 route of that instance. The runtime chooses no default grouping and rejects blank tag names.
 Application `OfferingsEngine` policy remains outside generic catalog HTTP. Released
 runtime migrations, including `V2__offerings_snapshots.sql`, remain immutable.
-V8 adds selection state and availability as checked `NOT NULL` text columns, with no
-persistence defaults. It rejects preexisting offering rows rather than inventing their
-historical states; ephemeral databases with such rows must be recreated. HTTP offering
+V8 added selection state and availability as checked `NOT NULL` text columns, with no
+persistence defaults, and rejected preexisting offering rows rather than inventing their
+historical states; ephemeral databases with such rows must be recreated. V9 then moved
+the categories and offerings into the owning revision's `catalog` JSON (see
+[Aggregate-owned values live in their snapshot row](#aggregate-owned-values-live-in-their-snapshot-row)),
+so those columns no longer exist: both fields are required properties of every stored
+offering and decode strictly, with no default for a missing, null, or unknown value. HTTP offering
 reads and add/update/restore bodies require both non-null enum fields. Missing, null, or
 unknown enum values are malformed (400). All four enum combinations are accepted.
 The OpenAPI renderer declares both enums and required fields with no cross-field exclusion.
@@ -1182,12 +1187,59 @@ In `:runtime`:
   values explicitly in repositories, restoring them through the domain's own
   constructors and `restore` factories.
 - Do not force adopter business models into library-owned persistence models.
+- A row represents an independently addressable fact, entity, or version. See
+  [Aggregate-owned values live in their snapshot row](#aggregate-owned-values-live-in-their-snapshot-row).
 - Repositories take the caller's `Transaction` and never begin, commit, or roll back.
   Transaction boundaries belong to operations, through `Transactor`. Do
   not add repositories whose every call is an unrelated transaction.
 - Do not introduce a generic `Repository<T, ID>` or repository framework. Use
   intention-revealing repositories, and implement a domain SPI (such as
   `FinancialDocumentHistory`) where the domain already defines the boundary.
+
+## Aggregate-owned values live in their snapshot row
+
+The operational database answers: what is the current state of this object, what did a
+previous immutable version look like, and how did it progress. Cross-aggregate analytics
+are a secondary concern for projections, not a reason to normalize.
+
+> A row represents an independently addressable fact, entity, or version with its own
+> operational identity, lifecycle, relationships, or mutations. An immutable value that
+> exists only as a component of its parent snapshot is stored with that snapshot.
+
+- `commerce.financial_document_snapshots.lines` (`jsonb NOT NULL`) holds a snapshot's
+  ordered line items; `commerce.offerings_snapshots.catalog` (`jsonb NOT NULL`) holds a
+  revision's ordered categories and offerings. The tables `financial_document_lines`,
+  `offering_categories`, and `offerings` no longer exist. Do not reintroduce child tables,
+  projection tables, or per-item rows for these values. `(document_id, version)` and
+  `(catalog_id, revision)` stay relational identities, and `payment_allocations` keep their
+  foreign key to the exact document version.
+- Payments, allocations, refunds, refund allocations, principals, roles, assignments, and
+  sessions are independent facts and stay relational. This is not a "JSONB for everything"
+  policy and there is no generic JSON repository: each repository maps its own aggregate
+  explicitly.
+- The stored JSON is a durable contract, defined by runtime-internal `@Serializable` DTOs
+  (`FinancialDocumentLinesJson.kt`, `OfferingsCatalogJson.kt`, `PersistedJson.kt`) and never
+  by serializing domain types. Decimals are plain strings (never JSON numbers), currencies
+  ISO codes, UUIDs canonical text, price kinds an explicit `kind` discriminator
+  (`FIXED`, `PER_QUANTITY`, `PER_DURATION`), and enums explicit names. Every property is
+  written, `null` included, and decoding is strict: unknown properties, missing or null
+  required values, unknown discriminators or enum names, quoted numbers, and non-canonical
+  values fail with an `IllegalStateException` naming the snapshot. A restoration that breaks
+  a domain invariant fails the same way. Persistence never repairs or defaults stored state.
+  Changing the representation needs a new migration.
+- Invariants that were relational constraints (unique keys, category references, line id
+  uniqueness, currency agreement, positive durations) are enforced by the domain
+  constructors and `restore` factories on every read. SQL only checks the structural shape
+  (`lines` is an array; `catalog` is an object with `categories` and `offerings` arrays).
+- Catalog history questions (key existence, retired values) reason only about complete,
+  strictly restored `OfferingsSnapshot`s. They read the catalog's revisions (bounded by the
+  primary key and, for retirement, by the requested revision) and restore each through the
+  same path as `retrieveVersion`, then compute in Kotlin. They never interpret raw catalog
+  JSON, and a corrupt revision they consult fails the question rather than being skipped.
+  Retired values are ordered by UTF-8 byte order, matching PostgreSQL `"C"`. Add a
+  projection or JSONB index only when catalog history is measurably too large.
+- V9 does not convert populated databases. It fails with a message naming the data and
+  requires recreating the ephemeral database, like V7 and V8.
 
 ## Migration contract
 
@@ -1492,7 +1544,11 @@ dependency just to support CI or publishing.
 - `OfferingsSnapshotRepositorySpec` covers the first real commerce repository against
   PostgreSQL, including price and order round trips, duplicate and predecessor rejection,
   and a single transaction spanning an application row and commerce snapshot. It proves
-  both commit and rollback from a later transaction.
+  both commit and rollback from a later transaction. It also pins the stored JSON shape, strict
+  rejection of malformed stored catalogs, and the historical key and retired-value queries,
+  including byte-order ordering. `FinancialDocumentRepositorySpec` does the same for
+  financial snapshots and their lines, and `MigrationLifecycleSpec` pins that `V9` drops the
+  child tables, adds the `NOT NULL` JSONB columns, and refuses populated databases.
 - `FinancialLedgerPaymentHistorySpec` covers the payment history reads against PostgreSQL:
   rediscovering every id and link after a refund, lineage discovery across versions, fully
   unwound allocations, split payments returned whole, ordering (including equal receipt

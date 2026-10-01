@@ -393,8 +393,10 @@ runtime version and the database shape it requires are one compatibility unit.
   application's declared schema as their default schema.
 
 The runtime migration stream starts with `V1__commerce_baseline.sql` and adds the
-offerings tables in `V2__offerings_snapshots.sql`. The latter creates
-`commerce.offerings_snapshots`, `commerce.offering_categories`, and `commerce.offerings`.
+offerings tables in `V2__offerings_snapshots.sql`, which created
+`commerce.offerings_snapshots`, `commerce.offering_categories`, and `commerce.offerings`;
+`V9__aggregate_snapshots.sql` later replaced the two child tables with a JSONB column (see
+[Aggregate snapshot persistence](#aggregate-snapshot-persistence)).
 `V3__principal_sessions.sql` creates `commerce.principal_sessions` for
 [sessions](#sessions-and-authorization): the session ID, the principal as a
 runtime-controlled kind (`USER` or `SERVICE`) plus its UUID, the unique SHA-256 token
@@ -410,8 +412,8 @@ role permissions, and principal-role assignments. It leaves released migrations 
 The principal kind uses the same explicit `USER`/`SERVICE` mapping as sessions. Foreign
 keys reject assignments to missing principals or roles. Role deletion never cascades.
 
-`V5__financial_ledger.sql` adds immutable financial-document snapshots and ordered line
-items, payment records, and allocations. The snapshot key is `(document_id, version)`;
+`V5__financial_ledger.sql` added immutable financial-document snapshots and ordered line
+items (`V9` moved those into the snapshot row), payment records, and allocations. The snapshot key is `(document_id, version)`;
 the predecessor reference and unique `(document_id, previous_version)` reject gaps and
 competing successors. Allocations have foreign keys to their payment and the exact
 document snapshot. `(external_provider, external_reference)` is unique for payments.
@@ -444,6 +446,66 @@ pre-V7 databases with financial snapshots must be recreated.
 > baseline. Databases migrated by 0.0.4 or 0.0.5 fail validation against this release and
 > must be recreated. This was a one-time exception to the immutable-history rule.
 
+### Aggregate snapshot persistence
+
+A row represents an independently addressable fact, entity, or version. An immutable value
+that exists only as a component of its parent snapshot is stored with that snapshot.
+`V9__aggregate_snapshots.sql` applies that rule to the two snapshot families whose
+children had no identity of their own:
+
+| Table | Relational identity | Contents column |
+|---|---|---|
+| `commerce.financial_document_snapshots` | `(document_id, version)`, `previous_version`, `stage`, `created_at` | `lines jsonb NOT NULL`: the ordered line items |
+| `commerce.offerings_snapshots` | `(catalog_id, revision)`, `previous_revision` | `catalog jsonb NOT NULL`: the ordered categories and offerings |
+
+`commerce.financial_document_lines`, `commerce.offering_categories`, and
+`commerce.offerings` are gone. Payments, allocations, refunds, principals, roles, and
+sessions are independent facts and remain relational; `commerce.payment_allocations` still
+references `(document_id, version)`. Reading a snapshot is one query for one row, and a
+history read is one query for the lineage.
+
+The stored JSON is a durable representation, written through runtime-internal DTOs and
+never by serializing domain types:
+
+```jsonc
+// lines: array order is line order
+[{"id": "<uuid>", "description": "Labor", "subDescription": null, "quantity": "2.500",
+  "priceAmount": "12.3400", "taxAmount": "1.0300", "currency": "USD"}]
+
+// catalog
+{"categories": [{"key": "tier", "displayName": "Tier", "description": null,
+                 "minimumSelections": 0, "maximumSelections": null}],
+ "offerings": [{"key": "basic", "category": "tier", "displayName": "Basic", "description": null,
+                "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
+                          "seconds": 3600, "nanos": 123456789},
+                "selectionState": "ENABLED", "availability": "AVAILABLE"}]}
+```
+
+An offering's `price` is `null`, or has a `kind` of `FIXED`, `PER_QUANTITY` (adds
+`dimension`), or `PER_DURATION` (adds `seconds` and `nanos`). Decimals are plain strings, so
+scale and every digit survive any JSON reader; they are never JSON numbers. Every property
+is written, `null` included. Decoding is strict: an unknown property, a missing or null
+required value, an unknown `kind` or enum name, a quoted number, a malformed decimal,
+currency, or UUID, or a restored value that breaks a domain invariant fails with an
+`IllegalStateException` that names the snapshot. Nothing is defaulted or repaired. Schema
+checks only guarantee the outer shape (`lines` is an array; `catalog` is an object with
+`categories` and `offerings` arrays). Unique keys, category references, line id uniqueness,
+and currency agreement are enforced by the domain constructors on every read, as they are
+on every write.
+
+Catalog history is answered from the immutable revisions of one catalog, which the primary
+key already bounds. Every history method restores each revision it consults through the same
+strict path as `retrieveVersion` and computes in Kotlin, so a corrupt revision fails the
+question with an `IllegalStateException` instead of influencing its answer. Key existence
+checks every revision. Retirement considers the revisions up to the requested one, treats the
+restored snapshot at that revision as what is present (an unstored revision has nothing
+present), keeps each absent key's last representation with the revision it came from, and
+orders by UTF-8 byte order, matching PostgreSQL `"C"`. There is no projection or JSONB index.
+
+V9 does not convert populated databases. Like V7 and V8, it fails and leaves the schema
+untouched when a financial snapshot or an offerings revision already exists; recreate the
+ephemeral database rather than backfilling.
+
 ### Offerings snapshots
 
 `CommerceRuntimeContext.offeringsSnapshotRepository` exposes the append-only
@@ -464,19 +526,20 @@ val latest = context.transactor.inTransaction { transaction ->
 `retrieveLatestVersion` returns the highest revision for one catalog or null. `insert`
 never updates existing rows. The `(catalog_id, revision)` primary key rejects duplicate
 revisions, and a self-reference requires a successor's immediate predecessor to exist.
-Categories and offerings use explicit positions, so round trips preserve snapshot order.
+Categories and offerings are stored in array order inside the revision's one row, so round trips preserve snapshot order.
 Price forms have stable `FIXED`, `PER_QUANTITY`, and `PER_DURATION` discriminators;
-amounts use exact PostgreSQL `numeric`, and durations store seconds plus nanoseconds.
+amounts are exact decimal strings, and durations store seconds plus nanoseconds.
 The repository maps rows to domain values explicitly through `OfferingsSnapshot.restore`.
 It does not open a connection or transaction. A duplicate revision is reported as
 `CommerceFailure.Conflict`.
 
-`V8__offering_selection_and_availability.sql` adds `selection_state` and `availability`
-to `commerce.offerings` as `NOT NULL` text columns with no defaults. Checks accept only
+`V8__offering_selection_and_availability.sql` added `selection_state` and `availability`
+to `commerce.offerings` as `NOT NULL` text columns with no defaults. Checks accepted only
 `ENABLED`/`DISABLED` and `AVAILABLE`/`UNAVAILABLE`; all four combinations are valid.
 V1-V7 remain unchanged. V8 refuses preexisting offering rows because no historical
 selection states exist to restore; recreate the ephemeral database instead of backfilling.
-Repositories write and restore both fields explicitly and reject unknown stored values.
+`V9` keeps both as required properties of each stored offering. The repository writes and
+restores them explicitly and rejects a missing, null, or unknown stored value.
 
 ### Offerings catalog operations and HTTP
 
@@ -702,8 +765,8 @@ blank or contains whitespace, is `validation_failed` (422); a well-formed but ab
 revision, category, or offering is `not_found` (404). Each route's OpenAPI metadata lists
 the error statuses among these that the route can actually return. It does not evaluate
 an `OfferingsEngine` or own any application catalog contents. Lifecycle state conflicts
-are `conflict` (409). Released migrations V1-V7, including `V2__offerings_snapshots.sql`,
-remain unchanged; V8 adds strict selection and availability columns.
+are `conflict` (409). Released migrations, including `V2__offerings_snapshots.sql`,
+remain unchanged; V8 added strict selection and availability columns and V9 stores catalog contents in the snapshot row.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
 schema node; it operates on schema values before OpenAPI serialization and does not
 traverse example, default, const, or extension payloads as schemas.
@@ -732,10 +795,11 @@ methods and appends successors; it never rewrites a stage. First snapshots may b
 Estimates, Quotes, or Invoices. An invalid stage transition raises
 `CommerceFailure.IllegalTransition`; a competing successor raises `Conflict`.
 
-The database stores line identity, order, description, optional sub-description and
-quantity, exact decimal price and tax, and currency. It stores no derived total or
-balance. On retrieval the repository rebuilds the domain snapshot, which recalculates
-all totals. PostgreSQL `numeric` preserves decimal values; timestamps store epoch
+Each snapshot row stores its lines in one `lines` JSONB value: line identity, order,
+description, optional sub-description and quantity, exact decimal price and tax (plain
+decimal strings), and currency. It stores no derived total or balance. On retrieval the
+repository rebuilds the domain snapshot, which recalculates all totals. Payment amounts use
+PostgreSQL `numeric`, which preserves decimal values; timestamps store epoch
 seconds plus nanoseconds.
 
 `PaymentRecord` remains separate from `PaymentAllocation`. The ledger's `recordPayment`
