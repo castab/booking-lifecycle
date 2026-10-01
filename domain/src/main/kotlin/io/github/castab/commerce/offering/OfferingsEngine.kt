@@ -32,7 +32,7 @@ interface OfferingsViolation {
     val code: String
 }
 
-/** Snapshot-dependent structural selection problems. */
+/** Snapshot-dependent membership, selection eligibility, and cardinality problems. */
 sealed interface StructuralOfferingsViolation : OfferingsViolation {
     data class UnknownCategory(
         val category: OfferingCategoryKey,
@@ -45,6 +45,20 @@ sealed interface StructuralOfferingsViolation : OfferingsViolation {
         val offering: OfferingKey,
     ) : StructuralOfferingsViolation {
         override val code = "UNKNOWN_OFFERING"
+    }
+
+    data class DisabledOffering(
+        val category: OfferingCategoryKey,
+        val offering: OfferingKey,
+    ) : StructuralOfferingsViolation {
+        override val code = "OFFERING_DISABLED"
+    }
+
+    data class UnavailableOffering(
+        val category: OfferingCategoryKey,
+        val offering: OfferingKey,
+    ) : StructuralOfferingsViolation {
+        override val code = "OFFERING_UNAVAILABLE"
     }
 
     data class OfferingInWrongCategory(
@@ -144,7 +158,11 @@ sealed interface OfferingsEvaluationResult {
     }
 }
 
-/** Applies common cardinality and membership checks before invoking application policy. */
+/**
+ * Applies common cardinality, membership, and selection eligibility checks before application policy.
+ * Disabled takes precedence over unavailable for the reported selection rejection reason;
+ * this does not constrain or change either property of the supplied snapshot.
+ */
 abstract class OfferingsEngine<C> {
     fun evaluate(
         snapshot: OfferingsSnapshot,
@@ -186,6 +204,10 @@ abstract class OfferingsEngine<C> {
                     offering.category != block.category ->
                         violations +=
                             StructuralOfferingsViolation.OfferingInWrongCategory(block.category, key)
+                    offering.selectionState == OfferingSelectionState.DISABLED ->
+                        violations += StructuralOfferingsViolation.DisabledOffering(block.category, key)
+                    offering.availability == OfferingAvailability.UNAVAILABLE ->
+                        violations += StructuralOfferingsViolation.UnavailableOffering(block.category, key)
                 }
             }
             if (category != null) {

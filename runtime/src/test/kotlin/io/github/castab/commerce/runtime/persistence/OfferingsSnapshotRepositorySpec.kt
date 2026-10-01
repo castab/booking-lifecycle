@@ -2,10 +2,12 @@ package io.github.castab.commerce.runtime.persistence
 
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
@@ -97,6 +99,62 @@ class OfferingsSnapshotRepositorySpec :
                 "SELECT count(*) FROM commerce.offerings_snapshots WHERE catalog_id = ? AND revision = ?",
                 reference,
             )
+
+        test("selection columns round trip all four combinations and SQL rejects null and unknown values") {
+            val first =
+                OfferingsSnapshot.create(
+                    catalogId(),
+                    listOf(category("choice")),
+                    listOf(
+                        offering("normal", "choice"),
+                        offering("disabled", "choice").copy(selectionState = OfferingSelectionState.DISABLED),
+                        offering("unavailable", "choice").copy(availability = OfferingAvailability.UNAVAILABLE),
+                        offering("both", "choice").copy(
+                            selectionState = OfferingSelectionState.DISABLED,
+                            availability = OfferingAvailability.UNAVAILABLE,
+                        ),
+                    ),
+                )
+            transactor.inTransaction { repository.insert(it, first) }
+            transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
+            listOf(
+                "selection_state = NULL",
+                "availability = NULL",
+                "selection_state = 'OTHER'",
+                "availability = 'OTHER'",
+            ).forEach { assignment ->
+                shouldThrow<UnableToExecuteStatementException> {
+                    transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate(
+                                "UPDATE commerce.offerings SET $assignment WHERE catalog_id = :id AND offering_key = 'normal'",
+                            ).bind("id", first.catalogId.value)
+                            .execute()
+                    }
+                }
+                transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
+            }
+        }
+
+        test("unknown stored selection values fail loudly when database checks are bypassed") {
+            val first = OfferingsSnapshot.create(catalogId(), listOf(category("choice")), listOf(offering("item", "choice")))
+            transactor.inTransaction { repository.insert(it, first) }
+            val columns = listOf("selection_state" to "offering_selection_state", "availability" to "offering_availability")
+            columns.forEach { (column, constraint) ->
+                shouldThrow<IllegalStateException> {
+                    transactor.inTransaction { transaction ->
+                        transaction.handle.execute("ALTER TABLE commerce.offerings DROP CONSTRAINT $constraint")
+                        transaction.handle
+                            .createUpdate("UPDATE commerce.offerings SET $column = 'OTHER' WHERE catalog_id = :id")
+                            .bind("id", first.catalogId.value)
+                            .execute()
+                        repository.retrieveVersion(transaction, first.reference)
+                    }
+                }
+                // PostgreSQL rolls the temporary constraint removal and corruption back together.
+                transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
+            }
+        }
 
         test("revisions round trip with order, nullable fields, exact prices, and isolated catalog histories") {
             val first =

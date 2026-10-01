@@ -796,19 +796,33 @@ strongly typed in the application.
 
 ## Offerings
 
-`io.github.castab.commerce.offering` describes selectable commercial choices without
+`io.github.castab.commerce.offering` describes commercial choices without
 defining a particular business's catalog or price policy. An `Offering` has a stable
 `OfferingKey`, one `OfferingCategoryKey`, presentation text, and an optional
-`OfferingPrice`. An `OfferingCategory` has a stable key and min/max selection counts:
+`OfferingPrice`, plus selection state and availability. An `OfferingCategory` has a stable
+key and min/max selection counts:
 `0..1` is optional single selection, `1..1` required single selection, and a null maximum
 is unbounded. The category and offering order supplied to a snapshot is preserved.
+
+An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
+and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Domain construction defaults to
+`ENABLED` / `AVAILABLE`. All four combinations are valid in construction and `copy`.
+Selection configuration and fulfillment availability are independent facts: disabled
+means selection is deliberately forbidden, while unavailable means the offering cannot
+currently be fulfilled. Neither property implies or rewrites the other. Both remain in
+active catalog reads. For a submitted selection, `DISABLED` takes precedence over
+`UNAVAILABLE`, yielding only `OFFERING_DISABLED` when both apply. This precedence
+chooses a rejection reason; it places no constraint on stored representation values.
+Retirement is independent: the key is absent from the latest snapshot. These properties
+belong to each catalog revision; changes create successors and preserve historical values.
 
 Prices are descriptive metadata: `OfferingPrice.Fixed(Money)`,
 `PerQuantity(Money, QuantityDimension)`, and `PerDuration(Money, Duration)`. A quantity
 dimension is an application-named machine value such as `guest`, `vehicle`, or `item`;
 the common library assigns it no business meaning. A price may be absent when a choice
-has no independent charge. Complex pricing, availability, dependencies, and bundles stay
-in the application's engine, with no generic rule language or metadata map.
+has no independent charge. Complex pricing, context-specific fulfillment policy,
+dependencies, and bundles stay in the application's engine, with no generic rule language
+or metadata map.
 
 `OfferingsSnapshot.create(catalogId, categories, offerings)` starts an immutable catalog
 at revision 1. `revise(...)` returns its successor, retaining the catalog ID and recording
@@ -840,9 +854,14 @@ the runtime append to the relevant list. No general reorder operation is provide
 
 Candidate `OfferingSelections` contain ordered `OfferingCategorySelection` blocks. They
 may be built before a snapshot is known. `OfferingsEngine<C>.evaluate(...)` checks selected
-categories and offerings, category membership, cardinalities, and duplicates before
-calling the application's `evaluateValid(...)`. Problems are typed
-`StructuralOfferingsViolation`s in deterministic order. Applications implement the open
+categories and offerings, category membership, selection eligibility, cardinalities, and
+duplicates before calling the application's `evaluateValid(...)`. Problems are typed
+`StructuralOfferingsViolation`s in deterministic order. Disabled selections report
+`DisabledOffering` (`OFFERING_DISABLED`), unavailable selections report
+`UnavailableOffering` (`OFFERING_UNAVAILABLE`), and keys absent from the evaluated snapshot
+(including retired keys) retain `UnknownOffering` (`UNKNOWN_OFFERING`). The engine evaluates
+the supplied revision; applications choose the current snapshot when validating a new order.
+Applications implement the open
 `OfferingsViolation` interface for their own rejection codes and return either
 `OfferingsPolicyResult.Accepted(lineItems)` or `Rejected(violations)`.
 

@@ -187,9 +187,9 @@ the `commerce` schema. It uses the caller's `Transaction`; integration tests pro
 offering snapshots and application-owned rows commit or roll back together. The runtime
 migration stream has the empty `V1__commerce_baseline.sql`, the offerings `V2` migration,
 the principal sessions `V3` migration, the authorization directory `V4` migration, the
-financial ledger `V5` migration, the refunds `V6` migration, and the document timestamp
-`V7` migration. Do not create placeholder
-commerce tables or fake repositories.
+financial ledger `V5` migration, the refunds `V6` migration, the document timestamp
+`V7` migration, and the offering selection/availability `V8` migration. Do not create
+placeholder commerce tables or fake repositories.
 
 The first financial-ledger slice persists immutable financial-document snapshots,
 payment records, and payment allocations in the runtime-owned `commerce` schema. The
@@ -1039,7 +1039,7 @@ for `PrincipalStatus` for source compatibility.
 # Offerings domain
 
 `io.github.castab.commerce.offering` is a reusable vocabulary for commercial choices.
-An `Offering` is an available item, service, or choice in exactly one `OfferingCategory`.
+An `Offering` is a commercial item, service, or choice in exactly one `OfferingCategory`.
 The category groups offerings and expresses only generic selection cardinality through a
 minimum and optional maximum. Machine keys are distinct from presentation text.
 
@@ -1062,6 +1062,18 @@ historical existence and last representations of retired identities. Discovery i
 to the latest immutable reference and ordered by key. No per-item UUIDs, revisions,
 timestamps, active/deleted flags, key rename, or general reordering are part of this model.
 
+An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
+and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Domain construction defaults to
+`ENABLED` / `AVAILABLE`. All four combinations are valid in construction and `copy`.
+Selection configuration and fulfillment availability are independent facts: disabled
+means selection is deliberately forbidden, while unavailable means the offering cannot
+currently be fulfilled. Neither property implies or rewrites the other. Both remain in
+active catalog reads. For a submitted selection, `DISABLED` takes precedence over
+`UNAVAILABLE`, yielding only `OFFERING_DISABLED` when both apply. This precedence
+chooses a rejection reason; it places no constraint on stored representation values.
+Retirement is independent: the key is absent from the latest snapshot. These properties
+belong to each catalog revision; changes create successors and preserve historical values.
+
 `OfferingPrice` has only `Fixed`, `PerQuantity` with an application-named
 `QuantityDimension`, and `PerDuration` with a positive `Duration`. It is descriptive
 price metadata, not a pricing rules system. Do not add business-specific rates such as
@@ -1071,10 +1083,12 @@ absent.
 
 `OfferingSelections` are ordered candidate choices. `OfferingsEngine<C>` first checks
 snapshot-dependent structural validity (known categories and offerings, category
-membership, min/max cardinality, duplicate blocks and offerings). Only then does it call
-the application's policy implementation. The open `OfferingsViolation` interface permits
+membership, selection eligibility, min/max cardinality, duplicate blocks and offerings).
+Only then does it call the application's policy implementation. The open `OfferingsViolation` interface permits
 application-defined rejection codes. Applications own contexts, pricing calculations,
-bundles, dependencies, and availability policy.
+bundles, dependencies, and context-specific fulfillment policy. Disabled and unavailable
+selections fail before policy with `OFFERING_DISABLED` and `OFFERING_UNAVAILABLE`;
+absent/retired keys retain `UNKNOWN_OFFERING` against the evaluated snapshot.
 The runtime's `offeringsValidationFailed` maps those codes into optional structured
 `validation_failed` HTTP details without parsing diagnostic messages. No field path or
 per-violation message is invented when the domain violation does not provide one.
@@ -1134,6 +1148,14 @@ the `tags` parameter of `authorizationAdministrationHttpCapability`) and applied
 route of that instance. The runtime chooses no default grouping and rejects blank tag names.
 Application `OfferingsEngine` policy remains outside generic catalog HTTP. Released
 runtime migrations, including `V2__offerings_snapshots.sql`, remain immutable.
+V8 adds selection state and availability as checked `NOT NULL` text columns, with no
+persistence defaults. It rejects preexisting offering rows rather than inventing their
+historical states; ephemeral databases with such rows must be recreated. HTTP offering
+reads and add/update/restore bodies require both non-null enum fields. Missing, null, or
+unknown enum values are malformed (400). All four enum combinations are accepted.
+The OpenAPI renderer declares both enums and required fields with no cross-field exclusion.
+`UpdateOffering` and `RestoreOffering` require both properties explicitly, even when
+changing unrelated fields; only new domain construction provides enabled/available defaults.
 
 # Repository-wide rules
 

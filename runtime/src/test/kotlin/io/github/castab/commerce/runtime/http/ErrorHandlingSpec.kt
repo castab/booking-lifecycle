@@ -1,6 +1,7 @@
 package io.github.castab.commerce.runtime.http
 
 import io.github.castab.commerce.offering.OfferingCategoryKey
+import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingsViolation
 import io.github.castab.commerce.offering.StructuralOfferingsViolation
 import io.github.castab.commerce.runtime.offering.offeringsValidationFailed
@@ -111,6 +112,21 @@ class ErrorHandlingSpec :
             shouldThrow<CommerceFailure.ValidationFailed> {
                 validating { require(false) { "Line item quantity must be positive" } }
             }.message shouldBe "Line item quantity must be positive"
+        }
+
+        test("disabled unavailable and absent selection reasons retain their domain codes over HTTP") {
+            val category = OfferingCategoryKey("choice")
+            val key = OfferingKey("item")
+            listOf(
+                StructuralOfferingsViolation.DisabledOffering(category, key) to "OFFERING_DISABLED",
+                StructuralOfferingsViolation.UnavailableOffering(category, key) to "OFFERING_UNAVAILABLE",
+                StructuralOfferingsViolation.UnknownOffering(category, key) to "UNKNOWN_OFFERING",
+            ).forEach { (violation, code) ->
+                val response = failing(offeringsValidationFailed("Selection rejected", listOf(violation)))(Request(Method.POST, "/pricing"))
+                response.status shouldBe Status.UNPROCESSABLE_ENTITY
+                CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()) shouldBe
+                    ValidationErrorResponse("validation_failed", "Selection rejected", listOf(ValidationViolationResponse(code)))
+            }
         }
 
         test("offering violation codes survive mapping and HTTP while other errors retain two fields") {

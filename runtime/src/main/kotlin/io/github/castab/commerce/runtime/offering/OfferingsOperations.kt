@@ -1,10 +1,12 @@
 package io.github.castab.commerce.runtime.offering
 
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
@@ -166,7 +168,10 @@ class GetOffering(
         }
 }
 
-/** Replaces an active identity in place only when the caller's expected catalog revision is current. */
+/**
+ * Replaces an active identity in a successor when the expected revision is current.
+ * Both independent selection properties are required, even for an unrelated property change.
+ */
 class UpdateOffering(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
@@ -179,13 +184,15 @@ class UpdateOffering(
         displayName: String,
         description: String? = null,
         price: OfferingPrice? = null,
+        selectionState: OfferingSelectionState,
+        availability: OfferingAvailability,
     ): CatalogResult<Offering> =
         transactor.inTransaction { transaction ->
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             requireExpectedRevision(latest, expectedRevision)
             requireActiveOffering(repository, transaction, latest, key)
             requireCategory(latest, category)
-            val replacement = validating { Offering(key, category, displayName, description, price) }
+            val replacement = validating { Offering(key, category, displayName, description, price, selectionState, availability) }
             val next = latest.replaceOffering(key, replacement)
             repository.insert(transaction, next)
             CatalogResult(next.reference, replacement)
@@ -212,7 +219,10 @@ class RetireOffering(
         }
 }
 
-/** Appends a retired identity only when the caller's expected catalog revision is current. */
+/**
+ * Appends a retired identity in a successor when the expected revision is current.
+ * The caller explicitly supplies both selection configuration and fulfillment availability.
+ */
 class RestoreOffering(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
@@ -225,6 +235,8 @@ class RestoreOffering(
         displayName: String,
         description: String? = null,
         price: OfferingPrice? = null,
+        selectionState: OfferingSelectionState,
+        availability: OfferingAvailability,
     ): CatalogResult<Offering> =
         transactor.inTransaction { transaction ->
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
@@ -236,7 +248,7 @@ class RestoreOffering(
                 throw CommerceFailure.NotFound("Offering ${key.value} was not found")
             }
             requireCategory(latest, category)
-            val replacement = validating { Offering(key, category, displayName, description, price) }
+            val replacement = validating { Offering(key, category, displayName, description, price, selectionState, availability) }
             val next = latest.revise(latest.categories, latest.offerings + replacement)
             repository.insert(transaction, next)
             CatalogResult(next.reference, replacement)

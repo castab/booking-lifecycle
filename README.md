@@ -95,9 +95,9 @@ FinancialDocument   BookingLifecycle    Payments/etc.
 
 `OfferingsSnapshot` describes what may be selected. Candidate `OfferingSelections` plus
 application context go through an application-implemented `OfferingsEngine`. The domain
-checks category membership and min/max cardinality first; the application decides prices,
-bundles, availability, and any other business policy. An accepted `OfferingsEvaluation`
-records the exact snapshot reference, selections, and generic `LineItem`s. The application
+checks category membership, min/max cardinality, and offering selection eligibility first;
+the application decides prices, bundles, context-specific fulfillment, and other business
+policy. An accepted `OfferingsEvaluation` records the exact snapshot reference, selections, and generic `LineItem`s. The application
 can pass those lines to `FinancialDocument.Estimate.create(...)`; the engine does not create
 the estimate.
 
@@ -135,6 +135,18 @@ client. Categories containing offerings cannot be retired. Writes require the
 (normally `context.authorization.permissionResolver`);
 retired discovery is also protected by this permission and absent from read-only bindings.
 Ordinary active and historical reads are as public as the host mounts them.
+
+Active offerings expose required `selectionState` (`ENABLED`/`DISABLED`) and
+`availability` (`AVAILABLE`/`UNAVAILABLE`). Disabled and unavailable offerings remain
+readable. All four combinations are valid independent facts; neither field implies the
+other. Disabled takes precedence over unavailable for the reported selection rejection
+reason, returning only `OFFERING_DISABLED` when both apply.
+Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
+list the enums without a cross-field exclusion. Kotlin update and restore operations also
+require both fields explicitly; new domain construction retains enabled/available defaults.
+V8 stores checked non-null values without defaults or legacy backfills; populated pre-V8
+offering databases must be recreated.
+Changes append catalog revisions, preserving the selection semantics of historical reads.
 See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
 
 This is conceptual, not a required persistence design: each application chooses its own

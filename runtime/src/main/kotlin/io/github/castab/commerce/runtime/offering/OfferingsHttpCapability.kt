@@ -147,10 +147,30 @@ fun offeringsHttpCapability(
     val offeringPath = Path.of("offeringKey")
     val sampleCategory = OfferingCategoryDto("choice", "Choice", "An optional choice", 0, 2)
     val samplePrice = OfferingPriceDto("PER_QUANTITY", "0.75", "USD", "guest")
-    val sampleOffering = OfferingDto("item", "choice", "Item", "An item", samplePrice)
-    val sampleOfferingMutation = OfferingMutationDto(3, "choice", "Item", "An item", samplePrice)
+    val sampleOffering =
+        OfferingDto("item", "choice", "Item", "An item", samplePrice, OfferingSelectionStateDto.ENABLED, OfferingAvailabilityDto.AVAILABLE)
+    val sampleOfferingMutation =
+        OfferingMutationDto(
+            3,
+            "choice",
+            "Item",
+            "An item",
+            samplePrice,
+            OfferingSelectionStateDto.ENABLED,
+            OfferingAvailabilityDto.AVAILABLE,
+        )
     val sampleCategoryMutation = OfferingCategoryMutationDto(3, "Choice", "An optional choice", 0, 2)
-    val sampleAddOffering = AddOfferingDto(2, "item", "choice", "Item", "An item", samplePrice)
+    val sampleAddOffering =
+        AddOfferingDto(
+            2,
+            "item",
+            "choice",
+            "Item",
+            "An item",
+            samplePrice,
+            OfferingSelectionStateDto.ENABLED,
+            OfferingAvailabilityDto.AVAILABLE,
+        )
     val sampleAddCategory = AddOfferingCategoryDto(1, "choice", "Choice", "An optional choice", 0, 2)
     // Examples follow one coherent history: initialization creates an empty r1, adding the
     // category creates r2, and adding the offering creates r3, which the reads return.
@@ -376,6 +396,8 @@ fun offeringsHttpCapability(
                                 value.displayName,
                                 value.description,
                                 value.price,
+                                value.selectionState,
+                                value.availability,
                             ).offeringDto(),
                     )
                 }
@@ -437,6 +459,8 @@ fun offeringsHttpCapability(
                                 value.displayName,
                                 value.description,
                                 value.price,
+                                value.selectionState,
+                                value.availability,
                             ).offeringDto(),
                     )
                 }
