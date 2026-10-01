@@ -18,6 +18,7 @@ import io.github.castab.commerce.runtime.testing.withTestDatabase
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.PermissionDefinition
+import io.github.castab.commerce.staff.PermissionGroup
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.RoleDefinition
@@ -47,7 +48,13 @@ import org.http4k.format.Jackson
 import org.http4k.routing.RoutingHttpHandler
 import java.util.UUID
 
-private val customPermission = PermissionDefinition(PermissionKey("example.custom.operation"), "Custom operation", null)
+private val customPermission =
+    PermissionDefinition(
+        PermissionKey("example.custom.operation"),
+        "Custom operation",
+        "Run the custom operation.",
+        PermissionGroup("example"),
+    )
 
 private fun TestDatabase.configuration() =
     CommerceRuntimeConfiguration(
@@ -365,6 +372,30 @@ class AuthorizationDirectorySpec :
                         """{"key":"bad","displayName":"Bad","description":null,"permissions":["unknown"]}""",
                     ).status shouldBe
                         Status.UNPROCESSABLE_ENTITY
+                    val unknown =
+                        request(
+                            Method.PUT,
+                            "$base/roles/example.custom/permissions",
+                            adminToken,
+                            """{"permissions":["commerce.principal.read","definitely.not.a.permission","another.unknown"]}""",
+                        )
+                    unknown.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    unknown.bodyString().contains("Unknown permissions: another.unknown, definitely.not.a.permission") shouldBe true
+                    request(
+                        Method.PUT,
+                        "$base/roles/example.custom/permissions",
+                        adminToken,
+                        """{"permissions":["Commerce.Principal.Read"]}""",
+                    ).status shouldBe Status.UNPROCESSABLE_ENTITY
+                    auth.getRole(RoleKey("example.custom"))!!.permissions shouldBe setOf(CommercePermissions.PrincipalRead)
+                    request(
+                        Method.PUT,
+                        "$base/roles/example.custom/permissions",
+                        adminToken,
+                        """{"permissions":["example.custom.operation","commerce.principal.read","example.custom.operation"]}""",
+                    ).status shouldBe Status.OK
+                    auth.getRole(RoleKey("example.custom"))!!.permissions shouldBe
+                        setOf(CommercePermissions.PrincipalRead, customPermission.key)
                     request(Method.PUT, "$base/users/${viewer.id.value}/roles/${adminRole.key.value}", adminToken).status shouldBe
                         Status.NO_CONTENT
                     request(Method.PUT, "$base/users/${viewer.id.value}/roles/${adminRole.key.value}", adminToken).status shouldBe
@@ -410,14 +441,24 @@ class AuthorizationDirectorySpec :
         test("duplicate application permission keys fail composition") {
             val database = TestDatabase.create()
             try {
-                shouldThrow<IllegalArgumentException> {
-                    commerceRuntime(
-                        database.configuration(),
-                        ApplicationContributions(
-                            permissionDefinitions = listOf(PermissionDefinition(CommercePermissions.PrincipalRead, "Duplicate", null)),
-                        ),
-                    )
-                }
+                val failure =
+                    shouldThrow<IllegalArgumentException> {
+                        commerceRuntime(
+                            database.configuration(),
+                            ApplicationContributions(
+                                permissionDefinitions =
+                                    listOf(
+                                        PermissionDefinition(
+                                            CommercePermissions.PrincipalRead,
+                                            "Duplicate",
+                                            "Another meaning for a runtime key.",
+                                            PermissionGroup("example"),
+                                        ),
+                                    ),
+                            ),
+                        )
+                    }
+                failure.message shouldBe "Duplicate permission keys: commerce.principal.read"
             } finally {
                 database.close()
             }
@@ -463,6 +504,32 @@ class AuthorizationDirectorySpec :
                     context.authorization.permissionResolver.permissionsFor(operator.id) shouldBe emptySet()
                     context.authorization.getRole(RoleKey("example.operator"))!!.permissions shouldBe emptySet()
                 }
+            } finally {
+                database.close()
+            }
+        }
+
+        test("a stored grant that is no longer a well-formed key fails startup by name") {
+            val database = TestDatabase.create()
+            try {
+                lateinit var context: CommerceRuntimeContext
+                commerceRuntime(
+                    database.configuration(),
+                    ApplicationContributions(routes = {
+                        context = it
+                        emptyList()
+                    }),
+                ).use {
+                    context.authorization.createRole(role("example.legacy", emptySet()))
+                    context.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES ('example.legacy', 'Legacy.Key')",
+                            ).execute()
+                    }
+                }
+                val failure = shouldThrow<IllegalStateException> { commerceRuntime(database.configuration(), ApplicationContributions()) }
+                failure.message shouldBe "Stored role permissions missing from PermissionCatalog: Legacy.Key"
             } finally {
                 database.close()
             }

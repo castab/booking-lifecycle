@@ -89,7 +89,9 @@ class CommerceRuntimeContext internal constructor(
  *   [CommerceRuntimeContext]. They are served behind the same error handling as the
  *   commerce routes.
  * @property permissionDefinitions Software-defined application permissions added to the
- *   runtime's built-in catalog. Duplicate keys fail composition.
+ *   runtime's built-in `commercePermissionDefinitions` to form the running application's
+ *   `PermissionCatalog` (`context.authorization.permissionCatalog`). A key defined twice,
+ *   by the application or by both contributors, fails composition before anything starts.
  */
 class ApplicationContributions(
     val migrations: ApplicationMigrations? = null,
@@ -154,7 +156,7 @@ fun commerceRuntime(
     configuration: CommerceRuntimeConfiguration,
     application: ApplicationContributions,
 ): CommerceRuntime {
-    val permissionCatalog = PermissionCatalog(commercePermissionDefinitions + application.permissionDefinitions)
+    val permissionCatalog = PermissionCatalog.of(commercePermissionDefinitions, application.permissionDefinitions)
     val dataSource = createDataSource(configuration.database)
     try {
         val migrations = MigrationLifecycle(dataSource, application.migrations)

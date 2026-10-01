@@ -103,7 +103,9 @@ fun requirePermission(
  *
  * @param authentication Establishes [authenticatedPrincipal] when the request is not yet
  *   authenticated, for example `sessionAuthentication(context.sessions, SessionCookie("app_session"))`.
- * @param permissionResolver The application's source of current permissions.
+ * @property permissionResolver The application's source of current permissions: the one
+ *   every [requirePermission] declaration consults, and therefore the source a capability
+ *   uses to report a principal's effective permissions.
  *
  * ```kotlin
  * val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), permissionResolver)
@@ -116,7 +118,7 @@ fun requirePermission(
  */
 class AccessControl(
     private val authentication: Filter,
-    private val permissionResolver: PermissionResolver,
+    val permissionResolver: PermissionResolver,
 ) {
     /**
      * [authentication] as a fallback: skipped when the request already carries a

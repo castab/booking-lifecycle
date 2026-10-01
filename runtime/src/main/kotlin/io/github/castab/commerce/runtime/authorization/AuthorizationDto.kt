@@ -3,6 +3,7 @@ package io.github.castab.commerce.runtime.authorization
 import io.github.castab.commerce.runtime.operation.validating
 import io.github.castab.commerce.staff.PermissionDefinition
 import io.github.castab.commerce.staff.PermissionKey
+import io.github.castab.commerce.staff.Principal
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.RoleDefinition
 import io.github.castab.commerce.staff.RoleKey
@@ -92,16 +93,40 @@ data class PermissionKeysDto(
     val permissions: List<String>,
 )
 
+/** One catalog entry. Every field is required and non-null. */
 @Serializable
 data class PermissionDto(
     val key: String,
+    val group: String,
     val displayName: String,
-    val description: String?,
+    val description: String,
 )
 
+/** The permission catalog: its content [revision] and every definition, ordered by key. */
 @Serializable
 data class PermissionsDto(
+    val revision: String,
     val permissions: List<PermissionDto>,
+)
+
+/** The authenticated principal's identity, for display. [kind] is `USER` or `SERVICE`. */
+@Serializable
+data class PrincipalSummaryDto(
+    val kind: String,
+    val id: String,
+    val displayName: String,
+)
+
+/**
+ * The authenticated principal and its current, resolved effective [permissions], ordered by
+ * key and empty rather than absent when it holds none. [permissionCatalogRevision] is the
+ * running catalog's revision, for compatibility diagnostics.
+ */
+@Serializable
+data class CurrentPrincipalDto(
+    val principal: PrincipalSummaryDto,
+    val permissions: List<String>,
+    val permissionCatalogRevision: String,
 )
 
 @Serializable
@@ -127,7 +152,16 @@ internal fun ServiceIdentity.dto() = ServiceDto(id.value.toString(), name, statu
 
 internal fun RoleDefinition.dto() = RoleDto(key.value, displayName, description, permissions.map { it.value }.sorted())
 
-internal fun PermissionDefinition.dto() = PermissionDto(key.value, displayName, description)
+internal fun PermissionDefinition.dto() = PermissionDto(key.value, group.value, displayName, description)
+
+internal fun PermissionCatalog.dto() = PermissionsDto(revision, definitions.map { it.dto() })
+
+internal fun Principal.summary() =
+    when (this) {
+        is User -> PrincipalSummaryDto("USER", id.value.toString(), displayName)
+        is ServiceIdentity -> PrincipalSummaryDto("SERVICE", id.value.toString(), name)
+        else -> error("The authorization directory resolved an unsupported principal type")
+    }
 
 internal fun UserWriteDto.user(id: UserId) =
     validating {

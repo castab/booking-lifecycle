@@ -252,7 +252,7 @@ never open their own transactions.
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
 | `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor`, `Transaction` and `TransactionIsolation`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
 | `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, refunds with their refund allocations, derived payment and document reconciliation, and `PaymentHistory` reads of a payment or a document lineage's payments. |
-| `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
+| `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog` and `commercePermissionDefinitions`, and the opt-in authorization administration, permission catalog, and current principal HTTP capabilities and DTOs. |
 | `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
 | `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, health routes, the `authenticatedPrincipal` request lens, and the authorization filters (`requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
@@ -1235,9 +1235,11 @@ is stored separately. A duplicate normalized name is `409 conflict`.
 
 Built-in permission definitions are listed explicitly in
 `commercePermissionDefinitions`. An application contributes its own code-backed keys via
-`ApplicationContributions(permissionDefinitions = listOf(...))`. Duplicate keys fail
-runtime composition; unknown keys fail role creation or permission replacement with
-`422 validation_failed`. Permissions cannot be created by an administration route.
+`ApplicationContributions(permissionDefinitions = listOf(...))`; see
+[Permission catalog and effective permissions](#permission-catalog-and-effective-permissions).
+Duplicate keys fail runtime composition; unknown or malformed keys fail role creation or
+permission replacement with `422 validation_failed`, naming the unknown keys. A repeated
+key in one request is one grant. Permissions cannot be created by an administration route.
 After runtime and application migrations, before HTTP composition, the runtime rejects
 any persisted `commerce.role_permissions` key missing from the running catalog and names
 the unknown keys. An application release removing a permission must migrate away its
@@ -1313,12 +1315,124 @@ At that base path, the capability exposes:
 | GET, POST | `/roles` | `RoleRead`, `RoleManage` respectively |
 | GET, PATCH, DELETE | `/roles/{roleKey}` | `RoleRead`, `RoleManage`, `RoleManage` |
 | PUT | `/roles/{roleKey}/permissions` | `RoleManage` |
-| GET | `/permissions` | `RoleRead` |
+| GET | `/permissions` | `RoleRead` (the [permission catalog](#permission-catalog-and-effective-permissions) route) |
 
 The runtime handles `401` for no valid session and `403` for a principal lacking the
 required permission before reading mutation bodies. OpenAPI lists these responses and
 the standard commerce errors. The host owns the aggregate OpenAPI document and Swagger
 UI. This capability has no login, credentials, cookies, or default administrator.
+
+### Permission catalog and effective permissions
+
+Four questions stay separate:
+
+| Question | Answered by |
+|---|---|
+| Which permissions exist? | `PermissionCatalog` (`context.authorization.permissionCatalog`) |
+| Which permissions does principal X hold now? | `PermissionResolver` (`context.authorization.permissionResolver`) |
+| May principal X perform operation Y? | `AccessControl.requirePermission` / `PrincipalId.can`, on every request |
+| Which known permissions does role R grant? | Role administration (`AuthorizationDirectory`) |
+
+**The catalog** is the running application's whole authorization vocabulary: the runtime's
+`commercePermissionDefinitions` plus the application's
+`ApplicationContributions.permissionDefinitions`, composed once by `commerceRuntime(...)`.
+Each entry is a commerce-domain `PermissionDefinition`: the canonical `PermissionKey`
+that role grants and enforcement use, a `PermissionGroup` for presentation, a display
+name, and a description, all required. Keys and groups are lowercase dot-separated
+segments (`users.read`, `catering.inquiries.assign`); malformed values are rejected, never
+normalized. The catalog is immutable, ordered by key whatever the registration order, and
+rejects a key contributed twice by naming it, before the runtime starts. It is code-defined
+and never persisted. Its `revision` (`sha256:` plus a hex digest of the canonical contents)
+changes whenever a definition is added, removed, or changed, and never otherwise; it is
+for diagnostics and frontend compatibility checks, not authorization.
+
+The catalog is the authority for "is this key known to this application?": role creation
+and grant replacement reject unknown keys, and startup and live resolution fail closed on
+stored grants it does not define. It is never the authority for whether a principal holds
+a permission, and knowing a key confers nothing.
+
+The runtime describes every key in `CommercePermissions`. Its own routes enforce
+`OfferingsManage`, `PrincipalRead`, `PrincipalManage`, `RoleRead`, `RoleManage`, and
+`RoleAssign`; the booking, financial-document, payment, and refund keys are conventional
+names for operations an application enforces.
+
+An application contributes its permissions and chooses which routes to mount:
+
+```kotlin
+object CateringPermissions {
+    private val inquiries = PermissionGroup("catering.inquiries")
+    val AssignInquiry = PermissionKey("catering.inquiries.assign")
+    val definitions = listOf(
+        PermissionDefinition(AssignInquiry, "Assign inquiries", "Assign inquiries to staff.", inquiries),
+    )
+}
+
+val runtime = commerceRuntime(configuration, ApplicationContributions(
+    permissionDefinitions = CateringPermissions.definitions,
+    routes = { context ->
+        val access = AccessControl(
+            sessionAuthentication(context.sessions, appSessionCookie),
+            context.authorization.permissionResolver,
+        )
+        val tags = setOf(Tag("Access"))
+        listOf(contract {
+            renderer = OpenApi3(ApiInfo("Catering", "1"), Jackson)
+            descriptionPath = "/openapi.json"
+            routes += permissionCatalogHttpCapability(
+                context.authorization.permissionCatalog, access, "/authorization", tags).contractRoutes
+            routes += currentPrincipalHttpCapability(context, access, "/me", tags).contractRoutes
+            // Enforcement uses the same key the catalog describes.
+            routes += "/inquiries" / Path.of("id") / "assignee" bindContract PUT to { id: String, _: String ->
+                access.requirePermission(CateringPermissions.AssignInquiry).then(assignInquiry(id))
+            }
+        })
+    },
+))
+```
+
+`PermissionCatalog.of(commercePermissionDefinitions, CateringPermissions.definitions)`
+builds the same catalog outside the runtime, for example in a unit test.
+
+Neither route exists unless the host mounts it. `permissionCatalogHttpCapability` serves
+`GET {basePath}/permissions` and requires `RoleRead`, which reads roles and the vocabulary
+without the right to change them (`RoleManage`). `authorizationAdministrationHttpCapability`
+already includes the same route, so mount one or the other at a base path:
+
+```json
+{
+  "revision": "sha256:3f5c...",
+  "permissions": [
+    {
+      "key": "catering.inquiries.assign",
+      "group": "catering.inquiries",
+      "displayName": "Assign inquiries",
+      "description": "Assign inquiries to staff."
+    }
+  ]
+}
+```
+
+`currentPrincipalHttpCapability` serves `GET {path}` to any authenticated principal (`401`
+otherwise) and returns its identity and its **effective** permissions, resolved on every
+request through `AccessControl.permissionResolver`, the resolver that enforces every
+`requirePermission`. A principal without grants gets `[]`. Role keys are deliberately
+absent, so clients never derive authority from role names:
+
+```json
+{
+  "principal": { "kind": "USER", "id": "0b6f...", "displayName": "Staff Member" },
+  "permissions": ["catering.inquiries.assign", "commerce.role.read"],
+  "permissionCatalogRevision": "sha256:3f5c..."
+}
+```
+
+`kind` is `USER` or `SERVICE`; a service's `displayName` is its name. Both routes declare
+every field as required and non-null in OpenAPI.
+
+**Frontend checks are user experience, not security.** A frontend may hide an "Add user"
+control when `permissions` lacks a key, and may compare the keys it references with the
+catalog to detect a deployment mismatch. That comparison is the frontend's. The server
+still enforces every protected operation's permission on every request.
 
 **Session cleanup.** Expired and revoked rows stay in `commerce.principal_sessions`; they
 authenticate nothing. Purging old inactive rows would be a runtime capability (an operation
@@ -1511,6 +1625,15 @@ and missing (`403`), permissions changing during a session, users and services a
 fail-closed handlers, and the cookie adapter. `CommerceRuntimeSpec` shows an application
 authenticating identity itself, issuing a session through `context.sessions`, and
 recovering the principal from the token over real HTTP.
+
+`PermissionCatalogSpec` covers catalog composition, key ordering independent of
+registration, lookup, named duplicate rejection, immutability, and a revision that is
+stable across registration order and changes with every added, removed, or edited
+definition. `AuthorizationReadHttpSpec` proves the catalog and current principal routes
+over real HTTP: `401`, `403` (including for `RoleManage` alone), complete metadata in key
+order, routes absent unless mounted, live effective permissions with an empty list for a
+principal without grants, services and users alike, and OpenAPI schemas whose required,
+non-nullable properties are exactly those of the live responses.
 
 Database specs run against a real PostgreSQL 18 that the build starts through the Docker CLI.
 See [Building and testing](../README.md#building-and-testing).

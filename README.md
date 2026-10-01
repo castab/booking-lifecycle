@@ -58,7 +58,10 @@ concrete commerce application    (the consuming project)
    authenticated principal sessions, persistent principal and RBAC state, live permission
    resolution, and authorization administration over HTTP. It manages a session only after
    the application has proven identity and the runtime confirms a known, active principal;
-   it never sees credentials. Stored role grants must match the running permission catalog.
+   it never sees credentials. Stored role grants must match the running permission catalog,
+   the runtime's and the application's permission definitions composed at startup, which
+   applications may expose with an opt-in catalog route alongside a current-principal route
+   that reports resolved effective permissions.
    It owns no customer or other application data model. It is a
    library. It is not itself an application, and it provides no default application and
    no `main()`. It defines the configuration it requires but ships no `application.conf`,

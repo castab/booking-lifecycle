@@ -2,8 +2,6 @@ package io.github.castab.commerce.runtime.authorization
 
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.http.AccessControl
-import io.github.castab.commerce.runtime.http.ErrorCategory
-import io.github.castab.commerce.runtime.http.ErrorResponse
 import io.github.castab.commerce.runtime.http.jsonBody
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
@@ -37,6 +35,7 @@ class AuthorizationAdministrationHttpCapability internal constructor(
  * authentication through [accessControl]; each route declares its own commerce permission.
  * [tags] are the host's OpenAPI grouping for every route; when empty, http4k's default
  * grouping applies. No credential, cookie, login, or bootstrap policy is included.
+ * `GET {basePath}/permissions` is the same route [permissionCatalogHttpCapability] provides.
  */
 fun authorizationAdministrationHttpCapability(
     context: CommerceRuntimeContext,
@@ -44,14 +43,8 @@ fun authorizationAdministrationHttpCapability(
     basePath: String,
     tags: Set<Tag> = emptySet(),
 ): AuthorizationAdministrationHttpCapability {
-    require(
-        basePath.startsWith('/') &&
-            basePath.length > 1 &&
-            !basePath.endsWith('/') &&
-            basePath.split('/').drop(1).all { it.isNotBlank() } &&
-            basePath.none { it in "?{}#" },
-    ) { "Invalid administration base path" }
-    require(tags.none { it.name.isBlank() }) { "OpenAPI tag names cannot be blank" }
+    requireRoutePath(basePath) { "Invalid administration base path" }
+    requireTagNames(tags)
     val routeTags = tags
     val directory = context.authorization
     val userPath = Path.of("userId")
@@ -69,20 +62,10 @@ fun authorizationAdministrationHttpCapability(
     val roleWrite = jsonBody(RoleWriteDto.serializer())
     val roleProfile = jsonBody(RoleProfileDto.serializer())
     val permissionKeys = jsonBody(PermissionKeysDto.serializer())
-    val permissionsBody = jsonBody(PermissionsDto.serializer())
     val assignmentsBody = jsonBody(AssignmentsDto.serializer())
-    val errorBody = jsonBody(ErrorResponse.serializer())
     val sampleUser = UserDto(UUID(0, 1).toString(), "staff", "Staff", "Member", "Staff Member", "ACTIVE", listOf("commerce.manager"))
     val sampleService = ServiceDto(UUID(0, 2).toString(), "worker", "ACTIVE", listOf("commerce.manager"))
     val sampleRole = RoleDto("commerce.manager", "Manager", "Manages staff", listOf(CommercePermissions.PrincipalRead.value))
-    val samplePermission = PermissionDto(CommercePermissions.PrincipalRead.value, "Read principals", "Read principal identities")
-
-    fun RouteMetaDsl.errors(vararg statuses: Status) {
-        statuses.forEach { status ->
-            val category = ErrorCategory.entries.first { it.status == status }
-            returning(status, errorBody to ErrorResponse(category.code, "Request failed"))
-        }
-    }
 
     fun RouteMetaDsl.protected(
         id: String,
@@ -324,13 +307,7 @@ fun authorizationAdministrationHttpCapability(
             Response(Status.OK).with(roleBody of directory.replaceRolePermissions(key.roleKey(), keys).dto())
         }
     }
-    routes += "$basePath/permissions" meta {
-        protected("ListPermissions", "List software-defined permissions")
-        returning(Status.OK, permissionsBody to PermissionsDto(listOf(samplePermission)))
-    } bindContract Method.GET to
-        readRole.then { _: Request ->
-            Response(Status.OK).with(permissionsBody of PermissionsDto(directory.permissionCatalog.definitions.map { it.dto() }))
-        }
+    routes += permissionCatalogRoute(directory.permissionCatalog, accessControl, basePath, routeTags)
 
     return AuthorizationAdministrationHttpCapability(routes)
 }

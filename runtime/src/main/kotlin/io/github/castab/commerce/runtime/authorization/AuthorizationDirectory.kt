@@ -7,8 +7,6 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.isUniqueViolation
 import io.github.castab.commerce.runtime.session.SessionManager
-import io.github.castab.commerce.staff.CommercePermissions
-import io.github.castab.commerce.staff.PermissionDefinition
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.Principal
@@ -25,50 +23,7 @@ import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
-import java.util.Collections
 import java.util.Locale
-
-/** Software-defined permissions available for administrator-defined roles. */
-class PermissionCatalog(
-    definitions: List<PermissionDefinition>,
-) {
-    val definitions: List<PermissionDefinition> = Collections.unmodifiableList(definitions.toList())
-    private val byKey: Map<PermissionKey, PermissionDefinition>
-
-    init {
-        require(definitions.map { it.key }.toSet().size == definitions.size) { "Duplicate permission key" }
-        byKey = definitions.associateBy { it.key }
-    }
-
-    fun find(key: PermissionKey): PermissionDefinition? = byKey[key]
-
-    internal fun validate(keys: Set<PermissionKey>) {
-        val unknown = keys.filterNot { it in byKey }
-        if (unknown.isNotEmpty()) throw CommerceFailure.ValidationFailed("Unknown permissions: ${unknown.joinToString { it.value }}")
-    }
-
-    internal fun validatePersisted(keys: Set<PermissionKey>) {
-        val unknown = keys.filterNot { it in byKey }.sortedBy { it.value }
-        if (unknown.isNotEmpty()) error("Stored role permissions missing from PermissionCatalog: ${unknown.joinToString { it.value }}")
-    }
-}
-
-/** Explicit catalog. These keys denote code capabilities, never database-created permissions. */
-val commercePermissionDefinitions: List<PermissionDefinition> =
-    listOf(
-        PermissionDefinition(CommercePermissions.BookingRead, "Read bookings", null),
-        PermissionDefinition(CommercePermissions.BookingModify, "Modify bookings", null),
-        PermissionDefinition(CommercePermissions.FinancialDocumentRead, "Read financial documents", null),
-        PermissionDefinition(CommercePermissions.FinancialDocumentCreate, "Create financial documents", null),
-        PermissionDefinition(CommercePermissions.OfferingsManage, "Manage offerings", null),
-        PermissionDefinition(CommercePermissions.PaymentRecord, "Record payments", null),
-        PermissionDefinition(CommercePermissions.RefundRecord, "Record refunds", null),
-        PermissionDefinition(CommercePermissions.PrincipalRead, "Read principals", null),
-        PermissionDefinition(CommercePermissions.PrincipalManage, "Manage principals", null),
-        PermissionDefinition(CommercePermissions.RoleRead, "Read roles and permissions", null),
-        PermissionDefinition(CommercePermissions.RoleManage, "Manage role definitions", null),
-        PermissionDefinition(CommercePermissions.RoleAssign, "Assign roles", null),
-    )
 
 /**
  * Live principal and RBAC administration. Mutations with [Transaction] join application
@@ -86,7 +41,7 @@ class AuthorizationDirectory internal constructor(
     private val roleBasedPermissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
     val permissionResolver: PermissionResolver =
         PermissionResolver { id ->
-            roleBasedPermissionResolver.permissionsFor(id).also(permissionCatalog::validatePersisted)
+            roleBasedPermissionResolver.permissionsFor(id).also { keys -> permissionCatalog.validatePersisted(keys.map { it.value }) }
         }
 
     fun listUsers(): List<User> = transactor.inTransaction { repository.users(it) }

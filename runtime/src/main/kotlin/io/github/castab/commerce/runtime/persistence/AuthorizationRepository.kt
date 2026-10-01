@@ -97,12 +97,12 @@ internal class AuthorizationRepository {
             .orElse(null)
             ?.let(PrincipalStatus::valueOf)
 
-    fun storedPermissionKeys(tx: Transaction): Set<PermissionKey> =
+    /** Raw stored keys, so a value that is no longer a well-formed [PermissionKey] can still be named. */
+    fun storedPermissionKeys(tx: Transaction): Set<String> =
         tx.handle
             .createQuery("SELECT DISTINCT permission_key FROM commerce.role_permissions")
             .mapTo(String::class.java)
             .list()
-            .map(::PermissionKey)
             .toSet()
 
     fun insertUser(

@@ -1889,14 +1889,21 @@ authenticate caller → PrincipalId → resolve Principal → assigned RoleKey
                   → RoleDefinition → granted PermissionKey → authorize operation
 ```
 
-`RoleKey` and `PermissionKey` are validated, open-ended strings, not enums. Roles are
-shared by humans and services. `CommerceRoles` (`Administrator`, `Manager`,
+`RoleKey` and `PermissionKey` are validated, open-ended strings, not enums. A
+`PermissionKey` is the one canonical permission identity used by definitions, role grants,
+resolvers, and enforcement. It is one or more lowercase dot-separated segments of ASCII
+letters and digits, optionally joined by `-` or `_` (`users.read`,
+`catering.inquiries.assign`, `commerce.financial-document.read`), with no fixed number of
+segments. Malformed keys are rejected and never normalized: `Users.Create` fails rather
+than becoming `users.create`. Roles are shared by humans and services. `CommerceRoles` (`Administrator`, `Manager`,
 `Supervisor`, `Employee`) provides conventional keys without built-in grants.
 `CommercePermissions` provides keys for booking read/modify, financial-document
 read/create, offerings catalog management, payment/refund recording, and principal
 read/manage, role read/manage, and role assignment. `PermissionDefinition` supplies
-human-readable metadata for a code-backed `PermissionKey`; it does not make permissions
-database-created resources. Applications choose actual role bundles and may add their
+human-readable metadata for a code-backed `PermissionKey`: a required display name, a
+required description, and a `PermissionGroup` (same syntax as a key, such as
+`commerce.roles`) for presentation. Describing a permission confers no authority and does
+not make permissions database-created resources. Applications choose actual role bundles and may add their
 own permissions, for example:
 
 ```kotlin
@@ -1905,6 +1912,12 @@ import java.util.UUID
 
 // Application-defined example keys; the "example." prefix stands for your own namespace.
 val MessageRespond = PermissionKey("example.message.respond")
+val MessageRespondDefinition = PermissionDefinition(
+    key = MessageRespond,
+    displayName = "Respond to messages",
+    description = "Reply to incoming customer messages.",
+    group = PermissionGroup("example.messages"),
+)
 val Support = RoleDefinition(
     key = RoleKey("example.support"),
     displayName = "Support",
