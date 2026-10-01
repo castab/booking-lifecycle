@@ -386,7 +386,8 @@ class OfferingsCapabilitySpec :
             request(
                 Method.POST,
                 "/catalog-a/offerings",
-                """{"key":"vanilla","category":"flavors","displayName":"Vanilla","price":null}""",
+                """{"key":"vanilla","selectionState":"ENABLED","availability":"AVAILABLE",
+                    "category":"flavors","displayName":"Vanilla","price":null}""",
             ).status shouldBe
                 Status.CREATED
             request(Method.GET, "/catalog-a").json()["revision"]!!.jsonPrimitive.content shouldBe "3"
@@ -418,7 +419,14 @@ class OfferingsCapabilitySpec :
             val fixed =
                 Json.encodeToString(
                     OfferingDto.serializer(),
-                    OfferingDto("fixed", "flavors", "Fixed", price = OfferingPriceDto("FIXED", "120.00", "USD")),
+                    OfferingDto(
+                        "fixed",
+                        "flavors",
+                        "Fixed",
+                        selectionState = OfferingSelectionStateDto.ENABLED,
+                        availability = OfferingAvailabilityDto.AVAILABLE,
+                        price = OfferingPriceDto("FIXED", "120.00", "USD"),
+                    ),
                 )
             val quantity =
                 Json.encodeToString(
@@ -427,6 +435,8 @@ class OfferingsCapabilitySpec :
                         "quantity",
                         "flavors",
                         "Quantity",
+                        selectionState = OfferingSelectionStateDto.ENABLED,
+                        availability = OfferingAvailabilityDto.AVAILABLE,
                         price = OfferingPriceDto("PER_QUANTITY", "0.75", "USD", "guest"),
                     ),
                 )
@@ -437,6 +447,8 @@ class OfferingsCapabilitySpec :
                         "duration",
                         "flavors",
                         "Duration",
+                        selectionState = OfferingSelectionStateDto.ENABLED,
+                        availability = OfferingAvailabilityDto.AVAILABLE,
                         price = OfferingPriceDto("PER_DURATION", "50.00", "USD", interval = "PT0.123456789S"),
                     ),
                 )
@@ -486,7 +498,8 @@ class OfferingsCapabilitySpec :
                 request(
                     Method.POST,
                     "/catalog-a/offerings",
-                    """{"key":"fixed-with-extra","category":"flavors","displayName":"Fixed with Extra",
+                    """{"key":"fixed-with-extra","selectionState":"ENABLED","availability":"AVAILABLE",
+                    "category":"flavors","displayName":"Fixed with Extra",
                       "price":{"kind":"FIXED","amount":"120.00","currency":"USD","futureField":"ignored"}}""",
                 )
             additive.status shouldBe Status.CREATED
@@ -502,13 +515,15 @@ class OfferingsCapabilitySpec :
                 request(
                     Method.POST,
                     "/catalog-a/offerings",
-                    """{"key":"fixed-with-dimension","category":"flavors","displayName":"Fixed with Dimension",
+                    """{"key":"fixed-with-dimension","selectionState":"ENABLED","availability":"AVAILABLE",
+                    "category":"flavors","displayName":"Fixed with Dimension",
                       "price":{"kind":"FIXED","amount":"120.00","currency":"USD","dimension":"guest"}}""",
                 )
             conflicting.status shouldBe Status.UNPROCESSABLE_ENTITY
             conflicting.json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
             priceShapes.forEachIndexed { index, (price, status) ->
-                val body = """{"key":"shape$index","category":"flavors","displayName":"Shape $index","price":$price}"""
+                val body = """{"key":"shape$index","selectionState":"ENABLED","availability":"AVAILABLE",
+                    "category":"flavors","displayName":"Shape $index","price":$price}"""
                 request(Method.POST, "/catalog-a/offerings", body).status shouldBe status
             }
             val openapi = request(Method.GET, "/openapi.json").json()
@@ -825,14 +840,14 @@ class OfferingsCapabilitySpec :
                     request(method, "/catalog-b/$concrete", "{").status shouldBe Status.BAD_REQUEST
                     val invalid =
                         if (suffix.startsWith("offerings")) {
-                            """{"category":"lifecycle","displayName":" "}"""
+                            """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":" "}"""
                         } else {
                             """{"displayName":" ","minimumSelections":-1}"""
                         }
                     request(method, "/catalog-b/$concrete", invalid).status shouldBe Status.UNPROCESSABLE_ENTITY
                     val body =
                         if (suffix.startsWith("offerings")) {
-                            """{"category":"lifecycle","displayName":"Unknown"}"""
+                            """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"Unknown"}"""
                         } else {
                             """{"displayName":"Unknown"}"""
                         }
@@ -843,7 +858,7 @@ class OfferingsCapabilitySpec :
                 val badKeyPath = concrete.replace("missing", "%20")
                 val validBody =
                     if (suffix.startsWith("offerings")) {
-                        """{"category":"lifecycle","displayName":"Item"}"""
+                        """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"Item"}"""
                     } else {
                         """{"displayName":"Category"}"""
                     }
@@ -865,7 +880,7 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "$base/categories", category).status shouldBe Status.CREATED
 
             fun body(amount: String) =
-                """{"category":"lifecycle","displayName":"Horchata",
+                """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"Horchata",
                     "price":{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}}"""
             val addBody = body("0.50").replaceFirst("{", """{"key":"horchata", """)
             request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CREATED
@@ -940,7 +955,12 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "$base/categories", """{"key":"retired","displayName":"Retired is a legal key"}""").status shouldBe
                 Status.CREATED
             request(Method.GET, "$base/categories/retired").status shouldBe Status.OK
-            request(Method.POST, "$base/offerings", """{"key":"retired","category":"retired","displayName":"Legal key"}""").status shouldBe
+            request(
+                Method.POST,
+                "$base/offerings",
+                """{"key":"retired","selectionState":"ENABLED","availability":"AVAILABLE",
+                    "category":"retired","displayName":"Legal key"}""",
+            ).status shouldBe
                 Status.CREATED
             request(Method.GET, "$base/offerings/retired").status shouldBe Status.OK
         }
@@ -991,7 +1011,7 @@ class OfferingsCapabilitySpec :
             ).forEach { (suffix, method) ->
                 val baseBody =
                     if (suffix.startsWith("offerings")) {
-                        """{"key":"new","category":"lifecycle","displayName":"New"}"""
+                        """{"key":"new","selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"New"}"""
                     } else {
                         """{"key":"new","displayName":"New"}"""
                     }
@@ -1055,7 +1075,8 @@ class OfferingsCapabilitySpec :
         test("HTTP rejects a stale full replacement without overwriting price or advancing history") {
             val base = "/catalog-b"
             request(Method.POST, "$base/categories", """{"key":"stale-guard","displayName":"Guard"}""").status shouldBe Status.CREATED
-            val body = """{"category":"stale-guard","displayName":"Horchata","price":{"kind":"FIXED","amount":"0.50","currency":"USD"}}"""
+            val body = """{"selectionState":"ENABLED","availability":"AVAILABLE",
+                    "category":"stale-guard","displayName":"Horchata","price":{"kind":"FIXED","amount":"0.50","currency":"USD"}}"""
             request(Method.POST, "$base/offerings", body.replaceFirst("{", """{"key":"stale-horchata", """)).status shouldBe Status.CREATED
             val observed = request(Method.GET, base).json()
             val path = "$base/offerings/stale-horchata"
@@ -1086,6 +1107,165 @@ class OfferingsCapabilitySpec :
                 body.replaceFirst("{", "{\"expectedRevision\":${committed["revision"]!!.jsonPrimitive.content},"),
                 supplyExpectedRevision = false,
             ).status shouldBe Status.OK
+        }
+
+        test("HTTP requires selection enums on every write and retains disabled and unavailable catalog history") {
+            val base = "/catalog-b"
+            request(Method.POST, "$base/categories", """{"key":"eligibility","displayName":"Eligibility"}""").status shouldBe Status.CREATED
+            val path = "$base/offerings/eligibility-item"
+            val fields =
+                Json
+                    .parseToJsonElement(
+                        """{"key":"eligibility-item","category":"eligibility","displayName":"Item",
+                    "selectionState":"DISABLED","availability":"AVAILABLE"}""",
+                    ).jsonObject
+            val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
+            listOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto").forEach { name ->
+                val schema = schemas[name]!!.jsonObject
+                val required = schema["required"]!!.jsonArray.map { it.jsonPrimitive.content }
+                required.containsAll(listOf("selectionState", "availability")) shouldBe true
+                val properties = schema["properties"]!!.jsonObject
+                listOf("selectionState" to listOf("ENABLED", "DISABLED"), "availability" to listOf("AVAILABLE", "UNAVAILABLE"))
+                    .forEach { (field, values) ->
+                        val property = properties[field]!!.jsonObject
+                        property["type"]!!.jsonPrimitive.content shouldBe "string"
+                        property["enum"]!!.jsonArray.map { it.jsonPrimitive.content }.shouldContainExactly(values)
+                        property.containsKey("nullable") shouldBe false
+                        listOf(JsonNull, JsonPrimitive("UNKNOWN")).forEach { property.accepts(it, schemas) shouldBe false }
+                    }
+                listOf("ENABLED" to "AVAILABLE", "DISABLED" to "AVAILABLE", "ENABLED" to "UNAVAILABLE", "DISABLED" to "UNAVAILABLE")
+                    .forEach { (selection, availability) ->
+                        val value =
+                            JsonObject(
+                                mapOf(
+                                    "selectionState" to JsonPrimitive(selection),
+                                    "availability" to JsonPrimitive(availability),
+                                ),
+                            )
+                        schema["not"]!!.jsonObject.accepts(value, schemas) shouldBe
+                            (selection == "DISABLED" && availability == "UNAVAILABLE")
+                    }
+            }
+            val snapshots = mutableListOf<JsonObject>()
+            listOf(
+                Triple(Method.POST, "$base/offerings", fields),
+                Triple(
+                    Method.PUT,
+                    path,
+                    JsonObject(
+                        fields +
+                            mapOf(
+                                "selectionState" to JsonPrimitive("ENABLED"),
+                                "availability" to JsonPrimitive("UNAVAILABLE"),
+                            ),
+                    ),
+                ),
+                Triple(Method.POST, "$path/restore", fields),
+            ).forEach { (method, target, valid) ->
+                if (target.endsWith("/restore")) request(Method.DELETE, path).status shouldBe Status.OK
+                val before = request(Method.GET, base).json()
+                listOf("selectionState", "availability").forEach { field ->
+                    listOf(
+                        JsonObject(valid - field),
+                        JsonObject(valid + (field to JsonNull)),
+                        JsonObject(valid + (field to JsonPrimitive("UNKNOWN"))),
+                    ).forEach { malformed ->
+                        request(method, target, malformed.toString()).let {
+                            it.status shouldBe Status.BAD_REQUEST
+                            it.json()["code"]!!.jsonPrimitive.content shouldBe "malformed_request"
+                        }
+                    }
+                }
+                val invalid =
+                    JsonObject(
+                        valid +
+                            mapOf(
+                                "selectionState" to JsonPrimitive("DISABLED"),
+                                "availability" to JsonPrimitive("UNAVAILABLE"),
+                            ),
+                    )
+                request(method, target, invalid.toString()).let {
+                    it.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    it.json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
+                }
+                request(Method.GET, base).json() shouldBe before
+                request(method, target, valid.toString()).status shouldBe
+                    if (method == Method.POST && !target.endsWith("restore")) {
+                        Status.CREATED
+                    } else {
+                        Status.OK
+                    }
+                val current = request(Method.GET, base).json()
+                current["revision"]!!.jsonPrimitive.content.toInt() shouldBe before["revision"]!!.jsonPrimitive.content.toInt() + 1
+                snapshots += current
+                val read = request(Method.GET, path).json()["offering"]!!.jsonObject
+                read["selectionState"] shouldBe valid["selectionState"]
+                read["availability"] shouldBe valid["availability"]
+                listOf("$base/offerings", "$base/categories/eligibility/offerings").forEach { endpoint ->
+                    request(Method.GET, endpoint).json()["offerings"]!!.jsonArray.map { it.jsonObject }.single {
+                        it["key"] == valid["key"]
+                    } shouldBe read
+                }
+                current["categories"]!!
+                    .jsonArray
+                    .map { it.jsonObject }
+                    .single {
+                        it["key"] == JsonPrimitive("eligibility")
+                    }["offerings"]!!
+                    .jsonArray
+                    .single()
+                    .jsonObject shouldBe read
+            }
+            snapshots.forEach { snapshot ->
+                request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
+            }
+        }
+
+        test("OpenAPI selection enums remain strict when an offering example has no price") {
+            val body = jsonBody(OfferingDto.serializer())
+            val sample =
+                OfferingDto(
+                    "item",
+                    "choice",
+                    "Item",
+                    selectionState = OfferingSelectionStateDto.DISABLED,
+                    availability = OfferingAvailabilityDto.AVAILABLE,
+                )
+            val host =
+                contract {
+                    renderer = OpenApi3(ApiInfo("Unpriced catalog", "1"), Jackson, apiRenderer = offeringsOpenApiRenderer(Jackson))
+                    descriptionPath = "/openapi.json"
+                    routes += "/item" meta {
+                        operationId = "unpricedItem"
+                        returning(Status.OK, body to sample)
+                    } bindContract Method.GET to { _: Request -> Response(Status.OK).with(body of sample) }
+                }
+            val schema =
+                host(Request(Method.GET, "/openapi.json"))
+                    .json()["components"]!!
+                    .jsonObject["schemas"]!!
+                    .jsonObject["OfferingDto"]!!
+                    .jsonObject
+            schema["required"]!!.jsonArray.map { it.jsonPrimitive.content }.containsAll(listOf("selectionState", "availability")) shouldBe
+                true
+            schema["properties"]!!
+                .jsonObject["selectionState"]!!
+                .jsonObject["enum"]!!
+                .jsonArray
+                .map { it.jsonPrimitive.content }
+                .shouldContainExactly("ENABLED", "DISABLED")
+            schema["properties"]!!
+                .jsonObject["availability"]!!
+                .jsonObject["enum"]!!
+                .jsonArray
+                .map { it.jsonPrimitive.content }
+                .shouldContainExactly("AVAILABLE", "UNAVAILABLE")
+            schema.containsKey("not") shouldBe true
+            val actual = host(Request(Method.GET, "/item")).json()
+            actual.containsKey("price") shouldBe false
+            actual.containsKey("description") shouldBe false
+            actual["selectionState"]!!.jsonPrimitive.content shouldBe "DISABLED"
+            actual["availability"]!!.jsonPrimitive.content shouldBe "AVAILABLE"
         }
 
         test("path parameter failures match each route's documented error statuses") {

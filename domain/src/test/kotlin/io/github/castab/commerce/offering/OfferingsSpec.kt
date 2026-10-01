@@ -46,6 +46,103 @@ private fun line(
 
 class OfferingsSpec :
     FunSpec({
+        test("offering defaults and all explicit combinations enforce unambiguous selection semantics") {
+            val normal = offering("item", "choice")
+            normal.selectionState shouldBe OfferingSelectionState.ENABLED
+            normal.availability shouldBe OfferingAvailability.AVAILABLE
+            OfferingSelectionState.entries.forEach { selectionState ->
+                OfferingAvailability.entries.forEach { availability ->
+                    if (selectionState == OfferingSelectionState.DISABLED && availability == OfferingAvailability.UNAVAILABLE) {
+                        shouldThrow<IllegalArgumentException> { normal.copy(selectionState = selectionState, availability = availability) }
+                        shouldThrow<IllegalArgumentException> {
+                            Offering(
+                                normal.key,
+                                normal.category,
+                                normal.displayName,
+                                selectionState = selectionState,
+                                availability = availability,
+                            )
+                        }
+                    } else {
+                        normal.copy(selectionState = selectionState, availability = availability).let {
+                            it.selectionState shouldBe selectionState
+                            it.availability shouldBe availability
+                        }
+                    }
+                }
+            }
+        }
+
+        test("disabled and unavailable remain readable and reject selections before policy while retirement stays absent") {
+            val normal = offering("normal", "choice")
+            val disabled = offering("disabled", "choice").copy(selectionState = OfferingSelectionState.DISABLED)
+            val unavailable = offering("unavailable", "choice").copy(availability = OfferingAvailability.UNAVAILABLE)
+            val catalog = snapshot(listOf(category("choice")), listOf(normal, disabled, unavailable))
+            catalog.offeringsIn(normal.category).shouldContainExactly(normal, disabled, unavailable)
+            var called = 0
+            val engine =
+                object : OfferingsEngine<Unit>() {
+                    override fun evaluateValid(
+                        snapshot: OfferingsSnapshot,
+                        selections: OfferingSelections,
+                        context: Unit,
+                    ): OfferingsPolicyResult {
+                        called++
+                        return OfferingsPolicyResult.Accepted(listOf(line("Selected", null, "1.00")))
+                    }
+                }
+            (
+                engine.evaluate(catalog, OfferingSelections(listOf(selection("choice", "normal"))), Unit)
+                    is OfferingsEvaluationResult.Accepted
+            ) shouldBe true
+            called shouldBe 1
+            val rejected =
+                engine.evaluate(
+                    catalog,
+                    OfferingSelections(listOf(selection("choice", "disabled", "unavailable"))),
+                    Unit,
+                ) as OfferingsEvaluationResult.Rejected
+            rejected.violations.shouldContainExactly(
+                StructuralOfferingsViolation.DisabledOffering(normal.category, disabled.key),
+                StructuralOfferingsViolation.UnavailableOffering(normal.category, unavailable.key),
+            )
+            called shouldBe 1
+            catalog.offering(disabled.key) shouldBe disabled
+            catalog.offering(unavailable.key) shouldBe unavailable
+            val retired = catalog.withoutOffering(normal.key)
+            retired.offering(normal.key) shouldBe null
+            (
+                engine.evaluate(retired, OfferingSelections(listOf(selection("choice", "normal"))), Unit)
+                    as OfferingsEvaluationResult.Rejected
+            ).violations.shouldContainExactly(
+                StructuralOfferingsViolation.UnknownOffering(normal.category, normal.key),
+            )
+            called shouldBe 1
+        }
+
+        test("selection and availability replacements create immutable immediate successors") {
+            val normal = offering("item", "choice")
+            val first = snapshot(listOf(category("choice")), listOf(normal))
+            val second = first.replaceOffering(normal.key, normal.copy(selectionState = OfferingSelectionState.DISABLED))
+            val third = second.replaceOffering(normal.key, normal.copy(availability = OfferingAvailability.UNAVAILABLE))
+            val fourth = third.replaceOffering(normal.key, normal)
+            second.previousRevision shouldBe first.revision
+            third.previousRevision shouldBe second.revision
+            fourth.previousRevision shouldBe third.revision
+            listOf(first, second, third, fourth).map { it.offerings.single().selectionState }.shouldContainExactly(
+                OfferingSelectionState.ENABLED,
+                OfferingSelectionState.DISABLED,
+                OfferingSelectionState.ENABLED,
+                OfferingSelectionState.ENABLED,
+            )
+            listOf(first, second, third, fourth).map { it.offerings.single().availability }.shouldContainExactly(
+                OfferingAvailability.AVAILABLE,
+                OfferingAvailability.AVAILABLE,
+                OfferingAvailability.UNAVAILABLE,
+                OfferingAvailability.AVAILABLE,
+            )
+        }
+
         test("keys, categories, offerings, and descriptive prices enforce their own invariants") {
             shouldThrow<IllegalArgumentException> { OfferingKey(" ") }
             shouldThrow<IllegalArgumentException> { OfferingCategoryKey("two words") }

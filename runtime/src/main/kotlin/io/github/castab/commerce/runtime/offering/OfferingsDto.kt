@@ -2,10 +2,12 @@ package io.github.castab.commerce.runtime.offering
 
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.offering.QuantityDimension
 import io.github.castab.commerce.runtime.operation.validating
@@ -50,6 +52,33 @@ data class OfferingPriceDto(
         }
 }
 
+/** Transport values translate explicitly to the serialization-free domain. */
+@Serializable
+enum class OfferingSelectionStateDto {
+    ENABLED,
+    DISABLED,
+    ;
+
+    fun toDomain(): OfferingSelectionState =
+        when (this) {
+            ENABLED -> OfferingSelectionState.ENABLED
+            DISABLED -> OfferingSelectionState.DISABLED
+        }
+}
+
+@Serializable
+enum class OfferingAvailabilityDto {
+    AVAILABLE,
+    UNAVAILABLE,
+    ;
+
+    fun toDomain(): OfferingAvailability =
+        when (this) {
+            AVAILABLE -> OfferingAvailability.AVAILABLE
+            UNAVAILABLE -> OfferingAvailability.UNAVAILABLE
+        }
+}
+
 @Serializable
 data class OfferingDto(
     val key: String,
@@ -57,9 +86,21 @@ data class OfferingDto(
     val displayName: String,
     val description: String? = null,
     val price: OfferingPriceDto? = null,
+    val selectionState: OfferingSelectionStateDto,
+    val availability: OfferingAvailabilityDto,
 ) {
     fun toDomain(): Offering =
-        validating { Offering(OfferingKey(key), OfferingCategoryKey(category), displayName, description, price?.toDomain()) }
+        validating {
+            Offering(
+                OfferingKey(key),
+                OfferingCategoryKey(category),
+                displayName,
+                description,
+                price?.toDomain(),
+                selectionState.toDomain(),
+                availability.toDomain(),
+            )
+        }
 }
 
 @Serializable
@@ -83,8 +124,10 @@ data class AddOfferingDto(
     val displayName: String,
     val description: String? = null,
     val price: OfferingPriceDto? = null,
+    val selectionState: OfferingSelectionStateDto,
+    val availability: OfferingAvailabilityDto,
 ) {
-    fun toDomain(): Offering = OfferingDto(key, category, displayName, description, price).toDomain()
+    fun toDomain(): Offering = OfferingDto(key, category, displayName, description, price, selectionState, availability).toDomain()
 }
 
 /** A new natural category identity appended against the catalog revision the caller observed. */
@@ -108,8 +151,11 @@ data class OfferingMutationDto(
     val displayName: String,
     val description: String? = null,
     val price: OfferingPriceDto? = null,
+    val selectionState: OfferingSelectionStateDto,
+    val availability: OfferingAvailabilityDto,
 ) {
-    fun toDomain(key: OfferingKey): Offering = OfferingDto(key.value, category, displayName, description, price).toDomain()
+    fun toDomain(key: OfferingKey): Offering =
+        OfferingDto(key.value, category, displayName, description, price, selectionState, availability).toDomain()
 }
 
 /** Editable category properties. Identity comes only from the route/operation key. */
@@ -228,7 +274,22 @@ private fun OfferingPrice.dto(): OfferingPriceDto {
     )
 }
 
-private fun Offering.dto(): OfferingDto = OfferingDto(key.value, category.value, displayName, description, price?.dto())
+private fun Offering.dto(): OfferingDto =
+    OfferingDto(
+        key.value,
+        category.value,
+        displayName,
+        description,
+        price?.dto(),
+        when (selectionState) {
+            OfferingSelectionState.ENABLED -> OfferingSelectionStateDto.ENABLED
+            OfferingSelectionState.DISABLED -> OfferingSelectionStateDto.DISABLED
+        },
+        when (availability) {
+            OfferingAvailability.AVAILABLE -> OfferingAvailabilityDto.AVAILABLE
+            OfferingAvailability.UNAVAILABLE -> OfferingAvailabilityDto.UNAVAILABLE
+        },
+    )
 
 fun OfferingsSnapshot.dto(): OfferingsCatalogDto =
     OfferingsCatalogDto(

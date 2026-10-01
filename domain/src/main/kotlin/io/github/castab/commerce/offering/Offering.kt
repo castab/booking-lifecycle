@@ -84,15 +84,36 @@ data class OfferingCategory(
     }
 }
 
-/** One selectable commercial item, service, or choice in exactly one category. */
+/** Deliberate catalog configuration, independent of retirement and temporary fulfillment availability. */
+enum class OfferingSelectionState {
+    ENABLED,
+    DISABLED,
+}
+
+/** Whether an enabled offering can currently be fulfilled. */
+enum class OfferingAvailability {
+    AVAILABLE,
+    UNAVAILABLE,
+}
+
+/**
+ * One commercial item, service, or choice in exactly one category at a catalog revision.
+ * Disabled and unavailable offerings remain readable but cannot be selected. A disabled
+ * offering must be available, so the reason selection is blocked is unambiguous.
+ */
 data class Offering(
     val key: OfferingKey,
     val category: OfferingCategoryKey,
     val displayName: String,
     val description: String? = null,
     val price: OfferingPrice? = null,
+    val selectionState: OfferingSelectionState = OfferingSelectionState.ENABLED,
+    val availability: OfferingAvailability = OfferingAvailability.AVAILABLE,
 ) {
     init {
         require(displayName.isNotBlank()) { "Offering $key must have a nonblank display name" }
+        require(selectionState != OfferingSelectionState.DISABLED || availability == OfferingAvailability.AVAILABLE) {
+            "Offering $key cannot be both disabled and unavailable"
+        }
     }
 }

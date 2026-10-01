@@ -99,8 +99,8 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V7 coexist with application V1 in separate version spaces.
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
+                // Runtime V1 to V8 coexist with application V1 in separate version spaces.
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
@@ -140,7 +140,7 @@ class MigrationLifecycleSpec :
 
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
@@ -157,7 +157,7 @@ class MigrationLifecycleSpec :
                 migrateRuntimeThrough(dataSource, "6")
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
                 RuntimeMigrations(dataSource).migrate()
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
                 dataSource.strings(
                     """SELECT is_nullable || ':' || column_default
                        FROM information_schema.columns
@@ -194,6 +194,42 @@ class MigrationLifecycleSpec :
                        WHERE table_schema = 'commerce' AND table_name = 'financial_document_snapshots'
                          AND column_name = 'created_at'""",
                 ) shouldContainExactly listOf("0")
+            }
+        }
+
+        test("V8 adds required selection columns without defaults and refuses to invent historical state") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "7")
+                RuntimeMigrations(dataSource).migrate()
+                dataSource
+                    .strings(
+                        """SELECT column_name || ':' || is_nullable || ':' || coalesce(column_default, 'NONE')
+                       FROM information_schema.columns WHERE table_schema = 'commerce' AND table_name = 'offerings'
+                         AND column_name IN ('selection_state', 'availability') ORDER BY column_name""",
+                    ).shouldContainExactly("availability:NO:NONE", "selection_state:NO:NONE")
+            }
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "7")
+                val id = "00000000-0000-0000-0000-000000000008"
+                dataSource.execute("INSERT INTO commerce.offerings_snapshots (catalog_id, revision) VALUES ('$id', 1)")
+                dataSource.execute(
+                    """INSERT INTO commerce.offering_categories (catalog_id, revision, category_key, position, display_name, minimum_selections)
+                       VALUES ('$id', 1, 'choice', 0, 'Choice', 0)""",
+                )
+                dataSource.execute(
+                    """INSERT INTO commerce.offerings (catalog_id, revision, offering_key, category_key, position, display_name)
+                       VALUES ('$id', 1, 'item', 'choice', 0, 'Item')""",
+                )
+                shouldThrow<FlywayException> { RuntimeMigrations(dataSource).migrate() }
+                    .message shouldContain "V8 cannot assign selection and availability to preexisting offerings"
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).shouldContainExactly("1", "2", "3", "4", "5", "6", "7")
+                dataSource.strings("SELECT offering_key FROM commerce.offerings").shouldContainExactly("item")
+                dataSource
+                    .strings(
+                        """SELECT count(*)::text FROM information_schema.columns
+                       WHERE table_schema = 'commerce' AND table_name = 'offerings'
+                         AND column_name IN ('selection_state', 'availability')""",
+                    ).shouldContainExactly("0")
             }
         }
 
@@ -363,7 +399,7 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("$TEST_APPLICATION_SCHEMA.test_application_records") shouldBe true
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
-                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7")
+                    dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6", "7", "8")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

@@ -471,6 +471,13 @@ The repository maps rows to domain values explicitly through `OfferingsSnapshot.
 It does not open a connection or transaction. A duplicate revision is reported as
 `CommerceFailure.Conflict`.
 
+`V8__offering_selection_and_availability.sql` adds `selection_state` and `availability`
+to `commerce.offerings` as `NOT NULL` text columns with no defaults. Checks accept only
+`ENABLED`/`DISABLED` and `AVAILABLE`/`UNAVAILABLE`, and reject disabled/unavailable.
+V1-V7 remain unchanged. V8 refuses preexisting offering rows because no historical
+selection states exist to restore; recreate the ephemeral database instead of backfilling.
+Repositories write and restore both fields explicitly and reject unknown stored values.
+
 ### Offerings catalog operations and HTTP
 
 `io.github.castab.commerce.runtime.offering` provides `CreateOfferingsCatalog`,
@@ -626,7 +633,7 @@ two catalogs are mounted in one host contract.
 
 PUT and restore POST use `OfferingMutationDto` or `OfferingCategoryMutationDto`, with
 the identity taken only from the path. Both require integer `expectedRevision`.
-Offering bodies also contain `category`, `displayName`,
+Offering bodies also require `selectionState`, `availability`, `category`, and `displayName`,
 optional `description`, and optional `price`; category bodies contain `displayName`,
 optional `description`, `minimumSelections` (default 0), and `maximumSelections`
 (default null). These are complete replacements: omitted optional values reset to their
@@ -664,6 +671,25 @@ additive fields are ignored, as for every `CommerceJson` body, so each OpenAPI b
 forbids only the conflicting variant fields (`not` + `required`), never all additional
 properties. The runtime validates the discriminator's fields and domain values.
 
+Every offering read (catalog, category, item, exact revision, and retired discovery) includes
+required non-null `selectionState` and `availability` enum fields. Add, update, and restore
+requests require explicit values with no deserialization defaults. Missing, null, or unknown
+values return `400 malformed_request`; `DISABLED` / `UNAVAILABLE` returns
+`422 validation_failed` without appending a revision. The OpenAPI renderer lists both enum
+sets, requires both properties, and excludes that combination. A disabled or unavailable
+offering remains active/readable; retiring it still removes it from the successor.
+Changing either property uses `UpdateOffering`, retaining identity and position, checking
+`expectedRevision`, and appending an immutable successor. Restoring a retired key also
+supplies both properties explicitly through HTTP.
+
+Selection evaluation remains application-invoked through `OfferingsEngine`, using the
+chosen snapshot. It rejects `DISABLED` with `OFFERING_DISABLED`, `UNAVAILABLE` with
+`OFFERING_UNAVAILABLE`, and absent/retired keys with the existing `UNKNOWN_OFFERING`.
+`offeringsValidationFailed` preserves these codes in 422 structured violations. Applications
+own context-specific capacity/stock policy and should use the current catalog for new orders;
+historical reads retain the selection semantics at their revision. Labels, badges, and other
+presentation behavior belong to the consuming application or its BFF.
+
 Path parameters fail the same way as bodies: a non-integer revision is
 `malformed_request` (400); a revision below 1, or a category or offering key that is
 blank or contains whitespace, is `validation_failed` (422); a well-formed but absent
@@ -671,7 +697,7 @@ revision, category, or offering is `not_found` (404). Each route's OpenAPI metad
 the error statuses among these that the route can actually return. It does not evaluate
 an `OfferingsEngine` or own any application catalog contents. Lifecycle state conflicts
 are `conflict` (409). Released migrations V1-V7, including `V2__offerings_snapshots.sql`,
-remain unchanged; this feature requires no new migration or index.
+remain unchanged; V8 adds strict selection and availability columns.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
 schema node; it operates on schema values before OpenAPI serialization and does not
 traverse example, default, const, or extension payloads as schemas.

@@ -2,10 +2,12 @@ package io.github.castab.commerce.runtime.offering
 
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
@@ -63,6 +65,61 @@ class OfferingsLifecycleSpec :
         fun latest(id: OfferingsCatalogId): OfferingsSnapshot = GetOfferingsCatalog(transactor, repository)(id)
 
         fun price(amount: String): OfferingPrice = OfferingPrice.Fixed(Money(BigDecimal(amount), Currency.getInstance("USD")))
+
+        test("selection and availability updates persist successors and retired discovery retains their last state") {
+            val id = catalog()
+            AddOffering(transactor, repository)(id, observedRevision(id), Offering(horchata, flavors, "Horchata"))
+            val normal = latest(id)
+            val update = UpdateOffering(transactor, repository)
+            update(id, observedRevision(id), horchata, flavors, "Horchata", selectionState = OfferingSelectionState.DISABLED)
+            val disabled = latest(id)
+            update(id, observedRevision(id), horchata, flavors, "Horchata", availability = OfferingAvailability.UNAVAILABLE)
+            val unavailable = latest(id)
+            listOf(normal, disabled, unavailable).forEach { snapshot ->
+                snapshot.offerings.single().key shouldBe horchata
+                GetOfferingsCatalogRevision(transactor, repository)(snapshot.reference) shouldBe snapshot
+            }
+            disabled.revision shouldBe normal.revision.next()
+            unavailable.previousRevision shouldBe disabled.revision
+            disabled.offerings.single().selectionState shouldBe OfferingSelectionState.DISABLED
+            unavailable.offerings.single().availability shouldBe OfferingAvailability.UNAVAILABLE
+            ListOfferings(GetOfferingsCatalog(transactor, repository))(id).value shouldBe unavailable.offerings
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                update(
+                    id,
+                    observedRevision(id),
+                    horchata,
+                    flavors,
+                    "Horchata",
+                    selectionState = OfferingSelectionState.DISABLED,
+                    availability = OfferingAvailability.UNAVAILABLE,
+                )
+            }
+            latest(id) shouldBe unavailable
+            shouldThrow<CommerceFailure.Conflict> {
+                update(id, normal.revision, horchata, flavors, "Horchata")
+            }
+            latest(id) shouldBe unavailable
+            RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+            val retired = latest(id)
+            retired.offerings shouldBe emptyList()
+            ListRetiredOfferings(transactor, repository)(id).value.shouldContainExactly(
+                CatalogResult(unavailable.reference, unavailable.offerings.single()),
+            )
+            RestoreOffering(transactor, repository)(
+                id,
+                observedRevision(id),
+                horchata,
+                flavors,
+                "Horchata",
+                selectionState = OfferingSelectionState.DISABLED,
+            )
+            latest(id).offerings.single().selectionState shouldBe OfferingSelectionState.DISABLED
+            GetOfferingsCatalogRevision(transactor, repository)(retired.reference).offerings shouldBe emptyList()
+            update(id, observedRevision(id), horchata, flavors, "Horchata")
+            latest(id).offerings.single().availability shouldBe OfferingAvailability.AVAILABLE
+            latest(id).offerings.single().selectionState shouldBe OfferingSelectionState.ENABLED
+        }
 
         test("offering keys remain reserved through retirement and restoration with exact immutable history") {
             val id = catalog()

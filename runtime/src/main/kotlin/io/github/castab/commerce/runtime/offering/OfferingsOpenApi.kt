@@ -7,6 +7,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import org.http4k.contract.jsonschema.JsonSchema
 import org.http4k.contract.jsonschema.JsonSchemaCreator
 import org.http4k.contract.jsonschema.v3.AutoJsonToJsonSchema
@@ -16,7 +19,7 @@ import org.http4k.format.AutoMarshallingJson
 
 /**
  * An http4k OpenAPI renderer for host contracts containing offerings routes. All schemas
- * except [OfferingPriceDto] use http4k's usual auto schema generator.
+ * use http4k's auto schema generator, with explicit price variants and required selection enums.
  */
 fun <NODE : Any> offeringsOpenApiRenderer(json: AutoMarshallingJson<NODE>): ApiRenderer<Api<NODE>, NODE> =
     ApiRenderer.Auto<Api<NODE>, NODE>(json, OfferingPriceSchemaCreator(json))
@@ -38,7 +41,7 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         if ("OfferingPriceDto" !in schema.definitions) {
             return schema.copy(
                 node = schema.node.withoutNullSchemaFormats(),
-                definitions = schema.definitions.mapValues { (_, node) -> node.withoutNullSchemaFormats() },
+                definitions = schema.definitions.mapValues { (name, node) -> node.withoutNullSchemaFormats().withSelectionContract(name) },
             )
         }
         return schema.copy(
@@ -46,7 +49,7 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
             definitions =
                 schema.definitions.mapValues { (name, node) ->
                     if (name in priceCarrierNames) {
-                        node.withoutSchemaOnlyExamples().withoutNullSchemaFormats()
+                        node.withoutSchemaOnlyExamples().withoutNullSchemaFormats().withSelectionContract(name)
                     } else {
                         node.withoutNullSchemaFormats()
                     }
@@ -68,6 +71,33 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
                                 """{"kind":"PER_DURATION","amount":"50.00","currency":"USD","interval":"PT1H"}""",
                             ),
                     ),
+        )
+    }
+
+    /** The example-based generator cannot infer all enum values or the invalid combination. */
+    private fun NODE.withSelectionContract(name: String): NODE {
+        if (name !in setOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto")) return this
+        val schema = Json.parseToJsonElement(json.compact(this)).jsonObject
+        val properties =
+            schema["properties"]!!.jsonObject +
+                mapOf(
+                    "selectionState" to Json.parseToJsonElement("""{"type":"string","enum":["ENABLED","DISABLED"]}"""),
+                    "availability" to Json.parseToJsonElement("""{"type":"string","enum":["AVAILABLE","UNAVAILABLE"]}"""),
+                )
+        val required = (schema["required"]!!.jsonArray + listOf(JsonPrimitive("selectionState"), JsonPrimitive("availability"))).distinct()
+        return json.parse(
+            JsonObject(
+                schema +
+                    mapOf(
+                        "properties" to JsonObject(properties),
+                        "required" to JsonArray(required),
+                        "not" to
+                            Json.parseToJsonElement(
+                                """{"properties":{"selectionState":{"enum":["DISABLED"]},"availability":{"enum":["UNAVAILABLE"]}},
+                    "required":["selectionState","availability"]}""",
+                            ),
+                    ),
+            ).toString(),
         )
     }
 
@@ -170,13 +200,15 @@ private val priceCarrierNames =
 private fun Any.withCompletePriceShape(): Any {
     fun OfferingPriceDto.complete() = copy(dimension = "guest", interval = "PT1H")
 
-    fun OfferingDto.complete() = copy(price = price?.complete())
+    fun OfferingPriceDto?.completeOrSample() = (this ?: OfferingPriceDto("FIXED", "1.00", "USD")).complete()
+
+    fun OfferingDto.complete() = copy(description = description ?: "Description", price = price.completeOrSample())
     return when (this) {
         is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
-        is AddOfferingDto -> copy(price = price?.complete())
-        is OfferingMutationDto -> copy(price = price?.complete())
+        is AddOfferingDto -> copy(description = description ?: "Description", price = price.completeOrSample())
+        is OfferingMutationDto -> copy(description = description ?: "Description", price = price.completeOrSample())
         is RetiredOfferingsDto -> copy(offerings = offerings.map { it.copy(offering = it.offering.complete()) })
         is OfferingResultDto -> copy(offering = offering.complete())
         is OfferingsDto -> copy(offerings = offerings.map { it.complete() })
@@ -201,5 +233,15 @@ private val schemaOnlyCategory =
         "Description",
         0,
         1,
-        listOf(OfferingDto("offering", "category", "Offering", "Description", OfferingPriceDto("FIXED", "1.00", "USD"))),
+        listOf(
+            OfferingDto(
+                "offering",
+                "category",
+                "Offering",
+                "Description",
+                OfferingPriceDto("FIXED", "1.00", "USD"),
+                OfferingSelectionStateDto.ENABLED,
+                OfferingAvailabilityDto.AVAILABLE,
+            ),
+        ),
     )

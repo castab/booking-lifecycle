@@ -2,10 +2,12 @@ package io.github.castab.commerce.runtime.persistence
 
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
@@ -105,9 +107,9 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
                     .createUpdate(
                         """INSERT INTO commerce.offerings
                            (catalog_id, revision, offering_key, category_key, position, display_name, description,
-                            price_kind, price_amount, price_currency, quantity_dimension, duration_seconds, duration_nanos)
+                            price_kind, price_amount, price_currency, quantity_dimension, duration_seconds, duration_nanos, selection_state, availability)
                            VALUES (:catalogId, :revision, :key, :category, :position, :name, :description,
-                                   :priceKind, :priceAmount, :priceCurrency, :dimension, :seconds, :nanos)""",
+                                   :priceKind, :priceAmount, :priceCurrency, :dimension, :seconds, :nanos, :selectionState, :availability)""",
                     ).bind("catalogId", snapshot.catalogId.value)
                     .bind("revision", snapshot.revision.number)
                     .bind("key", offering.key.value)
@@ -128,7 +130,19 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
                     .bind("dimension", (price as? OfferingPrice.PerQuantity)?.dimension?.value)
                     .bind("seconds", (price as? OfferingPrice.PerDuration)?.interval?.seconds)
                     .bind("nanos", (price as? OfferingPrice.PerDuration)?.interval?.nano)
-                    .execute()
+                    .bind(
+                        "selectionState",
+                        when (offering.selectionState) {
+                            OfferingSelectionState.ENABLED -> "ENABLED"
+                            OfferingSelectionState.DISABLED -> "DISABLED"
+                        },
+                    ).bind(
+                        "availability",
+                        when (offering.availability) {
+                            OfferingAvailability.AVAILABLE -> "AVAILABLE"
+                            OfferingAvailability.UNAVAILABLE -> "UNAVAILABLE"
+                        },
+                    ).execute()
             }
         } catch (e: UnableToExecuteStatementException) {
             if (e.isUniqueViolation()) throw CommerceFailure.Conflict("Offerings snapshot ${snapshot.reference} already exists", e)
@@ -165,7 +179,7 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
             transaction.handle
                 .createQuery(
                     """SELECT offering_key, category_key, display_name, description, price_kind, price_amount,
-                          price_currency, quantity_dimension, duration_seconds, duration_nanos
+                          price_currency, quantity_dimension, duration_seconds, duration_nanos, selection_state, availability
                    FROM commerce.offerings WHERE catalog_id = :catalogId AND revision = :revision
                    ORDER BY position""",
                 ).bind("catalogId", reference.catalogId.value)
@@ -303,6 +317,16 @@ internal class PostgresOfferingsSnapshotRepository : OfferingsSnapshotRepository
             rows.getString("display_name"),
             rows.getString("description"),
             price,
+            when (val selectionState = rows.getString("selection_state")) {
+                "ENABLED" -> OfferingSelectionState.ENABLED
+                "DISABLED" -> OfferingSelectionState.DISABLED
+                else -> error("Unsupported offering selection state: $selectionState")
+            },
+            when (val availability = rows.getString("availability")) {
+                "AVAILABLE" -> OfferingAvailability.AVAILABLE
+                "UNAVAILABLE" -> OfferingAvailability.UNAVAILABLE
+                else -> error("Unsupported offering availability: $availability")
+            },
         )
     }
 }
