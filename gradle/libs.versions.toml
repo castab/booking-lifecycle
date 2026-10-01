@@ -15,6 +15,10 @@ hoplite = "2.9.0"
 # Test-only in commerce-runtime: consuming applications choose their own SLF4J provider.
 logback = "1.6.3"
 kotlin-logging = "8.0.4"
+# Service credentials (Argon2id) and service access tokens (JWS). Bouncy Castle follows the
+# reference backend; Nimbus JOSE+JWT has no required transitive dependencies.
+bouncycastle = "1.85.2"
+nimbus-jose-jwt = "10.10"
 
 [libraries]
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
@@ -36,6 +40,8 @@ hoplite-core = { module = "com.sksamuel.hoplite:hoplite-core", version.ref = "ho
 hoplite-hocon = { module = "com.sksamuel.hoplite:hoplite-hocon", version.ref = "hoplite" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 kotlin-logging-jvm = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = "kotlin-logging" }
+bouncycastle-prov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt", version.ref = "nimbus-jose-jwt" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

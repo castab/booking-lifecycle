@@ -58,7 +58,10 @@ concrete commerce application    (the consuming project)
    authenticated principal sessions, persistent principal and RBAC state, live permission
    resolution, and authorization administration over HTTP. It manages a session only after
    the application has proven identity and the runtime confirms a known, active principal;
-   it never sees credentials. Stored role grants must match the running permission catalog.
+   it never sees human credentials. It does authenticate service principals itself: Argon2id-
+   hashed service credentials (several per service, for rotation) exchanged for short-lived
+   signed bearer tokens that carry identity only, so services are authorized through their
+   current roles like users. Stored role grants must match the running permission catalog.
    It owns no customer or other application data model. It is a
    library. It is not itself an application, and it provides no default application and
    no `main()`. It defines the configuration it requires but ships no `application.conf`,
@@ -70,7 +73,7 @@ concrete commerce application    (the consuming project)
    through explicit `ApplicationContributions`. It owns its business entities (customers,
    inquiries, concrete bookings that implement lifecycle phases, contacts, locations) and
    their relationships to commerce facts, which it can persist in the runtime's shared
-   transaction. It owns credentials, their verification, login endpoints, bootstrap policy,
+   transaction. It owns human credentials, their verification, login endpoints, bootstrap policy,
    and vertical staff profiles, and hands the resulting `PrincipalId` to the runtime's sessions. It owns `main()` and its process
    lifecycle, its deployment configuration (`application.conf` and environment), and its
    logging backend (an SLF4J provider such as Logback) and logging configuration, and it

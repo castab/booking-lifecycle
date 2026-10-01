@@ -99,9 +99,9 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V9 coexist with application V1 in separate version spaces.
+                // Runtime V1 to V10 coexist with application V1 in separate version spaces.
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
@@ -142,7 +142,7 @@ class MigrationLifecycleSpec :
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
@@ -160,7 +160,7 @@ class MigrationLifecycleSpec :
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
                 RuntimeMigrations(dataSource).migrate()
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
                 dataSource.strings(
                     """SELECT is_nullable || ':' || column_default
                        FROM information_schema.columns
@@ -339,7 +339,8 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 migrateRuntimeThrough(dataSource, "8")
                 RuntimeMigrations(dataSource).migrate()
-                dataSource.appliedVersions(RuntimeMigrations.SCHEMA).last() shouldBe "9"
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
                 dataSource.relationExists("commerce.offerings") shouldBe false
             }
         }
@@ -511,7 +512,7 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
                     dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

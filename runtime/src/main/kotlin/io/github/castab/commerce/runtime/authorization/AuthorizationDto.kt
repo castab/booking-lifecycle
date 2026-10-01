@@ -1,6 +1,7 @@
 package io.github.castab.commerce.runtime.authorization
 
 import io.github.castab.commerce.runtime.operation.validating
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentialId
 import io.github.castab.commerce.staff.PermissionDefinition
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PrincipalStatus
@@ -144,6 +145,8 @@ internal fun RoleWriteDto.role() =
 internal fun String.userId() = validating { UserId(UUID.fromString(this)) }
 
 internal fun String.serviceId() = validating { ServiceId(UUID.fromString(this)) }
+
+internal fun String.serviceCredentialId() = validating { ServiceCredentialId(UUID.fromString(this)) }
 
 internal fun String.roleKey() = validating { RoleKey(this) }
 

@@ -248,14 +248,15 @@ never open their own transactions.
 
 | Package (`io.github.castab.commerce.runtime...`) | Contents |
 |---|---|
-| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, commerce repositories, `financialLedger`, `sessions`, and `authorization`). |
+| `runtime` | `commerceRuntime(...)`, `CommerceRuntime`, `ApplicationContributions`, and `CommerceRuntimeContext` (configuration, `Transactor`, commerce repositories, `financialLedger`, `sessions`, `authorization`, `serviceCredentials`, and `serviceAccessTokens`). |
 | `runtime.config` | `CommerceRuntimeConfiguration`: HOCON loading, environment overrides, and validation. |
-| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor`, `Transaction` and `TransactionIsolation`, offerings, financial-document, and payment repositories, internal session and authorization repositories, and PostgreSQL error helpers. |
+| `runtime.persistence` | `createDataSource` (HikariCP), `MigrationLifecycle` (the migration phase), `Transactor`, `Transaction` and `TransactionIsolation`, offerings, financial-document, and payment repositories, internal session, authorization, and service credential repositories, and PostgreSQL error helpers. |
 | `runtime.financial` | `FinancialLedger`: financial-document reads and append operations, payment recording and allocation, refunds with their refund allocations, derived payment and document reconciliation, and `PaymentHistory` reads of a payment or a document lineage's payments. |
-| `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, and the authorization administration HTTP capability and DTOs. |
-| `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), and the `sessionAuthentication` filter. |
+| `runtime.authorization` | `AuthorizationDirectory`, `PermissionCatalog`, `RuntimePermissions`, and the authorization administration HTTP capability (including service credential administration) and DTOs. |
+| `runtime.serviceauth` | `ServiceCredentials`, `ServiceCredential`, `ServiceCredentialSecret`, `ServiceAccessTokens`, `ServiceAccessToken`, `ServiceAccessTokenAuthenticator`, `serviceAccessTokenAuthentication`, the token endpoint capability, DTOs, and `serviceAccessTokenOpenApiSecurity`. |
+| `runtime.session` | `SessionManager`, `PrincipalSession`, `SessionId`, `SessionToken`, `IssuedSession`, token extractors (`BearerSessionToken`, `SessionCookie`), `SessionAuthenticator`, and the `sessionAuthentication` filter. |
 | `runtime.operation` | Support for operations (use cases such as issuing an invoice or recording a payment): `CommerceFailure`, the expected failures of operations, and `validating`. |
-| `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, health routes, the `authenticatedPrincipal` request lens, and the authorization filters (`requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
+| `runtime.http` | `CommerceJson`, `jsonBody`, the error contract and `CommerceErrorHandling` filter, health routes, the `authenticatedPrincipal` request lens, authentication composition (`RequestAuthenticator`, `authentication`), and the authorization filters (`requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
 
 Booking orchestration will appear when it has a concrete generic use case.
 
@@ -301,13 +302,46 @@ database {
 | `database.validationTimeoutMs` | `DATABASE_VALIDATION_TIMEOUT_MS` | `1000` |
 | `migrations.onStartup` | `MIGRATIONS_ON_STARTUP` (`migrate` or `validate`) | `VALIDATE` |
 | `sessions.lifetimeMinutes` | `SESSIONS_LIFETIME_MINUTES` | `720` (12 hours) |
+| `serviceTokens.signingKey` | `SERVICE_TOKENS_SIGNING_KEY` | none; enables service access tokens |
+| `serviceTokens.lifetimeMinutes` | `SERVICE_TOKENS_LIFETIME_MINUTES` | `15` |
+| `serviceTokens.issuer` | `SERVICE_TOKENS_ISSUER` | none; required when service tokens are configured |
 
 `sessions.lifetimeMinutes` is the fixed lifetime of every session, between 1 minute and 1
 year; see [Sessions and authorization](#sessions-and-authorization). It is the only session
 setting: cookie names and attributes are chosen in code by the application.
 
-Invalid values fail with a message naming the variable. Secrets come only from the
-environment. The database password is redacted from the configuration's `toString`.
+`serviceTokens` configures [service access tokens](#service-authentication) and is optional:
+it exists when the file declares a `serviceTokens` block or the environment supplies
+`SERVICE_TOKENS_SIGNING_KEY`. The signing key is base64 (standard or URL-safe) of at least
+32 random bytes, for example `openssl rand -base64 32`. It has no default and the runtime
+never generates one; every instance of a deployment shares it, so tokens survive restarts
+and are accepted by every instance. The lifetime is between 1 and 60 minutes.
+
+The issuer is **required** once service tokens are configured, and has no default. It names
+the deployment, not the library: for example `orders-production` and `orders-staging`. It
+is both the `iss` and the `aud` of every token, so a token issued by one deployment is
+rejected by another even if the two share a signing key by mistake. Give every deployment
+its own key *and* its own issuer; the naming scheme is the deployment's. Leading or
+trailing whitespace is rejected.
+
+| Configuration | Result |
+|---|---|
+| No `serviceTokens` block and no `SERVICE_TOKENS_SIGNING_KEY` | Service tokens disabled; no issuer needed |
+| Signing key (file or environment) without an issuer | Fails: `SERVICE_TOKENS_ISSUER is required when service tokens are configured` |
+| `SERVICE_TOKENS_ISSUER` or `SERVICE_TOKENS_LIFETIME_MINUTES` without a signing key | Fails rather than being ignored |
+| Signing key and explicit issuer | Valid |
+
+A file that declares a `serviceTokens` block declares both `signingKey` and `issuer`
+(empty placeholders are fine when the environment fills them), like the `database` block.
+Without `serviceTokens`, service credentials can still be administered, but an application
+that composes the token endpoint or token authentication fails at startup. The signing key
+is redacted from the configuration's `toString`.
+
+Invalid values fail with a message naming the variable. `load()` validates, and
+`commerceRuntime(...)` validates again before it opens the connection pool or anything
+else, so a configuration constructed in Kotlin is held to exactly the same rules. Secrets
+come only from the environment. The database password is redacted from the
+configuration's `toString`.
 
 ### Database and migrations
 
@@ -440,6 +474,14 @@ status, balance, or other mutable column.
 reads never generate it. V7 checks for preexisting financial snapshots before altering
 the table and fails if any exist. No migration-time timestamp is fabricated; ephemeral
 pre-V7 databases with financial snapshots must be recreated.
+
+`V10__service_credentials.sql` adds `commerce.service_credentials` for
+[service authentication](#service-authentication): the credential ID (primary key, used to
+find a presented credential), the service as `principal_kind` (checked to be `SERVICE`)
+plus its UUID with a foreign key to `commerce.service_identities`, so a user can never hold
+a credential, a required label, an Argon2id PHC hash of the secret (never the secret), and
+the creation and revocation times. An index lists one service's credentials. It adds a
+table only and leaves earlier migrations unchanged.
 
 > **Pre-release reset.** 0.0.4 created `commerce.customers` and 0.0.5 dropped it again.
 > Before any real consumer existed, those two migrations were collapsed into the `V1`
@@ -1044,8 +1086,9 @@ failure response to `malformed_request`, preserving this shape for mounted contr
 
 ### Sessions and authorization
 
-The runtime manages what happens **after** an application has proven who a caller is. It
-never sees credentials.
+The runtime manages what happens **after** an application has proven who a human caller
+is. It never sees human credentials. Services are the exception: the runtime authenticates
+them itself; see [Service authentication](#service-authentication).
 
 ```text
 commerce-domain        Principal, UserId, ServiceId, roles, permissions,
@@ -1213,7 +1256,8 @@ registry of principal kinds.
 
 | State | Owner |
 |---|---|
-| Authentication credentials (password hashes, OAuth identities, API keys) | Concrete application |
+| Human authentication credentials (password hashes, OAuth identities, passkeys) | Concrete application |
+| Service credentials and service access tokens | commerce-runtime |
 | Authenticated session | commerce-runtime |
 | Principal and RBAC state | commerce-runtime |
 | Vertical profile data (phone, payroll, store assignment) | Concrete application |
@@ -1327,13 +1371,135 @@ deployment policy. The runtime provides neither yet, and it will not schedule ba
 jobs itself.
 
 Sessions may belong to any `PrincipalId`, human or service, and authorization treats them
-alike. That generality is deliberate, but this is not service authentication: service
-credentials (API keys and the like) are a separate, future capability that would meet
-sessions only at `PrincipalId`.
+alike. Service authentication is nevertheless a separate capability that meets sessions
+only at `PrincipalId`; see [Service authentication](#service-authentication).
 
 `/health` and `/ready` stay explicitly public and never authenticate. Application routes are
 protected only where the application applies these filters: the runtime does not
 authenticate globally.
+
+### Service authentication
+
+A SERVICE principal, such as a backend-for-frontend, authenticates with a long-lived
+credential and receives a short-lived bearer access token. The token then enters the same
+authorization as a user's session:
+
+```text
+service credential (service id + secret)          proves identity
+        │  POST <token path>
+        ▼
+short-lived access token (HS256 JWT)              proves recent authentication
+        │  Authorization: Bearer <token>
+        ▼
+ServiceAccessTokenAuthenticator → ServiceId       the authenticated principal
+        ▼
+current roles → current permissions → AccessControl
+```
+
+**Credentials.** `context.serviceCredentials` creates, lists, and revokes credentials of
+service identities in the directory, with `Transaction` overloads like the other runtime
+operations. Only services hold them. A credential has a stable, non-secret ID, a label, a
+creation time, and a revocation time once revoked. Its secret,
+`<credential id>.<256 random bits as base64url>`, is returned only when it is created; the
+runtime stores an Argon2id hash of it (m=19 MiB, t=2, p=1, a fresh salt, PHC format) and
+never the secret. The ID in the secret selects the one stored hash to check, so
+authentication costs exactly one Argon2id verification whatever the service holds, and the
+same work is done when the credential is unknown.
+
+**Rotation.** A service may hold several active credentials. Create credential B, deploy
+the consumer with it and verify, then revoke credential A. Revocation is permanent and
+recorded; disabling a service leaves its credentials in place.
+
+**Tokens.** `context.serviceAccessTokens` (present when `serviceTokens` is configured)
+exchanges a service ID and secret for a token, and resolves tokens on later requests. A
+token is an HS256 JWS with JOSE type `commerce-service-access+jwt` and only the claims
+`iss` and `aud` (the configured issuer), `sub` (the service UUID), `principal_kind`
+(`SERVICE`), `iat`, `exp`, and `jti`. It carries no secret, role, or permission. Only HS256
+tokens of that type are accepted (never `alg: none` or another algorithm), every claim is
+required, issuer, audience, and kind must match exactly, and expiry is judged by the
+runtime's clock with no skew. Clients treat tokens as opaque.
+
+**Revocation and suspension semantics.**
+
+| Change | Credentials | Already issued, unexpired tokens |
+|---|---|---|
+| A role or grant is removed | Unaffected | The next request is authorized against the current roles. |
+| A credential is revoked | That credential can never obtain a token again (permanent) | Stay valid until they expire (at most `serviceTokens.lifetimeMinutes`) |
+| The service is **disabled** | None can obtain a token; none is revoked | Stop authenticating on the next request; none is revoked |
+| The service is **activated again** | Every unrevoked credential works again; revoked ones stay revoked | Every token that has not yet expired authenticates again |
+
+`DISABLED` **suspends** a service; it does not revoke anything. (A service's *sessions* are
+the exception: disabling a principal revokes them, as for users.) Access-token revocation
+therefore rests on two things only: the short token lifetime and suspension. Tokens are not
+stored, so there is no per-token revocation or deny-list.
+
+If a service's credentials may be compromised, suspension alone is not enough, because
+reactivating it would revive any token the attacker obtained. Instead:
+
+1. disable the service, so no credential or token of it works;
+2. revoke the compromised credentials and create replacements;
+3. keep the service disabled until `serviceTokens.lifetimeMinutes` has passed since the
+   last moment a compromised credential could have obtained a token;
+4. activate the service again.
+
+Like any bearer credential, a token can be replayed by whoever holds it until it expires:
+send it only over TLS and never log it.
+
+**HTTP.** The application mounts the endpoints and chooses the mechanisms each route
+accepts:
+
+```kotlin
+val access =
+    AccessControl(
+        authentication(
+            SessionAuthenticator(context.sessions, SessionCookie("__Host-session")),
+            ServiceAccessTokenAuthenticator(context.serviceAccessTokens),
+        ),
+        context.authorization.permissionResolver,
+    )
+contract {
+    security = serviceAccessTokenOpenApiSecurity // OpenAPI declaration only
+    routes += serviceAuthenticationHttpCapability(context, "/auth/service/token").contractRoutes
+    routes += authorizationAdministrationHttpCapability(context, access, "/admin/access").contractRoutes
+}
+```
+
+`authentication(...)` tries mechanisms in order and the first that proves a principal wins;
+none answers `401`. A session token and a service token can share the `Authorization:
+Bearer` header because each mechanism only accepts its own format. A service is never
+trusted for being a service: without the permission it is `403` like any user.
+
+| Endpoint | Access | Behavior |
+|---|---|---|
+| `POST <token path>` `{"serviceId", "secret"}` | public | `200 {"accessToken", "tokenType": "Bearer", "expiresAt", "expiresIn"}`; `401 unauthenticated` with one message for every authentication failure; `400` for malformed input |
+| `GET <admin>/services/{serviceId}/credentials` | `commerce.principal.read` | Credential metadata (`credentialId`, `serviceId`, `label`, `createdAt`, `revoked`, `revokedAt`); never secrets or hashes |
+| `POST <admin>/services/{serviceId}/credentials` `{"label"}` | `commerce.service-credential.manage` | `201` with the metadata and `secret`, returned only here |
+| `DELETE <admin>/services/{serviceId}/credentials/{credentialId}` | `commerce.service-credential.manage` | `204`; idempotent |
+
+The token and credential-creation responses are `Cache-Control: no-store`. The
+`commerce.service-credential.manage` permission (`RuntimePermissions.ServiceCredentialManage`)
+lets its holder authenticate as any service, so it is separate from
+`commerce.principal.manage`. `serviceAccessTokenOpenApiSecurity` renders as the standard
+HTTP bearer scheme `serviceAccessToken`; the token route is marked public. It does not
+enforce anything: `AccessControl` does.
+
+**Protecting the token endpoint.** The token endpoint is public by design, and every
+syntactically valid attempt costs one memory-hard Argon2id verification (about 19 MiB),
+including attempts for credentials that do not exist, which are checked against a dummy
+hash so timing does not reveal which credentials exist. The runtime has no request rate
+limiter. Production deployments must treat the endpoint as sensitive and, depending on
+their topology, do one or both of:
+
+- rate-limit it at the edge or reverse proxy;
+- expose it only on a private or internal network that its service consumers can reach,
+  rather than to the public internet.
+
+**Logging.** Credential creation and revocation and token issuance are logged at INFO.
+Authentication failures are DEBUG diagnostics only, with a reason (`unknown_credential`,
+`secret_mismatch`, `credential_revoked`, `service_disabled`, ...) and the service and
+credential IDs: an anonymous caller cannot drive an INFO log stream, and failures are not an
+audit trail. No log ever contains a credential secret or verifier, an access token, or the
+signing key.
 
 ### Logging
 
@@ -1430,11 +1596,16 @@ transaction in which the application writes it.
 
 ## Current limitations
 
-- **Sessions only, and no credentials.** The runtime issues, resolves, and revokes sessions
-  and enforces permissions on the routes an application protects. It verifies no
-  credentials, and has no login endpoints, service credentials (API keys), refresh tokens,
-  JWTs, sliding expiry, or CSRF protection. Expired and revoked session rows are kept;
-  there is no purge operation yet (see [Session cleanup](#sessions-and-authorization)).
+- **No human credentials.** The runtime issues, resolves, and revokes sessions and enforces
+  permissions on the routes an application protects. It verifies no human credentials, and
+  has no user login endpoints, refresh tokens, sliding expiry, or CSRF protection. Expired
+  and revoked session rows are kept; there is no purge operation yet (see
+  [Session cleanup](#sessions-and-authorization)).
+- **Service authentication is first-party only.** No OAuth or OIDC, no external API keys,
+  no mTLS, and no delegated identity (a service acting for a user). Revoking a credential
+  does not cut short tokens it already obtained, there is one signing key at a time (changing
+  it invalidates outstanding tokens), credential last use is not recorded, and there is no
+  built-in rate limiter.
 - No booking persistence or orchestration yet. Financial-document snapshots, payment
   records, payment allocations, refund records, and refund allocations are persisted and
   orchestrated by the ledger; payment and financial-document reconciliation are derived
@@ -1511,6 +1682,30 @@ and missing (`403`), permissions changing during a session, users and services a
 fail-closed handlers, and the cookie adapter. `CommerceRuntimeSpec` shows an application
 authenticating identity itself, issuing a session through `context.sessions`, and
 recovering the principal from the token over real HTTP.
+
+The service authentication specs cover its security contract. `ServiceCredentialSecretSpec`
+pins the secret format, redaction, and the Argon2id PHC hash. `ServiceAccessTokensSpec` proves
+hash-only storage (checked in SQL), several active credentials with independent revocation,
+that users can hold no credential (API and schema), one uniform failure for every bad
+attempt, disabled services, identity-only claims, expiry at the exact boundary, and the
+rejection of modified, wrong-key, other-algorithm, unsigned, wrong-type, wrong-issuer,
+wrong-audience, wrong-kind, and incomplete tokens, plus secret- and token-free logs with
+failures at DEBUG and administrative events at INFO. Its suspension tests pin that a
+disabled-then-reactivated service gets back its unexpired tokens and unrevoked credentials,
+while a credential revoked during the suspension stays revoked and a token that expired
+during it stays expired. The signer is shown to apply exactly the configuration's
+validation policy.
+`ServiceAuthenticationHttpSpec` composes the runtime with sessions and service tokens on the
+same routes and proves that a token grants nothing by itself: the same unexpired token is
+`403`, then `200` after a role grant, `403` after its removal, `401` once the service is
+disabled, and `200` again once it is reactivated. It also covers the token endpoint's `401`/`400` behavior, cookie login,
+permission enforcement, and logout beside service tokens, credential administration
+permissions and rotation, startup failure without a signing key, and the OpenAPI bearer
+scheme. `CommerceRuntimeStartupSpec` proves that `commerceRuntime(...)` rejects an invalid
+configuration constructed in Kotlin (repeated-byte, short, or non-base64 keys, blank or
+padded issuers, out-of-range lifetimes, and general settings) before it touches the
+database, and `CommerceRuntimeConfigurationSpec` covers the required issuer in every
+file and environment combination.
 
 Database specs run against a real PostgreSQL 18 that the build starts through the Docker CLI.
 See [Building and testing](../README.md#building-and-testing).
