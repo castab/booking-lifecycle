@@ -100,7 +100,7 @@ class OfferingsSnapshotRepositorySpec :
                 reference,
             )
 
-        test("selection columns round trip all valid values and SQL rejects null unknown and ambiguous values") {
+        test("selection columns round trip all four combinations and SQL rejects null and unknown values") {
             val first =
                 OfferingsSnapshot.create(
                     catalogId(),
@@ -109,6 +109,10 @@ class OfferingsSnapshotRepositorySpec :
                         offering("normal", "choice"),
                         offering("disabled", "choice").copy(selectionState = OfferingSelectionState.DISABLED),
                         offering("unavailable", "choice").copy(availability = OfferingAvailability.UNAVAILABLE),
+                        offering("both", "choice").copy(
+                            selectionState = OfferingSelectionState.DISABLED,
+                            availability = OfferingAvailability.UNAVAILABLE,
+                        ),
                     ),
                 )
             transactor.inTransaction { repository.insert(it, first) }
@@ -118,7 +122,6 @@ class OfferingsSnapshotRepositorySpec :
                 "availability = NULL",
                 "selection_state = 'OTHER'",
                 "availability = 'OTHER'",
-                "selection_state = 'DISABLED', availability = 'UNAVAILABLE'",
             ).forEach { assignment ->
                 shouldThrow<UnableToExecuteStatementException> {
                     transactor.inTransaction { transaction ->

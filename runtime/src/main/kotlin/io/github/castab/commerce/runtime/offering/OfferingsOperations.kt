@@ -168,7 +168,10 @@ class GetOffering(
         }
 }
 
-/** Replaces an active identity in place only when the caller's expected catalog revision is current. */
+/**
+ * Replaces an active identity in a successor when the expected revision is current.
+ * Both independent selection properties are required, even for an unrelated property change.
+ */
 class UpdateOffering(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
@@ -181,8 +184,8 @@ class UpdateOffering(
         displayName: String,
         description: String? = null,
         price: OfferingPrice? = null,
-        selectionState: OfferingSelectionState = OfferingSelectionState.ENABLED,
-        availability: OfferingAvailability = OfferingAvailability.AVAILABLE,
+        selectionState: OfferingSelectionState,
+        availability: OfferingAvailability,
     ): CatalogResult<Offering> =
         transactor.inTransaction { transaction ->
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
@@ -216,7 +219,10 @@ class RetireOffering(
         }
 }
 
-/** Appends a retired identity only when the caller's expected catalog revision is current. */
+/**
+ * Appends a retired identity in a successor when the expected revision is current.
+ * The caller explicitly supplies both selection configuration and fulfillment availability.
+ */
 class RestoreOffering(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
@@ -229,8 +235,8 @@ class RestoreOffering(
         displayName: String,
         description: String? = null,
         price: OfferingPrice? = null,
-        selectionState: OfferingSelectionState = OfferingSelectionState.ENABLED,
-        availability: OfferingAvailability = OfferingAvailability.AVAILABLE,
+        selectionState: OfferingSelectionState,
+        availability: OfferingAvailability,
     ): CatalogResult<Offering> =
         transactor.inTransaction { transaction ->
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)

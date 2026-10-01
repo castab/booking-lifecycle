@@ -1109,21 +1109,17 @@ class OfferingsCapabilitySpec :
             ).status shouldBe Status.OK
         }
 
-        test("HTTP requires selection enums on every write and retains disabled and unavailable catalog history") {
+        test("HTTP requires both enums and accepts all four independent combinations on add update and restore") {
             val base = "/catalog-b"
             request(Method.POST, "$base/categories", """{"key":"eligibility","displayName":"Eligibility"}""").status shouldBe Status.CREATED
-            val path = "$base/offerings/eligibility-item"
-            val fields =
-                Json
-                    .parseToJsonElement(
-                        """{"key":"eligibility-item","category":"eligibility","displayName":"Item",
-                    "selectionState":"DISABLED","availability":"AVAILABLE"}""",
-                    ).jsonObject
             val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
             listOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto").forEach { name ->
                 val schema = schemas[name]!!.jsonObject
-                val required = schema["required"]!!.jsonArray.map { it.jsonPrimitive.content }
-                required.containsAll(listOf("selectionState", "availability")) shouldBe true
+                schema["required"]!!
+                    .jsonArray
+                    .map { it.jsonPrimitive.content }
+                    .containsAll(listOf("selectionState", "availability")) shouldBe true
+                schema.containsKey("not") shouldBe false
                 val properties = schema["properties"]!!.jsonObject
                 listOf("selectionState" to listOf("ENABLED", "DISABLED"), "availability" to listOf("AVAILABLE", "UNAVAILABLE"))
                     .forEach { (field, values) ->
@@ -1132,89 +1128,81 @@ class OfferingsCapabilitySpec :
                         property["enum"]!!.jsonArray.map { it.jsonPrimitive.content }.shouldContainExactly(values)
                         property.containsKey("nullable") shouldBe false
                         listOf(JsonNull, JsonPrimitive("UNKNOWN")).forEach { property.accepts(it, schemas) shouldBe false }
-                    }
-                listOf("ENABLED" to "AVAILABLE", "DISABLED" to "AVAILABLE", "ENABLED" to "UNAVAILABLE", "DISABLED" to "UNAVAILABLE")
-                    .forEach { (selection, availability) ->
-                        val value =
-                            JsonObject(
-                                mapOf(
-                                    "selectionState" to JsonPrimitive(selection),
-                                    "availability" to JsonPrimitive(availability),
-                                ),
-                            )
-                        schema["not"]!!.jsonObject.accepts(value, schemas) shouldBe
-                            (selection == "DISABLED" && availability == "UNAVAILABLE")
+                        values.forEach { property.accepts(JsonPrimitive(it), schemas) shouldBe true }
                     }
             }
             val snapshots = mutableListOf<JsonObject>()
-            listOf(
-                Triple(Method.POST, "$base/offerings", fields),
-                Triple(
-                    Method.PUT,
-                    path,
+            val combinations =
+                listOf(
+                    "ENABLED" to "AVAILABLE",
+                    "ENABLED" to "UNAVAILABLE",
+                    "DISABLED" to "AVAILABLE",
+                    "DISABLED" to "UNAVAILABLE",
+                )
+            combinations.forEachIndexed { index, (selectionState, availability) ->
+                val fields =
                     JsonObject(
-                        fields +
-                            mapOf(
-                                "selectionState" to JsonPrimitive("ENABLED"),
-                                "availability" to JsonPrimitive("UNAVAILABLE"),
-                            ),
-                    ),
-                ),
-                Triple(Method.POST, "$path/restore", fields),
-            ).forEach { (method, target, valid) ->
-                if (target.endsWith("/restore")) request(Method.DELETE, path).status shouldBe Status.OK
-                val before = request(Method.GET, base).json()
-                listOf("selectionState", "availability").forEach { field ->
-                    listOf(
-                        JsonObject(valid - field),
-                        JsonObject(valid + (field to JsonNull)),
-                        JsonObject(valid + (field to JsonPrimitive("UNKNOWN"))),
-                    ).forEach { malformed ->
-                        request(method, target, malformed.toString()).let {
-                            it.status shouldBe Status.BAD_REQUEST
-                            it.json()["code"]!!.jsonPrimitive.content shouldBe "malformed_request"
+                        mapOf(
+                            "key" to JsonPrimitive("eligibility-$index"),
+                            "category" to JsonPrimitive("eligibility"),
+                            "displayName" to JsonPrimitive("Item"),
+                            "selectionState" to JsonPrimitive(selectionState),
+                            "availability" to JsonPrimitive(availability),
+                        ),
+                    )
+                val path = "$base/offerings/eligibility-$index"
+                listOf(Method.POST to "$base/offerings", Method.PUT to path, Method.POST to "$path/restore").forEach { (method, target) ->
+                    if (target.endsWith("/restore")) {
+                        val lastSeen = request(Method.GET, base).json()["revision"]
+                        request(Method.DELETE, path).status shouldBe Status.OK
+                        request(Method.GET, "$base/retired/offerings")
+                            .json()["offerings"]!!
+                            .jsonArray
+                            .map { it.jsonObject }
+                            .single { it["offering"]!!.jsonObject["key"] == fields["key"] }
+                            .let { retired ->
+                                retired["lastSeenRevision"] shouldBe lastSeen
+                                retired["offering"]!!.jsonObject["selectionState"] shouldBe fields["selectionState"]
+                                retired["offering"]!!.jsonObject["availability"] shouldBe fields["availability"]
+                            }
+                    }
+                    val before = request(Method.GET, base).json()
+                    listOf("selectionState", "availability").forEach { field ->
+                        listOf(
+                            JsonObject(fields - field),
+                            JsonObject(fields + (field to JsonNull)),
+                            JsonObject(fields + (field to JsonPrimitive("UNKNOWN"))),
+                        ).forEach { malformed ->
+                            request(method, target, malformed.toString()).let {
+                                it.status shouldBe Status.BAD_REQUEST
+                                it.json()["code"]!!.jsonPrimitive.content shouldBe "malformed_request"
+                            }
                         }
                     }
-                }
-                val invalid =
-                    JsonObject(
-                        valid +
-                            mapOf(
-                                "selectionState" to JsonPrimitive("DISABLED"),
-                                "availability" to JsonPrimitive("UNAVAILABLE"),
-                            ),
-                    )
-                request(method, target, invalid.toString()).let {
-                    it.status shouldBe Status.UNPROCESSABLE_ENTITY
-                    it.json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
-                }
-                request(Method.GET, base).json() shouldBe before
-                request(method, target, valid.toString()).status shouldBe
-                    if (method == Method.POST && !target.endsWith("restore")) {
-                        Status.CREATED
-                    } else {
-                        Status.OK
+                    request(Method.GET, base).json() shouldBe before
+                    request(method, target, fields.toString()).status shouldBe
+                        if (target == "$base/offerings") Status.CREATED else Status.OK
+                    val current = request(Method.GET, base).json()
+                    current["revision"]!!.jsonPrimitive.content.toInt() shouldBe before["revision"]!!.jsonPrimitive.content.toInt() + 1
+                    snapshots += current
+                    val read = request(Method.GET, path).json()["offering"]!!.jsonObject
+                    read["selectionState"] shouldBe fields["selectionState"]
+                    read["availability"] shouldBe fields["availability"]
+                    listOf("$base/offerings", "$base/categories/eligibility/offerings").forEach { endpoint ->
+                        request(Method.GET, endpoint)
+                            .json()["offerings"]!!
+                            .jsonArray
+                            .map { it.jsonObject }
+                            .single { it["key"] == fields["key"] } shouldBe read
                     }
-                val current = request(Method.GET, base).json()
-                current["revision"]!!.jsonPrimitive.content.toInt() shouldBe before["revision"]!!.jsonPrimitive.content.toInt() + 1
-                snapshots += current
-                val read = request(Method.GET, path).json()["offering"]!!.jsonObject
-                read["selectionState"] shouldBe valid["selectionState"]
-                read["availability"] shouldBe valid["availability"]
-                listOf("$base/offerings", "$base/categories/eligibility/offerings").forEach { endpoint ->
-                    request(Method.GET, endpoint).json()["offerings"]!!.jsonArray.map { it.jsonObject }.single {
-                        it["key"] == valid["key"]
-                    } shouldBe read
+                    current["categories"]!!
+                        .jsonArray
+                        .map { it.jsonObject }
+                        .single { it["key"] == JsonPrimitive("eligibility") }["offerings"]!!
+                        .jsonArray
+                        .map { it.jsonObject }
+                        .single { it["key"] == fields["key"] } shouldBe read
                 }
-                current["categories"]!!
-                    .jsonArray
-                    .map { it.jsonObject }
-                    .single {
-                        it["key"] == JsonPrimitive("eligibility")
-                    }["offerings"]!!
-                    .jsonArray
-                    .single()
-                    .jsonObject shouldBe read
             }
             snapshots.forEach { snapshot ->
                 request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
@@ -1260,7 +1248,7 @@ class OfferingsCapabilitySpec :
                 .jsonArray
                 .map { it.jsonPrimitive.content }
                 .shouldContainExactly("AVAILABLE", "UNAVAILABLE")
-            schema.containsKey("not") shouldBe true
+            schema.containsKey("not") shouldBe false
             val actual = host(Request(Method.GET, "/item")).json()
             actual.containsKey("price") shouldBe false
             actual.containsKey("description") shouldBe false

@@ -1064,10 +1064,13 @@ timestamps, active/deleted flags, key rename, or general reordering are part of 
 
 An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
 and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Domain construction defaults to
-`ENABLED` / `AVAILABLE`. Valid combinations are enabled/available, disabled/available,
-and enabled/unavailable; disabled/unavailable is rejected by construction (including
-`copy`). Disabled means deliberate catalog configuration; unavailable means temporarily
-unable to fulfill a normally selectable offering. Both remain in active catalog reads.
+`ENABLED` / `AVAILABLE`. All four combinations are valid in construction and `copy`.
+Selection configuration and fulfillment availability are independent facts: disabled
+means selection is deliberately forbidden, while unavailable means the offering cannot
+currently be fulfilled. Neither property implies or rewrites the other. Both remain in
+active catalog reads. For a submitted selection, `DISABLED` takes precedence over
+`UNAVAILABLE`, yielding only `OFFERING_DISABLED` when both apply. This precedence
+chooses a rejection reason; it places no constraint on stored representation values.
 Retirement is independent: the key is absent from the latest snapshot. These properties
 belong to each catalog revision; changes create successors and preserve historical values.
 
@@ -1149,8 +1152,10 @@ V8 adds selection state and availability as checked `NOT NULL` text columns, wit
 persistence defaults. It rejects preexisting offering rows rather than inventing their
 historical states; ephemeral databases with such rows must be recreated. HTTP offering
 reads and add/update/restore bodies require both non-null enum fields. Missing, null, or
-unknown enum values are malformed (400); disabled/unavailable is domain-invalid (422).
-The OpenAPI renderer declares both enums, required fields, and the invalid combination.
+unknown enum values are malformed (400). All four enum combinations are accepted.
+The OpenAPI renderer declares both enums and required fields with no cross-field exclusion.
+`UpdateOffering` and `RestoreOffering` require both properties explicitly, even when
+changing unrelated fields; only new domain construction provides enabled/available defaults.
 
 # Repository-wide rules
 

@@ -46,29 +46,24 @@ private fun line(
 
 class OfferingsSpec :
     FunSpec({
-        test("offering defaults and all explicit combinations enforce unambiguous selection semantics") {
+        test("offering defaults and construction and copy preserve all four independent combinations") {
             val normal = offering("item", "choice")
             normal.selectionState shouldBe OfferingSelectionState.ENABLED
             normal.availability shouldBe OfferingAvailability.AVAILABLE
             OfferingSelectionState.entries.forEach { selectionState ->
                 OfferingAvailability.entries.forEach { availability ->
-                    if (selectionState == OfferingSelectionState.DISABLED && availability == OfferingAvailability.UNAVAILABLE) {
-                        shouldThrow<IllegalArgumentException> { normal.copy(selectionState = selectionState, availability = availability) }
-                        shouldThrow<IllegalArgumentException> {
-                            Offering(
-                                normal.key,
-                                normal.category,
-                                normal.displayName,
-                                selectionState = selectionState,
-                                availability = availability,
-                            )
-                        }
-                    } else {
-                        normal.copy(selectionState = selectionState, availability = availability).let {
-                            it.selectionState shouldBe selectionState
-                            it.availability shouldBe availability
-                        }
-                    }
+                    val constructed =
+                        Offering(
+                            normal.key,
+                            normal.category,
+                            normal.displayName,
+                            selectionState = selectionState,
+                            availability = availability,
+                        )
+                    val copied = normal.copy(selectionState = selectionState, availability = availability)
+                    constructed shouldBe copied
+                    constructed.selectionState shouldBe selectionState
+                    constructed.availability shouldBe availability
                 }
             }
         }
@@ -77,8 +72,13 @@ class OfferingsSpec :
             val normal = offering("normal", "choice")
             val disabled = offering("disabled", "choice").copy(selectionState = OfferingSelectionState.DISABLED)
             val unavailable = offering("unavailable", "choice").copy(availability = OfferingAvailability.UNAVAILABLE)
-            val catalog = snapshot(listOf(category("choice")), listOf(normal, disabled, unavailable))
-            catalog.offeringsIn(normal.category).shouldContainExactly(normal, disabled, unavailable)
+            val both =
+                offering("both", "choice").copy(
+                    selectionState = OfferingSelectionState.DISABLED,
+                    availability = OfferingAvailability.UNAVAILABLE,
+                )
+            val catalog = snapshot(listOf(category("choice")), listOf(normal, disabled, unavailable, both))
+            catalog.offeringsIn(normal.category).shouldContainExactly(normal, disabled, unavailable, both)
             var called = 0
             val engine =
                 object : OfferingsEngine<Unit>() {
@@ -99,16 +99,18 @@ class OfferingsSpec :
             val rejected =
                 engine.evaluate(
                     catalog,
-                    OfferingSelections(listOf(selection("choice", "disabled", "unavailable"))),
+                    OfferingSelections(listOf(selection("choice", "disabled", "unavailable", "both"))),
                     Unit,
                 ) as OfferingsEvaluationResult.Rejected
             rejected.violations.shouldContainExactly(
                 StructuralOfferingsViolation.DisabledOffering(normal.category, disabled.key),
                 StructuralOfferingsViolation.UnavailableOffering(normal.category, unavailable.key),
+                StructuralOfferingsViolation.DisabledOffering(normal.category, both.key),
             )
             called shouldBe 1
             catalog.offering(disabled.key) shouldBe disabled
             catalog.offering(unavailable.key) shouldBe unavailable
+            catalog.offering(both.key) shouldBe both
             val retired = catalog.withoutOffering(normal.key)
             retired.offering(normal.key) shouldBe null
             (

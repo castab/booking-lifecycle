@@ -806,10 +806,13 @@ is unbounded. The category and offering order supplied to a snapshot is preserve
 
 An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
 and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Domain construction defaults to
-`ENABLED` / `AVAILABLE`. Valid combinations are enabled/available, disabled/available,
-and enabled/unavailable; disabled/unavailable is rejected by construction (including
-`copy`). Disabled means deliberate catalog configuration; unavailable means temporarily
-unable to fulfill a normally selectable offering. Both remain in active catalog reads.
+`ENABLED` / `AVAILABLE`. All four combinations are valid in construction and `copy`.
+Selection configuration and fulfillment availability are independent facts: disabled
+means selection is deliberately forbidden, while unavailable means the offering cannot
+currently be fulfilled. Neither property implies or rewrites the other. Both remain in
+active catalog reads. For a submitted selection, `DISABLED` takes precedence over
+`UNAVAILABLE`, yielding only `OFFERING_DISABLED` when both apply. This precedence
+chooses a rejection reason; it places no constraint on stored representation values.
 Retirement is independent: the key is absent from the latest snapshot. These properties
 belong to each catalog revision; changes create successors and preserve historical values.
 

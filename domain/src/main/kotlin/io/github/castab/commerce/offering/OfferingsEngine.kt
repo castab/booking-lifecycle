@@ -158,7 +158,11 @@ sealed interface OfferingsEvaluationResult {
     }
 }
 
-/** Applies common cardinality, membership, and selection eligibility checks before application policy. */
+/**
+ * Applies common cardinality, membership, and selection eligibility checks before application policy.
+ * Disabled takes precedence over unavailable for the reported selection rejection reason;
+ * this does not constrain or change either property of the supplied snapshot.
+ */
 abstract class OfferingsEngine<C> {
     fun evaluate(
         snapshot: OfferingsSnapshot,

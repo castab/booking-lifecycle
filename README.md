@@ -138,10 +138,14 @@ Ordinary active and historical reads are as public as the host mounts them.
 
 Active offerings expose required `selectionState` (`ENABLED`/`DISABLED`) and
 `availability` (`AVAILABLE`/`UNAVAILABLE`). Disabled and unavailable offerings remain
-readable but selections fail with distinct domain codes; disabled/unavailable is invalid.
+readable. All four combinations are valid independent facts; neither field implies the
+other. Disabled takes precedence over unavailable for the reported selection rejection
+reason, returning only `OFFERING_DISABLED` when both apply.
 Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
-list the enums and valid combination constraint. V8 stores checked non-null values,
-without defaults or legacy backfills; populated pre-V8 offering databases must be recreated.
+list the enums without a cross-field exclusion. Kotlin update and restore operations also
+require both fields explicitly; new domain construction retains enabled/available defaults.
+V8 stores checked non-null values without defaults or legacy backfills; populated pre-V8
+offering databases must be recreated.
 Changes append catalog revisions, preserving the selection semantics of historical reads.
 See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
 

@@ -473,7 +473,7 @@ It does not open a connection or transaction. A duplicate revision is reported a
 
 `V8__offering_selection_and_availability.sql` adds `selection_state` and `availability`
 to `commerce.offerings` as `NOT NULL` text columns with no defaults. Checks accept only
-`ENABLED`/`DISABLED` and `AVAILABLE`/`UNAVAILABLE`, and reject disabled/unavailable.
+`ENABLED`/`DISABLED` and `AVAILABLE`/`UNAVAILABLE`; all four combinations are valid.
 V1-V7 remain unchanged. V8 refuses preexisting offering rows because no historical
 selection states exist to restore; recreate the ephemeral database instead of backfilling.
 Repositories write and restore both fields explicitly and reject unknown stored values.
@@ -674,19 +674,25 @@ properties. The runtime validates the discriminator's fields and domain values.
 Every offering read (catalog, category, item, exact revision, and retired discovery) includes
 required non-null `selectionState` and `availability` enum fields. Add, update, and restore
 requests require explicit values with no deserialization defaults. Missing, null, or unknown
-values return `400 malformed_request`; `DISABLED` / `UNAVAILABLE` returns
-`422 validation_failed` without appending a revision. The OpenAPI renderer lists both enum
-sets, requires both properties, and excludes that combination. A disabled or unavailable
-offering remains active/readable; retiring it still removes it from the successor.
+values return `400 malformed_request`; all four enum combinations are accepted.
+The OpenAPI renderer lists both enum sets and requires both properties without a
+cross-field exclusion. A disabled or unavailable offering remains active/readable;
+retiring it still removes it from the successor.
 Changing either property uses `UpdateOffering`, retaining identity and position, checking
 `expectedRevision`, and appending an immutable successor. Restoring a retired key also
-supplies both properties explicitly through HTTP.
+supplies both properties explicitly through HTTP. Kotlin `UpdateOffering` and
+`RestoreOffering` callers must also explicitly supply `selectionState` and `availability`,
+even when only changing an unrelated field. Neither parameter has a default; callers
+preserve existing values deliberately in a full replacement. Brand-new domain construction
+still defaults to enabled/available.
 
 Selection evaluation remains application-invoked through `OfferingsEngine`, using the
 chosen snapshot. It rejects `DISABLED` with `OFFERING_DISABLED`, `UNAVAILABLE` with
 `OFFERING_UNAVAILABLE`, and absent/retired keys with the existing `UNKNOWN_OFFERING`.
-`offeringsValidationFailed` preserves these codes in 422 structured violations. Applications
-own context-specific capacity/stock policy and should use the current catalog for new orders;
+For an offering that is both disabled and unavailable, disabled takes precedence and only
+`OFFERING_DISABLED` is reported. This chooses the rejection reason; it does not constrain
+or alter either stored fact. `offeringsValidationFailed` preserves these codes in 422
+structured violations. Applications own context-specific capacity/stock policy and should use the current catalog for new orders;
 historical reads retain the selection semantics at their revision. Labels, badges, and other
 presentation behavior belong to the consuming application or its BFF.
 

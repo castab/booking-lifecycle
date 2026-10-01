@@ -74,7 +74,7 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
         )
     }
 
-    /** The example-based generator cannot infer all enum values or the invalid combination. */
+    /** The example-based generator cannot infer all values of the two independent enums. */
     private fun NODE.withSelectionContract(name: String): NODE {
         if (name !in setOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto")) return this
         val schema = Json.parseToJsonElement(json.compact(this)).jsonObject
@@ -91,11 +91,6 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
                     mapOf(
                         "properties" to JsonObject(properties),
                         "required" to JsonArray(required),
-                        "not" to
-                            Json.parseToJsonElement(
-                                """{"properties":{"selectionState":{"enum":["DISABLED"]},"availability":{"enum":["UNAVAILABLE"]}},
-                    "required":["selectionState","availability"]}""",
-                            ),
                     ),
             ).toString(),
         )

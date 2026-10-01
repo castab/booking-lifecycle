@@ -90,7 +90,7 @@ enum class OfferingSelectionState {
     DISABLED,
 }
 
-/** Whether an enabled offering can currently be fulfilled. */
+/** Whether an offering can currently be fulfilled, independently of its selection configuration. */
 enum class OfferingAvailability {
     AVAILABLE,
     UNAVAILABLE,
@@ -98,8 +98,8 @@ enum class OfferingAvailability {
 
 /**
  * One commercial item, service, or choice in exactly one category at a catalog revision.
- * Disabled and unavailable offerings remain readable but cannot be selected. A disabled
- * offering must be available, so the reason selection is blocked is unambiguous.
+ * Selection configuration and fulfillment availability are independent; all four combinations
+ * are valid. Disabled and unavailable offerings remain readable but cannot be selected.
  */
 data class Offering(
     val key: OfferingKey,
@@ -112,8 +112,5 @@ data class Offering(
 ) {
     init {
         require(displayName.isNotBlank()) { "Offering $key must have a nonblank display name" }
-        require(selectionState != OfferingSelectionState.DISABLED || availability == OfferingAvailability.AVAILABLE) {
-            "Offering $key cannot be both disabled and unavailable"
-        }
     }
 }
