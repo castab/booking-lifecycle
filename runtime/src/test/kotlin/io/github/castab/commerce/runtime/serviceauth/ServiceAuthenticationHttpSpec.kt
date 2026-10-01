@@ -99,7 +99,7 @@ class ServiceAuthenticationHttpSpec :
                                     SessionAuthenticator(supplied.sessions, BearerSessionToken),
                                     ServiceAccessTokenAuthenticator(supplied.serviceAccessTokens),
                                 )
-                            val access = AccessControl(authenticate, supplied.authorization.permissionResolver)
+                            val access = AccessControl(authenticate, supplied.authorization)
                             openApi =
                                 contract {
                                     renderer = OpenApi3(ApiInfo("Service authentication", "1"), Jackson)

@@ -1,6 +1,8 @@
 package io.github.castab.commerce.runtime.session
 
 import com.zaxxer.hikari.HikariDataSource
+import io.github.castab.commerce.runtime.authorization.PermissionCatalog
+import io.github.castab.commerce.runtime.authorization.commercePermissionDefinitions
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceErrorHandling
 import io.github.castab.commerce.runtime.http.CommerceJson
@@ -66,6 +68,7 @@ class SessionAuthenticationSpec :
         val lifetime = Duration.ofHours(1)
         val grants = mutableMapOf<PrincipalId, Set<PermissionKey>>()
         val permissionResolver = PermissionResolver { grants[it].orEmpty() }
+        val runtimeCatalog = PermissionCatalog(commercePermissionDefinitions)
         val sessionCookie = SessionCookie("__Host-test-session")
 
         beforeSpec {
@@ -76,8 +79,8 @@ class SessionAuthenticationSpec :
             sessions =
                 PersistentSessionManager(transactor, PostgresPrincipalSessionRepository(), AuthorizationRepository(), lifetime, clock)
 
-            val access = AccessControl(sessionAuthentication(sessions, BearerSessionToken), permissionResolver)
-            val cookieAccess = AccessControl(sessionAuthentication(sessions, sessionCookie), permissionResolver)
+            val access = AccessControl(sessionAuthentication(sessions, BearerSessionToken), runtimeCatalog, permissionResolver)
+            val cookieAccess = AccessControl(sessionAuthentication(sessions, sessionCookie), runtimeCatalog, permissionResolver)
             http =
                 CommerceErrorHandling.then(
                     routes(
@@ -275,7 +278,11 @@ class SessionAuthenticationSpec :
                         evaluations++
                         permissionResolver.permissionsFor(it)
                     }
-                return Triple(counting, AccessControl(sessionAuthentication(counting, BearerSessionToken), resolver), { evaluations })
+                return Triple(
+                    counting,
+                    AccessControl(sessionAuthentication(counting, BearerSessionToken), runtimeCatalog, resolver),
+                    { evaluations },
+                )
             }
 
             fun Request.bearer(token: String) = header("Authorization", "Bearer $token")

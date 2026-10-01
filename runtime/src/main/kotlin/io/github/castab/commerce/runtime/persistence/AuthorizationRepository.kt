@@ -97,12 +97,24 @@ internal class AuthorizationRepository {
             .orElse(null)
             ?.let(PrincipalStatus::valueOf)
 
-    fun storedPermissionKeys(tx: Transaction): Set<PermissionKey> =
+    /** Raw stored keys, so a value that is no longer a well-formed [PermissionKey] can still be named. */
+    fun storedPermissionKeys(tx: Transaction): Set<String> =
         tx.handle
             .createQuery("SELECT DISTINCT permission_key FROM commerce.role_permissions")
             .mapTo(String::class.java)
             .list()
-            .map(::PermissionKey)
+            .toSet()
+
+    /** Raw stored keys of one role, read before any is turned into a [PermissionKey]. */
+    fun storedPermissionKeys(
+        tx: Transaction,
+        role: RoleKey,
+    ): Set<String> =
+        tx.handle
+            .createQuery("SELECT permission_key FROM commerce.role_permissions WHERE role_key = :key")
+            .bind("key", role.value)
+            .mapTo(String::class.java)
+            .list()
             .toSet()
 
     fun insertUser(
@@ -173,6 +185,17 @@ internal class AuthorizationRepository {
             .bind("kind", PrincipalIdColumns.kind(id))
             .bind("id", PrincipalIdColumns.value(id))
             .execute() != 0
+
+    /** Whether [key] is defined, without reading its grants. */
+    fun roleExists(
+        tx: Transaction,
+        key: RoleKey,
+    ): Boolean =
+        tx.handle
+            .createQuery("SELECT EXISTS (SELECT 1 FROM commerce.roles WHERE role_key = :key)")
+            .bind("key", key.value)
+            .mapTo(Boolean::class.java)
+            .one()
 
     fun roles(tx: Transaction): List<RoleDefinition> =
         tx.handle

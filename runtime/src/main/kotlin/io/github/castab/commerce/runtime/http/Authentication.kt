@@ -12,8 +12,8 @@ import org.http4k.core.Request
  * [authenticate] answers the principal the request's credential proves, or `null` when the
  * request carries no credential this mechanism accepts: missing, malformed, unknown,
  * expired, revoked, or belonging to a principal that is missing or disabled. It establishes
- * identity only. It never decides authorization, which `requirePermission` and
- * [AccessControl] evaluate against the current `PermissionResolver` on every request.
+ * identity only. It never decides authorization, which [AccessControl] evaluates against
+ * the running permission catalog and current effective permissions on every request.
  */
 fun interface RequestAuthenticator {
     fun authenticate(request: Request): PrincipalId?
@@ -43,7 +43,7 @@ fun interface RequestAuthenticator {
  *         SessionAuthenticator(context.sessions, SessionCookie("__Host-session")),
  *         ServiceAccessTokenAuthenticator(context.serviceAccessTokens),
  *     )
- * val access = AccessControl(authenticate, context.authorization.permissionResolver)
+ * val access = AccessControl(authenticate, context.authorization)
  * ```
  */
 fun authentication(vararg authenticators: RequestAuthenticator): Filter {

@@ -7,8 +7,6 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.isUniqueViolation
 import io.github.castab.commerce.runtime.session.SessionManager
-import io.github.castab.commerce.staff.CommercePermissions
-import io.github.castab.commerce.staff.PermissionDefinition
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.Principal
@@ -25,69 +23,7 @@ import io.github.castab.commerce.staff.ServiceIdentity
 import io.github.castab.commerce.staff.User
 import io.github.castab.commerce.staff.UserId
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
-import java.util.Collections
 import java.util.Locale
-
-/** Software-defined permissions available for administrator-defined roles. */
-class PermissionCatalog(
-    definitions: List<PermissionDefinition>,
-) {
-    val definitions: List<PermissionDefinition> = Collections.unmodifiableList(definitions.toList())
-    private val byKey: Map<PermissionKey, PermissionDefinition>
-
-    init {
-        require(definitions.map { it.key }.toSet().size == definitions.size) { "Duplicate permission key" }
-        byKey = definitions.associateBy { it.key }
-    }
-
-    fun find(key: PermissionKey): PermissionDefinition? = byKey[key]
-
-    internal fun validate(keys: Set<PermissionKey>) {
-        val unknown = keys.filterNot { it in byKey }
-        if (unknown.isNotEmpty()) throw CommerceFailure.ValidationFailed("Unknown permissions: ${unknown.joinToString { it.value }}")
-    }
-
-    internal fun validatePersisted(keys: Set<PermissionKey>) {
-        val unknown = keys.filterNot { it in byKey }.sortedBy { it.value }
-        if (unknown.isNotEmpty()) error("Stored role permissions missing from PermissionCatalog: ${unknown.joinToString { it.value }}")
-    }
-}
-
-/**
- * Permissions of runtime capabilities that are not commerce-domain operations, and so are
- * not part of the domain's `CommercePermissions`.
- */
-object RuntimePermissions {
-    /**
-     * Create and revoke service credentials. A credential authenticates as its service, with
-     * all of that service's current roles, so this is as sensitive as `RoleAssign`: grant it
-     * only to principals trusted to act as any service. Reading credential metadata needs
-     * `PrincipalRead`.
-     */
-    val ServiceCredentialManage: PermissionKey = PermissionKey("commerce.service-credential.manage")
-}
-
-/** Explicit catalog. These keys denote code capabilities, never database-created permissions. */
-val commercePermissionDefinitions: List<PermissionDefinition> =
-    listOf(
-        PermissionDefinition(CommercePermissions.BookingRead, "Read bookings", null),
-        PermissionDefinition(CommercePermissions.BookingModify, "Modify bookings", null),
-        PermissionDefinition(CommercePermissions.FinancialDocumentRead, "Read financial documents", null),
-        PermissionDefinition(CommercePermissions.FinancialDocumentCreate, "Create financial documents", null),
-        PermissionDefinition(CommercePermissions.OfferingsManage, "Manage offerings", null),
-        PermissionDefinition(CommercePermissions.PaymentRecord, "Record payments", null),
-        PermissionDefinition(CommercePermissions.RefundRecord, "Record refunds", null),
-        PermissionDefinition(CommercePermissions.PrincipalRead, "Read principals", null),
-        PermissionDefinition(CommercePermissions.PrincipalManage, "Manage principals", null),
-        PermissionDefinition(CommercePermissions.RoleRead, "Read roles and permissions", null),
-        PermissionDefinition(CommercePermissions.RoleManage, "Manage role definitions", null),
-        PermissionDefinition(CommercePermissions.RoleAssign, "Assign roles", null),
-        PermissionDefinition(
-            RuntimePermissions.ServiceCredentialManage,
-            "Manage service credentials",
-            "Create and revoke the credentials with which services authenticate",
-        ),
-    )
 
 /**
  * Live principal and RBAC administration. Mutations with [Transaction] join application
@@ -101,12 +37,17 @@ class AuthorizationDirectory internal constructor(
     val permissionCatalog: PermissionCatalog,
 ) {
     val principalResolver = PrincipalResolver { id -> transactor.inTransaction { repository.principal(it, id) } }
-    val roleResolver = RoleResolver { key -> transactor.inTransaction { repository.role(it, key) } }
+
+    /** Live role definitions, through the same catalog-validating read as [getRole]. */
+    val roleResolver = RoleResolver { key -> transactor.inTransaction { validatedRole(it, key) } }
     private val roleBasedPermissionResolver = RoleBasedPermissionResolver(principalResolver, roleResolver)
+
+    /**
+     * Live effective permissions, resolved on every call. The result is always a subset of
+     * [permissionCatalog]; anything else fails closed with [IllegalStateException].
+     */
     val permissionResolver: PermissionResolver =
-        PermissionResolver { id ->
-            roleBasedPermissionResolver.permissionsFor(id).also(permissionCatalog::validatePersisted)
-        }
+        PermissionResolver { id -> roleBasedPermissionResolver.permissionsFor(id).also(permissionCatalog::requireEffective) }
 
     fun listUsers(): List<User> = transactor.inTransaction { repository.users(it) }
 
@@ -211,9 +152,38 @@ class AuthorizationDirectory internal constructor(
         return repository.principal(transaction, id)!!
     }
 
-    fun listRoles(): List<RoleDefinition> = transactor.inTransaction { repository.roles(it) }
+    /**
+     * Every role definition. One stored grant outside [permissionCatalog] fails the whole read
+     * closed with [IllegalStateException]; no role or grant is silently left out.
+     */
+    fun listRoles(): List<RoleDefinition> = transactor.inTransaction { validatedRoles(it) }
 
-    fun getRole(key: RoleKey): RoleDefinition? = transactor.inTransaction { repository.role(it, key) }
+    /** The role definition, or `null`; a stored grant outside [permissionCatalog] fails closed. */
+    fun getRole(key: RoleKey): RoleDefinition? = transactor.inTransaction { validatedRole(it, key) }
+
+    /**
+     * The one boundary through which a persisted [RoleDefinition] leaves the directory, so
+     * every role it describes grants only known permissions. Raw stored values are checked
+     * first, so a malformed key (`Legacy.Key`) fails with the stored-grant diagnostic naming
+     * it rather than as a [PermissionKey] it could never become. The hydrated grants are
+     * checked again, so a grant written between the two reads cannot slip through. Unknown
+     * grants are never repaired or filtered.
+     */
+    private fun validatedRole(
+        transaction: Transaction,
+        key: RoleKey,
+    ): RoleDefinition? {
+        permissionCatalog.validatePersisted(repository.storedPermissionKeys(transaction, key))
+        return repository.role(transaction, key)?.also(::requireKnownGrants)
+    }
+
+    /** [validatedRole] for every role: all stored grants are checked before any role is built. */
+    private fun validatedRoles(transaction: Transaction): List<RoleDefinition> {
+        permissionCatalog.validatePersisted(repository.storedPermissionKeys(transaction))
+        return repository.roles(transaction).onEach(::requireKnownGrants)
+    }
+
+    private fun requireKnownGrants(role: RoleDefinition) = permissionCatalog.validatePersisted(role.permissions.map { it.value })
 
     fun createRole(role: RoleDefinition): RoleDefinition = transactor.inTransaction { createRole(it, role) }
 
@@ -237,17 +207,20 @@ class AuthorizationDirectory internal constructor(
         description: String?,
     ): RoleDefinition = transactor.inTransaction { updateRoleDetails(it, key, displayName, description) }
 
-    /** Changes name and description; use [replaceRolePermissions] for grants. */
+    /**
+     * Changes name and description; use [replaceRolePermissions] for grants. A role holding a
+     * grant outside [permissionCatalog] fails closed rather than being rewritten with it.
+     */
     fun updateRoleDetails(
         transaction: Transaction,
         key: RoleKey,
         displayName: String,
         description: String?,
     ): RoleDefinition {
-        val previous = repository.role(transaction, key) ?: throw CommerceFailure.NotFound("Role does not exist")
+        val previous = validatedRole(transaction, key) ?: throw CommerceFailure.NotFound("Role does not exist")
         val role = validating { RoleDefinition(key, displayName, description, previous.permissions) }
         if (!repository.updateRole(transaction, role)) throw CommerceFailure.NotFound("Role does not exist")
-        return repository.role(transaction, role.key)!!
+        return validatedRole(transaction, role.key)!!
     }
 
     fun replaceRolePermissions(
@@ -255,15 +228,20 @@ class AuthorizationDirectory internal constructor(
         permissions: Set<PermissionKey>,
     ): RoleDefinition = transactor.inTransaction { replaceRolePermissions(it, key, permissions) }
 
+    /**
+     * Replaces every grant with known [permissions]. The previous grants are not read, so this
+     * is how an administrator replaces a role's stale or unknown stored grants; the returned
+     * role is validated like any other read.
+     */
     fun replaceRolePermissions(
         transaction: Transaction,
         key: RoleKey,
         permissions: Set<PermissionKey>,
     ): RoleDefinition {
         permissionCatalog.validate(permissions)
-        if (repository.role(transaction, key) == null) throw CommerceFailure.NotFound("Role does not exist")
+        if (!repository.roleExists(transaction, key)) throw CommerceFailure.NotFound("Role does not exist")
         repository.replacePermissions(transaction, key, permissions)
-        return repository.role(transaction, key)!!
+        return validatedRole(transaction, key)!!
     }
 
     fun deleteRole(key: RoleKey) = transactor.inTransaction { deleteRole(it, key) }
@@ -273,7 +251,7 @@ class AuthorizationDirectory internal constructor(
         transaction: Transaction,
         key: RoleKey,
     ) {
-        if (repository.role(transaction, key) == null) throw CommerceFailure.NotFound("Role does not exist")
+        if (!repository.roleExists(transaction, key)) throw CommerceFailure.NotFound("Role does not exist")
         if (repository.assignedCount(transaction, key) != 0L) throw CommerceFailure.Conflict("Role is assigned to principals")
         repository.deleteRole(transaction, key)
     }
@@ -293,14 +271,17 @@ class AuthorizationDirectory internal constructor(
         key: RoleKey,
     ) = transactor.inTransaction { assignRole(it, id, key) }
 
-    /** Idempotent when already assigned. */
+    /**
+     * Idempotent when already assigned. A role holding a grant outside [permissionCatalog]
+     * fails closed and is not assigned.
+     */
     fun assignRole(
         transaction: Transaction,
         id: PrincipalId,
         key: RoleKey,
     ) {
         if (repository.principal(transaction, id) == null) throw CommerceFailure.NotFound("Principal does not exist")
-        if (repository.role(transaction, key) == null) throw CommerceFailure.NotFound("Role does not exist")
+        if (validatedRole(transaction, key) == null) throw CommerceFailure.NotFound("Role does not exist")
         repository.assign(transaction, id, key)
     }
 

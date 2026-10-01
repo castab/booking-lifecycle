@@ -61,7 +61,10 @@ concrete commerce application    (the consuming project)
    it never sees human credentials. It does authenticate service principals itself: Argon2id-
    hashed service credentials (several per service, for rotation) exchanged for short-lived
    signed bearer tokens that carry identity only, so services are authorized through their
-   current roles like users. Stored role grants must match the running permission catalog.
+   current roles like users. Stored role grants must match the running permission catalog,
+   the runtime's and the application's permission definitions composed at startup, which
+   applications may expose with an opt-in catalog route alongside a current-principal route
+   that reports resolved effective permissions.
    It owns no customer or other application data model. It is a
    library. It is not itself an application, and it provides no default application and
    no `main()`. It defines the configuration it requires but ships no `application.conf`,
@@ -134,8 +137,8 @@ new identity; update retains its key and position; retire removes it from the su
 restore reactivates the same identity at the end of the current list. Retired discovery
 returns each last representation and its revision without reconstructing history on the
 client. Categories containing offerings cannot be retired. Writes require the
-`commerce.offerings.manage` permission, evaluated with the supplied `PermissionResolver`
-(normally `context.authorization.permissionResolver`);
+`commerce.offerings.manage` permission, evaluated through the supplied `AccessControl`
+(normally bound to `context.authorization`);
 retired discovery is also protected by this permission and absent from read-only bindings.
 Ordinary active and historical reads are as public as the host mounts them.
 
