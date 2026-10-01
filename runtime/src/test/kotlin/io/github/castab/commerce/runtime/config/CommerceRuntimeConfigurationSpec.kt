@@ -120,6 +120,91 @@ class CommerceRuntimeConfigurationSpec :
             }.message shouldBe "DATABASE_MINIMUM_IDLE must be between zero and DATABASE_MAXIMUM_POOL_SIZE"
         }
 
+        context("service tokens") {
+            // Deterministic test material: 32 distinct bytes, base64.
+            val key =
+                java.util.Base64
+                    .getEncoder()
+                    .encodeToString(ByteArray(32) { it.toByte() })
+
+            test("service tokens are not configured unless the application asks for them") {
+                CommerceRuntimeConfiguration.load(environment = database).serviceTokens shouldBe null
+            }
+
+            test("the environment supplies the signing key, and the model supplies the defaults") {
+                val tokens =
+                    CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to key)).serviceTokens!!
+
+                tokens.signingKey shouldBe key
+                tokens.lifetime shouldBe Duration.ofMinutes(15)
+                tokens.issuer shouldBe "commerce-runtime"
+            }
+
+            test("every service token variable overrides its setting") {
+                val tokens =
+                    CommerceRuntimeConfiguration
+                        .load(
+                            environment =
+                                database +
+                                    mapOf(
+                                        "SERVICE_TOKENS_SIGNING_KEY" to key,
+                                        "SERVICE_TOKENS_LIFETIME_MINUTES" to "30",
+                                        "SERVICE_TOKENS_ISSUER" to "orders",
+                                    ),
+                        ).serviceTokens!!
+
+                tokens.lifetimeMinutes shouldBe 30
+                tokens.issuer shouldBe "orders"
+            }
+
+            test("a lifetime or issuer without a signing key is rejected rather than ignored") {
+                shouldThrow<IllegalArgumentException> {
+                    CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_LIFETIME_MINUTES" to "10"))
+                }.message shouldBe "SERVICE_TOKENS_SIGNING_KEY is required when SERVICE_TOKENS_LIFETIME_MINUTES is set"
+            }
+
+            test("weak, malformed, or missing signing keys and excessive lifetimes are rejected") {
+                fun failure(vararg values: Pair<String, String>) =
+                    shouldThrow<IllegalArgumentException> { CommerceRuntimeConfiguration.load(environment = database + values) }.message
+
+                failure("SERVICE_TOKENS_SIGNING_KEY" to "") shouldBe "SERVICE_TOKENS_SIGNING_KEY is required"
+                failure("SERVICE_TOKENS_SIGNING_KEY" to "not base64!") shouldBe "SERVICE_TOKENS_SIGNING_KEY must be base64"
+                failure(
+                    "SERVICE_TOKENS_SIGNING_KEY" to
+                        java.util.Base64
+                            .getEncoder()
+                            .encodeToString(ByteArray(31) { it.toByte() }),
+                ) shouldBe
+                    "SERVICE_TOKENS_SIGNING_KEY must encode at least 32 bytes"
+                failure(
+                    "SERVICE_TOKENS_SIGNING_KEY" to
+                        java.util.Base64
+                            .getEncoder()
+                            .encodeToString(ByteArray(32)),
+                ) shouldBe
+                    "SERVICE_TOKENS_SIGNING_KEY must be random, not a repeated byte"
+                failure("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_LIFETIME_MINUTES" to "61") shouldBe
+                    "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and 60"
+                failure("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_LIFETIME_MINUTES" to "0") shouldBe
+                    "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and 60"
+                failure("SERVICE_TOKENS_SIGNING_KEY" to key, "SERVICE_TOKENS_ISSUER" to " ") shouldBe
+                    "SERVICE_TOKENS_ISSUER must not be blank or padded"
+            }
+
+            test("URL-safe base64 keys are accepted, and the key never appears in the configuration's text") {
+                val urlSafe =
+                    java.util.Base64
+                        .getUrlEncoder()
+                        .withoutPadding()
+                        .encodeToString(ByteArray(48) { (250 - it).toByte() })
+                val configuration = CommerceRuntimeConfiguration.load(environment = database + ("SERVICE_TOKENS_SIGNING_KEY" to urlSafe))
+
+                configuration.serviceTokens!!.signingKey shouldBe urlSafe
+                configuration.toString() shouldNotContain urlSafe
+                configuration.serviceTokens.toString() shouldContain "signingKey=****"
+            }
+        }
+
         test("the database password never appears in the configuration's text") {
             val configuration = CommerceRuntimeConfiguration.load(environment = database)
 

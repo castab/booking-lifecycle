@@ -46,6 +46,11 @@ dependencies {
     // SLF4J provider (Logback or any other): the concrete application owns the logging
     // backend and its configuration.
     implementation(libs.kotlin.logging.jvm)
+    // Service credentials are stored only as Argon2id hashes (Bouncy Castle), and service
+    // access tokens are HS256 JWS (Nimbus JOSE+JWT). Neither library's types appear in the
+    // runtime's public API.
+    implementation(libs.bouncycastle.prov)
+    implementation(libs.nimbus.jose.jwt)
 
     runtimeOnly(libs.postgresql)
 
@@ -69,8 +74,9 @@ publishing {
                     "commerce-domain: http4k on Jetty, kotlinx.serialization, PostgreSQL through " +
                     "HikariCP, JDBI, and Flyway, Hoplite/HOCON configuration, explicit " +
                     "transactions, immutable financial snapshots, payment allocations, and refunds, " +
-                    "derived reconciliation, a consistent HTTP error contract, authenticated principal sessions and " +
-                    "permission enforcement, and explicit composition."
+                    "derived reconciliation, a consistent HTTP error contract, authenticated principal sessions, " +
+                    "service credentials and short-lived service access tokens, permission enforcement, and " +
+                    "explicit composition."
             }
         }
     }

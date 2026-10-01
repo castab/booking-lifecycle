@@ -53,6 +53,20 @@ class PermissionCatalog(
     }
 }
 
+/**
+ * Permissions of runtime capabilities that are not commerce-domain operations, and so are
+ * not part of the domain's `CommercePermissions`.
+ */
+object RuntimePermissions {
+    /**
+     * Create and revoke service credentials. A credential authenticates as its service, with
+     * all of that service's current roles, so this is as sensitive as `RoleAssign`: grant it
+     * only to principals trusted to act as any service. Reading credential metadata needs
+     * `PrincipalRead`.
+     */
+    val ServiceCredentialManage: PermissionKey = PermissionKey("commerce.service-credential.manage")
+}
+
 /** Explicit catalog. These keys denote code capabilities, never database-created permissions. */
 val commercePermissionDefinitions: List<PermissionDefinition> =
     listOf(
@@ -68,6 +82,11 @@ val commercePermissionDefinitions: List<PermissionDefinition> =
         PermissionDefinition(CommercePermissions.RoleRead, "Read roles and permissions", null),
         PermissionDefinition(CommercePermissions.RoleManage, "Manage role definitions", null),
         PermissionDefinition(CommercePermissions.RoleAssign, "Assign roles", null),
+        PermissionDefinition(
+            RuntimePermissions.ServiceCredentialManage,
+            "Manage service credentials",
+            "Create and revoke the credentials with which services authenticate",
+        ),
     )
 
 /**

@@ -19,9 +19,14 @@ import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRe
 import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
+import io.github.castab.commerce.runtime.persistence.ServiceCredentialRepository
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.github.castab.commerce.runtime.persistence.isReachable
+import io.github.castab.commerce.runtime.serviceauth.PersistentServiceCredentials
+import io.github.castab.commerce.runtime.serviceauth.ServiceAccessTokens
+import io.github.castab.commerce.runtime.serviceauth.ServiceCredentials
+import io.github.castab.commerce.runtime.serviceauth.SignedServiceAccessTokens
 import io.github.castab.commerce.runtime.session.PersistentSessionManager
 import io.github.castab.commerce.runtime.session.SessionManager
 import io.github.castab.commerce.staff.PermissionDefinition
@@ -53,6 +58,13 @@ private val logger = KotlinLogging.logger {}
  * data model, so relationships between application entities and commerce facts stay in
  * application repositories.
  *
+ * [serviceCredentials] administers the long-lived credentials of SERVICE principals, and
+ * [serviceAccessTokens] exchanges them for short-lived bearer tokens and resolves those
+ * tokens on later requests (see `ServiceAccessTokenAuthenticator`). Unlike human users,
+ * whose credentials the application owns, service authentication is runtime-owned so that
+ * every consuming application authenticates its services the same way. Both were added for
+ * a backend-for-frontend that calls a commerce application as a service principal.
+ *
  * Part of the provisional application-extension seam; see [ApplicationContributions].
  */
 class CommerceRuntimeContext internal constructor(
@@ -64,7 +76,21 @@ class CommerceRuntimeContext internal constructor(
     val financialLedger: FinancialLedger,
     val sessions: SessionManager,
     val authorization: AuthorizationDirectory,
-)
+    val serviceCredentials: ServiceCredentials,
+    private val configuredServiceAccessTokens: ServiceAccessTokens?,
+) {
+    /**
+     * Service access tokens. Available only when `serviceTokens` (its signing key) is
+     * configured; otherwise reading it fails with [IllegalStateException], so an application
+     * that composes service authentication without a signing key fails at startup rather than
+     * running with a weaker fallback.
+     */
+    val serviceAccessTokens: ServiceAccessTokens
+        get() =
+            checkNotNull(configuredServiceAccessTokens) {
+                "Service access tokens are not configured; set serviceTokens.signingKey (SERVICE_TOKENS_SIGNING_KEY)"
+            }
+}
 
 /**
  * What a concrete application adds to the commerce runtime.
@@ -175,6 +201,11 @@ fun commerceRuntime(
                 configuration.sessions.lifetime,
             )
         val authorization = AuthorizationDirectory(transactor, authorizationRepository, sessions, permissionCatalog)
+        val serviceCredentials = PersistentServiceCredentials(transactor, ServiceCredentialRepository(), authorizationRepository)
+        val serviceAccessTokens =
+            configuration.serviceTokens?.let {
+                SignedServiceAccessTokens(it, serviceCredentials, transactor, authorizationRepository)
+            }
         val financialDocuments = PostgresFinancialDocumentRepository()
         val payments = PostgresPaymentRepository(financialDocuments)
         val context =
@@ -187,6 +218,8 @@ fun commerceRuntime(
                 FinancialLedger(transactor, financialDocuments, payments),
                 sessions,
                 authorization,
+                serviceCredentials,
+                serviceAccessTokens,
             )
 
         val runtimeRoutes = listOf(healthRoutes(ready = { dataSource.isReachable() }))

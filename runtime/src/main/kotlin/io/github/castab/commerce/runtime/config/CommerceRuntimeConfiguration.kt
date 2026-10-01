@@ -3,6 +3,7 @@ package io.github.castab.commerce.runtime.config
 import com.sksamuel.hoplite.ConfigLoaderBuilder
 import com.sksamuel.hoplite.PropertySource
 import java.time.Duration
+import java.util.Base64
 
 /**
  * The configuration the commerce runtime requires.
@@ -27,12 +28,21 @@ import java.time.Duration
  * | `database.validationTimeoutMs` | `DATABASE_VALIDATION_TIMEOUT_MS` |
  * | `migrations.onStartup` | `MIGRATIONS_ON_STARTUP` (`migrate` or `validate`) |
  * | `sessions.lifetimeMinutes` | `SESSIONS_LIFETIME_MINUTES` |
+ * | `serviceTokens.signingKey` | `SERVICE_TOKENS_SIGNING_KEY` |
+ * | `serviceTokens.lifetimeMinutes` | `SERVICE_TOKENS_LIFETIME_MINUTES` |
+ * | `serviceTokens.issuer` | `SERVICE_TOKENS_ISSUER` |
+ *
+ * [serviceTokens] is optional: it is configured when the file declares a `serviceTokens`
+ * block or the environment supplies `SERVICE_TOKENS_SIGNING_KEY`. Without it, service
+ * credentials can still be administered, but no service access token can be issued or
+ * accepted, and an application that asks for them fails at composition.
  */
 data class CommerceRuntimeConfiguration(
     val server: Server = Server(),
     val database: Database,
     val migrations: Migrations = Migrations(),
     val sessions: Sessions = Sessions(),
+    val serviceTokens: ServiceTokens? = null,
 ) {
     data class Server(
         val port: Int = 8080,
@@ -88,6 +98,50 @@ data class CommerceRuntimeConfiguration(
         }
     }
 
+    /**
+     * Short-lived service access tokens; see `ServiceAccessTokens`.
+     *
+     * A token is an HS256-signed JWT that expires [lifetimeMinutes] after it is issued. The
+     * default is 15 minutes and the maximum is 60: a token stays valid until it expires even
+     * after the credential that obtained it is revoked, so the lifetime bounds that window.
+     *
+     * [signingKey] is the base64 encoding (standard or URL-safe, padding optional) of at
+     * least 32 random bytes, for example the output of `openssl rand -base64 32`. It is a
+     * secret supplied through the environment, shared by every instance of one deployment so
+     * that each accepts the tokens the others issued, and stable across restarts. There is
+     * no default and no generated fallback. It is unrelated to any service credential.
+     *
+     * [issuer] names this deployment in the token's `iss` and `aud` claims; a token whose
+     * claims name another issuer is rejected even if it was signed with the same key.
+     */
+    data class ServiceTokens(
+        val signingKey: String,
+        val lifetimeMinutes: Long = 15,
+        val issuer: String = "commerce-runtime",
+    ) {
+        /** [lifetimeMinutes] as a [Duration]. */
+        val lifetime: Duration get() = Duration.ofMinutes(lifetimeMinutes)
+
+        /** The decoded signing key, or `null` when [signingKey] is not base64. */
+        @JvmSynthetic
+        internal fun signingKeyBytes(): ByteArray? =
+            signingKey.trim().let { key ->
+                runCatching { Base64.getDecoder().decode(key) }.getOrNull()
+                    ?: runCatching { Base64.getUrlDecoder().decode(key) }.getOrNull()
+            }
+
+        // The signing key never appears in logs or failure messages.
+        override fun toString(): String = "ServiceTokens(signingKey=****, lifetimeMinutes=$lifetimeMinutes, issuer=$issuer)"
+
+        companion object {
+            /** The shortest accepted signing key: 256 bits, the HS256 minimum. */
+            const val MINIMUM_SIGNING_KEY_BYTES: Int = 32
+
+            /** The longest accepted token lifetime: one hour. Access tokens are not long-lived credentials. */
+            const val MAXIMUM_LIFETIME_MINUTES: Long = 60
+        }
+    }
+
     /** Fails with [IllegalArgumentException], naming the environment variable, when a value is unusable. */
     fun validate() {
         require(server.port in 0..65535) { "PORT must be between 0 and 65535" }
@@ -103,6 +157,20 @@ data class CommerceRuntimeConfiguration(
         require(database.validationTimeoutMs > 0) { "DATABASE_VALIDATION_TIMEOUT_MS must be positive" }
         require(sessions.lifetimeMinutes in 1..Sessions.MAXIMUM_LIFETIME_MINUTES) {
             "SESSIONS_LIFETIME_MINUTES must be between 1 and ${Sessions.MAXIMUM_LIFETIME_MINUTES}"
+        }
+        serviceTokens?.let { tokens ->
+            require(tokens.signingKey.isNotBlank()) { "SERVICE_TOKENS_SIGNING_KEY is required" }
+            val key = requireNotNull(tokens.signingKeyBytes()) { "SERVICE_TOKENS_SIGNING_KEY must be base64" }
+            require(key.size >= ServiceTokens.MINIMUM_SIGNING_KEY_BYTES) {
+                "SERVICE_TOKENS_SIGNING_KEY must encode at least ${ServiceTokens.MINIMUM_SIGNING_KEY_BYTES} bytes"
+            }
+            require(key.any { it != key[0] }) { "SERVICE_TOKENS_SIGNING_KEY must be random, not a repeated byte" }
+            require(tokens.lifetimeMinutes in 1..ServiceTokens.MAXIMUM_LIFETIME_MINUTES) {
+                "SERVICE_TOKENS_LIFETIME_MINUTES must be between 1 and ${ServiceTokens.MAXIMUM_LIFETIME_MINUTES}"
+            }
+            require(tokens.issuer.isNotBlank() && tokens.issuer == tokens.issuer.trim()) {
+                "SERVICE_TOKENS_ISSUER must not be blank or padded"
+            }
         }
     }
 
@@ -155,7 +223,32 @@ private fun CommerceRuntimeConfiguration.withEnvironmentOverrides(environment: E
             ),
         migrations = migrations.copy(onStartup = environment.onStartup("MIGRATIONS_ON_STARTUP", migrations.onStartup)),
         sessions = sessions.copy(lifetimeMinutes = environment.long("SESSIONS_LIFETIME_MINUTES", sessions.lifetimeMinutes)),
+        serviceTokens = serviceTokens.withEnvironmentOverrides(environment),
     )
+
+private val serviceTokenVariables = listOf("SERVICE_TOKENS_SIGNING_KEY", "SERVICE_TOKENS_LIFETIME_MINUTES", "SERVICE_TOKENS_ISSUER")
+
+/**
+ * The environment completes a declared block, or declares one by supplying the signing key.
+ * Any other service token variable without a signing key from either source is rejected,
+ * so a lifetime or issuer can never be silently ignored.
+ */
+private fun CommerceRuntimeConfiguration.ServiceTokens?.withEnvironmentOverrides(
+    environment: Environment,
+): CommerceRuntimeConfiguration.ServiceTokens? {
+    val base =
+        this ?: environment.optional("SERVICE_TOKENS_SIGNING_KEY")?.let { CommerceRuntimeConfiguration.ServiceTokens(signingKey = it) }
+    if (base == null) {
+        val stray = serviceTokenVariables.filter { environment.optional(it) != null }
+        require(stray.isEmpty()) { "SERVICE_TOKENS_SIGNING_KEY is required when ${stray.joinToString()} is set" }
+        return null
+    }
+    return base.copy(
+        signingKey = environment.string("SERVICE_TOKENS_SIGNING_KEY", base.signingKey),
+        lifetimeMinutes = environment.long("SERVICE_TOKENS_LIFETIME_MINUTES", base.lifetimeMinutes),
+        issuer = environment.string("SERVICE_TOKENS_ISSUER", base.issuer),
+    )
+}
 
 private class Environment(
     private val values: Map<String, String>,
@@ -164,6 +257,8 @@ private class Environment(
         name: String,
         fallback: String,
     ): String = values[name] ?: fallback
+
+    fun optional(name: String): String? = values[name]
 
     fun int(
         name: String,

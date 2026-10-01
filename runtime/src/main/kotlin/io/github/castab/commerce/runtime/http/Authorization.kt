@@ -17,8 +17,10 @@ import org.http4k.lens.RequestKey
 private val principalKey = RequestKey.required<PrincipalId>("authenticatedPrincipal")
 
 /**
- * The principal an authentication filter established for this request, such as
- * `sessionAuthentication`.
+ * The principal an authentication filter established for this request: [authentication]
+ * over one or more mechanisms, `sessionAuthentication`, or `serviceAccessTokenAuthentication`.
+ * It is the same `PrincipalId` whichever mechanism established it, a `UserId` or a
+ * `ServiceId`, so authorization never depends on the mechanism.
  *
  * It lives in the http4k request context, never in global or thread-local state, and it is
  * read-only: only the runtime's authentication filters set it. Reading it on a request that
@@ -101,12 +103,25 @@ fun requirePermission(
  * Protection fails closed: the protected declarations re-check the principal after
  * authentication, so a lenient [authentication] still cannot expose them.
  *
+ * **A service is not trusted because it is a service.** A service access token establishes a
+ * `ServiceId` exactly as a session establishes a `UserId`; a service without the permission
+ * is forbidden like anyone else.
+ *
  * @param authentication Establishes [authenticatedPrincipal] when the request is not yet
- *   authenticated, for example `sessionAuthentication(context.sessions, SessionCookie("app_session"))`.
+ *   authenticated, for example `sessionAuthentication(context.sessions, SessionCookie("app_session"))`,
+ *   or [authentication] over several mechanisms to accept users' sessions and services'
+ *   access tokens on the same routes.
  * @param permissionResolver The application's source of current permissions.
  *
  * ```kotlin
- * val access = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), permissionResolver)
+ * val access =
+ *     AccessControl(
+ *         authentication(
+ *             SessionAuthenticator(context.sessions, SessionCookie("__Host-session")),
+ *             ServiceAccessTokenAuthenticator(context.serviceAccessTokens),
+ *         ),
+ *         context.authorization.permissionResolver,
+ *     )
  * routes(
  *     "/login" bind POST to access.public().then(login),
  *     "/logout" bind POST to access.authenticated().then(logout),
