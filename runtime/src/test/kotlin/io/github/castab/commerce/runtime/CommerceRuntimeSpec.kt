@@ -20,7 +20,8 @@ import io.github.castab.commerce.runtime.testing.TestDatabase
 import io.github.castab.commerce.runtime.testing.insertTestPrincipal
 import io.github.castab.commerce.runtime.testing.testApplicationMigrations
 import io.github.castab.commerce.staff.CommercePermissions
-import io.github.castab.commerce.staff.PermissionResolver
+import io.github.castab.commerce.staff.RoleDefinition
+import io.github.castab.commerce.staff.RoleKey
 import io.github.castab.commerce.staff.UserId
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -132,7 +133,7 @@ private val loginResponse = jsonBody(LoginResponse.serializer())
 private val principalResponse = jsonBody(PrincipalResponse.serializer())
 
 /**
- * The test application's own identities and grants. A real application verifies credentials
+ * The test application's own identities. A real application verifies credentials
  * (a password hash, OAuth, a passkey, ...) before it trusts a username; this fake step stands
  * in for that, so the runtime never sees a credential.
  */
@@ -147,7 +148,8 @@ private object TestIdentities {
             else -> null
         }
 
-    val permissions = PermissionResolver { if (it == reader) setOf(CommercePermissions.BookingRead) else emptySet() }
+    /** A runtime role the application defines and assigns; the visitor holds no grant. */
+    val bookingReader = RoleDefinition(RoleKey("test.booking-reader"), "Booking reader", null, setOf(CommercePermissions.BookingRead))
 }
 
 /**
@@ -156,11 +158,7 @@ private object TestIdentities {
  */
 private fun testAuthenticationRoutes(context: CommerceRuntimeContext): RoutingHttpHandler {
     val access =
-        AccessControl(
-            sessionAuthentication(context.sessions, BearerSessionToken),
-            context.authorization.permissionCatalog,
-            TestIdentities.permissions,
-        )
+        AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), context.authorization)
     val principal = { request: Request ->
         val userId = authenticatedPrincipal(request) as UserId
         Response(Status.OK).with(principalResponse of PrincipalResponse(userId.value.toString()))
@@ -220,6 +218,9 @@ class CommerceRuntimeSpec :
             runtime = commerceRuntime(configuration, application).start()
             context.transactor.insertTestPrincipal(TestIdentities.reader)
             context.transactor.insertTestPrincipal(TestIdentities.visitor)
+            // Authorization is the runtime's: a real role definition and assignment, resolved live.
+            context.authorization.createRole(TestIdentities.bookingReader)
+            context.authorization.assignRole(TestIdentities.reader, TestIdentities.bookingReader.key)
             val client = JavaHttpClient()
             http = { request ->
                 client(
@@ -324,7 +325,7 @@ class CommerceRuntimeSpec :
             }
         }
 
-        test("the application's identities, the runtime's sessions, and the application's permissions stay separate") {
+        test("the application's identities, the runtime's sessions, and the runtime's live grants stay separate") {
             http(
                 Request(
                     Method.POST,
@@ -339,6 +340,14 @@ class CommerceRuntimeSpec :
                 it.status shouldBe Status.FORBIDDEN
                 it.error().code shouldBe "forbidden"
             }
+
+            // Grants are resolved live: the same session gains and loses access with the assignment.
+            context.authorization.assignRole(TestIdentities.visitor, TestIdentities.bookingReader.key)
+            http(Request(Method.GET, "/test-application/bookings").header("Authorization", "Bearer ${visitor.token.value}")).status shouldBe
+                Status.OK
+            context.authorization.unassignRole(TestIdentities.visitor, TestIdentities.bookingReader.key)
+            http(Request(Method.GET, "/test-application/bookings").header("Authorization", "Bearer ${visitor.token.value}")).status shouldBe
+                Status.FORBIDDEN
             http(Request(Method.GET, "/test-application/bookings")).status shouldBe Status.UNAUTHORIZED
         }
 

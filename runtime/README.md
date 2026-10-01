@@ -1300,6 +1300,16 @@ any persisted `commerce.role_permissions` key missing from the running catalog a
 the unknown keys. An application release removing a permission must migrate away its
 stored grants first. Live resolution checks the same catalog again and fails closed if
 an unknown grant appears after startup; the startup failure is never silently filtered.
+Role administration reads go through the same check: every `RoleDefinition` the directory
+returns (`getRole`, `listRoles`, the live `roleResolver`, and the results of role
+mutations) holds only catalog permissions. Raw stored values are checked before any
+becomes a `PermissionKey`, so an unknown (`mystery.permission`) or malformed
+(`Legacy.Key`) grant written after startup fails the read closed with the stored-grant
+diagnostic naming it; over HTTP that is `500 internal_failure`, and the value is not in the
+response. One bad grant fails `listRoles` entirely rather than omitting a role or a grant.
+Changing such a role's details or assigning it fails the same way.
+`replaceRolePermissions` does not read the previous grants, so it is how an administrator
+replaces stale ones; deleting an unassigned role also does not read them.
 `CommercePermissions.RoleRead` inspects roles and the catalog; `RoleManage` changes role
 definitions and grants; `RoleAssign` changes assignments. `PrincipalRead` and `PrincipalManage`
 (`commerce.principal.read` and `commerce.principal.manage`) cover both human and service

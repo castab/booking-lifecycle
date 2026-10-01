@@ -463,6 +463,56 @@ class AuthorizationReadHttpSpec :
             }
         }
 
+        test("administration role reads never describe a stored grant outside the catalog") {
+            withHost { host ->
+                val (_, admin) = host.user("admin", setOf(CommercePermissions.RoleRead, CommercePermissions.RoleManage))
+                val manager = RoleKey("example.manager")
+                host.context.authorization.createRole(RoleDefinition(manager, "Manager", null, setOf(CommercePermissions.PrincipalRead)))
+
+                fun send(
+                    method: Method,
+                    path: String,
+                    body: String? = null,
+                ) = host.runtime.http(
+                    Request(method, path)
+                        .header("Authorization", "Bearer $admin")
+                        .let { if (body == null) it else it.header("Content-Type", "application/json").body(body) },
+                )
+
+                listOf("mystery.permission", "Legacy.Key").forEach { stored ->
+                    host.context.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate("INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES (:role, :permission)")
+                            .bind("role", manager.value)
+                            .bind("permission", stored)
+                            .execute()
+                    }
+
+                    listOf(
+                        send(Method.GET, "/admin/access/roles/${manager.value}"),
+                        send(Method.GET, "/admin/access/roles"),
+                        send(Method.PATCH, "/admin/access/roles/${manager.value}", """{"displayName":"Renamed","description":null}"""),
+                    ).forEach { response ->
+                        response.status shouldBe Status.INTERNAL_SERVER_ERROR
+                        response.json()["code"]!!.jsonPrimitive.content shouldBe "internal_failure"
+                        response.bodyString().contains(stored) shouldBe false
+                    }
+
+                    val repaired =
+                        send(
+                            Method.PUT,
+                            "/admin/access/roles/${manager.value}/permissions",
+                            """{"permissions":["commerce.principal.read"]}""",
+                        )
+                    repaired.status shouldBe Status.OK
+                    repaired.bodyString().contains(stored) shouldBe false
+                    send(Method.GET, "/admin/access/roles/${manager.value}").json()["displayName"]!!.jsonPrimitive.content shouldBe
+                        "Manager"
+                    send(Method.GET, "/admin/access/roles").status shouldBe Status.OK
+                }
+            }
+        }
+
         test("an unknown grant stored after startup fails enforcement and the current principal closed") {
             withHost { host ->
                 val (user, token) = host.user("reader", setOf(CommercePermissions.RoleRead))

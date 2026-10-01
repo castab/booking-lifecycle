@@ -186,6 +186,17 @@ internal class AuthorizationRepository {
             .bind("id", PrincipalIdColumns.value(id))
             .execute() != 0
 
+    /** Whether [key] is defined, without reading its grants. */
+    fun roleExists(
+        tx: Transaction,
+        key: RoleKey,
+    ): Boolean =
+        tx.handle
+            .createQuery("SELECT EXISTS (SELECT 1 FROM commerce.roles WHERE role_key = :key)")
+            .bind("key", key.value)
+            .mapTo(Boolean::class.java)
+            .one()
+
     fun roles(tx: Transaction): List<RoleDefinition> =
         tx.handle
             .createQuery("SELECT * FROM commerce.roles ORDER BY role_key")

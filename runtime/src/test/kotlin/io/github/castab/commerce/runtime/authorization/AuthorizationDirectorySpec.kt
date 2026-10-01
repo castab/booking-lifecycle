@@ -535,6 +535,72 @@ class AuthorizationDirectorySpec :
             }
         }
 
+        test("role reads and role mutations fail closed on a stored grant outside the catalog") {
+            val database = TestDatabase.create()
+            try {
+                lateinit var context: CommerceRuntimeContext
+                commerceRuntime(
+                    database.configuration(),
+                    ApplicationContributions(routes = {
+                        context = it
+                        emptyList()
+                    }),
+                ).use {
+                    val auth = context.authorization
+                    val operator = auth.createUser(user("operator"))
+                    val other = auth.createUser(user("other"))
+                    val manager = RoleKey("example.manager")
+                    val clean = role("example.clean", setOf(CommercePermissions.RoleRead))
+                    auth.createRole(role(manager.value, setOf(CommercePermissions.PrincipalRead)))
+                    auth.createRole(clean)
+                    auth.assignRole(operator.id, manager)
+
+                    fun corrupt(
+                        role: RoleKey,
+                        stored: String,
+                    ) = context.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate("INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES (:role, :permission)")
+                            .bind("role", role.value)
+                            .bind("permission", stored)
+                            .execute()
+                    }
+
+                    // Both a well-formed unknown key and a malformed legacy value fail through the
+                    // deliberate stored-grant diagnostic, never as a PermissionKey format error.
+                    listOf("mystery.permission", "Legacy.Key").forEach { stored ->
+                        corrupt(manager, stored)
+                        val diagnostic = "Stored role permissions missing from PermissionCatalog: $stored"
+
+                        listOf<() -> Any?>(
+                            { auth.permissionResolver.permissionsFor(operator.id) },
+                            { auth.roleResolver.resolve(manager) },
+                            { auth.getRole(manager) },
+                            { auth.listRoles() },
+                            { auth.updateRoleDetails(manager, "Renamed", "Would keep the unknown grant") },
+                            { auth.assignRole(other.id, manager) },
+                        ).forEach { read -> shouldThrow<IllegalStateException> { read() }.message shouldBe diagnostic }
+                        auth.assignedRoles(other.id) shouldBe emptySet()
+                        auth.getRole(clean.key) shouldBe clean
+
+                        // Replacing every grant reads none of the stale ones, so it is the explicit repair.
+                        auth.replaceRolePermissions(manager, setOf(CommercePermissions.PrincipalRead)).permissions shouldBe
+                            setOf(CommercePermissions.PrincipalRead)
+                        auth.getRole(manager)!!.displayName shouldBe manager.value
+                        auth.listRoles().map { it.key } shouldBe listOf(clean.key, manager)
+                        auth.permissionResolver.permissionsFor(operator.id) shouldBe setOf(CommercePermissions.PrincipalRead)
+                    }
+
+                    // An unassigned role with an unknown grant can still be deleted.
+                    corrupt(clean.key, "mystery.permission")
+                    auth.deleteRole(clean.key)
+                    auth.listRoles().map { it.key } shouldBe listOf(manager)
+                }
+            } finally {
+                database.close()
+            }
+        }
+
         test("a grant inserted after startup fails closed during live permission resolution") {
             val database = TestDatabase.create()
             try {

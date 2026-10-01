@@ -382,7 +382,10 @@ definitions, permission mappings, and assignments; it provides live resolver por
 transaction-aware administration. Credentials, login and bootstrap policy, and vertical
 staff profiles remain application-owned. `ApplicationContributions.permissionDefinitions`
 adds code-backed permission metadata; runtime composition rejects duplicate keys, and
-role mutations reject unknown keys.
+role mutations reject unknown keys. Every `RoleDefinition` the directory returns passes its
+one catalog-validating read (raw stored values first, then the hydrated grants); do not
+read roles from `AuthorizationRepository` around it. Corrupt grants fail closed, are never
+filtered or repaired on read, and are replaced only by an explicit `replaceRolePermissions`.
 
 The `PermissionCatalog` is the running application's vocabulary: the runtime's
 `commercePermissionDefinitions` plus the application's definitions. It answers only "which
