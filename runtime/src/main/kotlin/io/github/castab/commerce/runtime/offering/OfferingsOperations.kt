@@ -186,13 +186,16 @@ class UpdateOffering(
         price: OfferingPrice? = null,
         selectionState: OfferingSelectionState,
         availability: OfferingAvailability,
+        badge: String? = null,
+        statusNote: String? = null,
     ): CatalogResult<Offering> =
         transactor.inTransaction { transaction ->
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             requireExpectedRevision(latest, expectedRevision)
             requireActiveOffering(repository, transaction, latest, key)
             requireCategory(latest, category)
-            val replacement = validating { Offering(key, category, displayName, description, price, selectionState, availability) }
+            val replacement =
+                validating { Offering(key, category, displayName, description, price, selectionState, availability, badge, statusNote) }
             val next = latest.replaceOffering(key, replacement)
             repository.insert(transaction, next)
             CatalogResult(next.reference, replacement)
@@ -237,6 +240,8 @@ class RestoreOffering(
         price: OfferingPrice? = null,
         selectionState: OfferingSelectionState,
         availability: OfferingAvailability,
+        badge: String? = null,
+        statusNote: String? = null,
     ): CatalogResult<Offering> =
         transactor.inTransaction { transaction ->
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
@@ -248,7 +253,8 @@ class RestoreOffering(
                 throw CommerceFailure.NotFound("Offering ${key.value} was not found")
             }
             requireCategory(latest, category)
-            val replacement = validating { Offering(key, category, displayName, description, price, selectionState, availability) }
+            val replacement =
+                validating { Offering(key, category, displayName, description, price, selectionState, availability, badge, statusNote) }
             val next = latest.revise(latest.categories, latest.offerings + replacement)
             repository.insert(transaction, next)
             CatalogResult(next.reference, replacement)

@@ -148,7 +148,17 @@ fun offeringsHttpCapability(
     val sampleCategory = OfferingCategoryDto("choice", "Choice", "An optional choice", 0, 2)
     val samplePrice = OfferingPriceDto("PER_QUANTITY", "0.75", "USD", "guest")
     val sampleOffering =
-        OfferingDto("item", "choice", "Item", "An item", samplePrice, OfferingSelectionStateDto.ENABLED, OfferingAvailabilityDto.AVAILABLE)
+        OfferingDto(
+            "item",
+            "choice",
+            "Item",
+            "An item",
+            samplePrice,
+            OfferingSelectionStateDto.ENABLED,
+            OfferingAvailabilityDto.AVAILABLE,
+            "Popular",
+            "Back this fall",
+        )
     val sampleOfferingMutation =
         OfferingMutationDto(
             3,
@@ -158,6 +168,8 @@ fun offeringsHttpCapability(
             samplePrice,
             OfferingSelectionStateDto.ENABLED,
             OfferingAvailabilityDto.AVAILABLE,
+            "Popular",
+            "Back this fall",
         )
     val sampleCategoryMutation = OfferingCategoryMutationDto(3, "Choice", "An optional choice", 0, 2)
     val sampleAddOffering =
@@ -170,6 +182,8 @@ fun offeringsHttpCapability(
             samplePrice,
             OfferingSelectionStateDto.ENABLED,
             OfferingAvailabilityDto.AVAILABLE,
+            "Popular",
+            "Back this fall",
         )
     val sampleAddCategory = AddOfferingCategoryDto(1, "choice", "Choice", "An optional choice", 0, 2)
     // Examples follow one coherent history: initialization creates an empty r1, adding the
@@ -398,6 +412,8 @@ fun offeringsHttpCapability(
                                 value.price,
                                 value.selectionState,
                                 value.availability,
+                                value.badge,
+                                value.statusNote,
                             ).offeringDto(),
                     )
                 }
@@ -461,6 +477,8 @@ fun offeringsHttpCapability(
                                 value.price,
                                 value.selectionState,
                                 value.availability,
+                                value.badge,
+                                value.statusNote,
                             ).offeringDto(),
                     )
                 }

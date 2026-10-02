@@ -799,7 +799,11 @@ strongly typed in the application.
 `io.github.castab.commerce.offering` describes commercial choices without
 defining a particular business's catalog or price policy. An `Offering` has a stable
 `OfferingKey`, one `OfferingCategoryKey`, presentation text, and an optional
-`OfferingPrice`, plus selection state and availability. An `OfferingCategory` has a stable
+`OfferingPrice`, plus selection state and availability. Presentation text is the required
+`displayName` and the optional `description`, `badge` (a short label shown with the offering
+at all times, such as "Popular"), and `statusNote` (the offering's current situation, such
+as "Back this fall"). Optional text is absent or nonblank. A status note is descriptive only:
+it neither implies nor overrides selection state or availability. An `OfferingCategory` has a stable
 key and min/max selection counts:
 `0..1` is optional single selection, `1..1` required single selection, and a null maximum
 is unbounded. The category and offering order supplied to a snapshot is preserved.

@@ -520,7 +520,8 @@ never by serializing domain types:
  "offerings": [{"key": "basic", "category": "tier", "displayName": "Basic", "description": null,
                 "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
                           "seconds": 3600, "nanos": 123456789},
-                "selectionState": "ENABLED", "availability": "AVAILABLE"}]}
+                "selectionState": "ENABLED", "availability": "AVAILABLE",
+                "badge": null, "statusNote": null}]}
 ```
 
 An offering's `price` is `null`, or has a `kind` of `FIXED`, `PER_QUANTITY` (adds
@@ -582,6 +583,11 @@ V1-V7 remain unchanged. V8 refuses preexisting offering rows because no historic
 selection states exist to restore; recreate the ephemeral database instead of backfilling.
 `V9` keeps both as required properties of each stored offering. The repository writes and
 restores them explicitly and rejects a missing, null, or unknown stored value.
+
+`V11__offering_badge_and_status_note.sql` changes no table. Every stored offering now has
+`badge` and `statusNote` properties (`null` or nonblank text), and strict decoding cannot
+read an older catalog, so V11 refuses a populated `commerce.offerings_snapshots` instead of
+converting it; recreate the ephemeral database.
 
 ### Offerings catalog operations and HTTP
 
@@ -739,7 +745,7 @@ two catalogs are mounted in one host contract.
 PUT and restore POST use `OfferingMutationDto` or `OfferingCategoryMutationDto`, with
 the identity taken only from the path. Both require integer `expectedRevision`.
 Offering bodies also require `selectionState`, `availability`, `category`, and `displayName`,
-optional `description`, and optional `price`; category bodies contain `displayName`,
+optional `description`, `badge`, `statusNote`, and `price`; category bodies contain `displayName`,
 optional `description`, `minimumSelections` (default 0), and `maximumSelections`
 (default null). These are complete replacements: omitted optional values reset to their
 defaults. They reuse the existing DTO domain conversion and validation. Unknown additive
@@ -798,8 +804,10 @@ For an offering that is both disabled and unavailable, disabled takes precedence
 `OFFERING_DISABLED` is reported. This chooses the rejection reason; it does not constrain
 or alter either stored fact. `offeringsValidationFailed` preserves these codes in 422
 structured violations. Applications own context-specific capacity/stock policy and should use the current catalog for new orders;
-historical reads retain the selection semantics at their revision. Labels, badges, and other
-presentation behavior belong to the consuming application or its BFF.
+historical reads retain the selection semantics at their revision. Offerings carry optional
+`badge` and `statusNote` text with their other presentation text; a status note neither implies
+nor overrides `selectionState` or `availability`. How a client renders that text (chips,
+labels, popovers) belongs to the consuming application or its BFF.
 
 Path parameters fail the same way as bodies: a non-integer revision is
 `malformed_request` (400); a revision below 1, or a category or offering key that is
@@ -808,7 +816,8 @@ revision, category, or offering is `not_found` (404). Each route's OpenAPI metad
 the error statuses among these that the route can actually return. It does not evaluate
 an `OfferingsEngine` or own any application catalog contents. Lifecycle state conflicts
 are `conflict` (409). Released migrations, including `V2__offerings_snapshots.sql`,
-remain unchanged; V8 added strict selection and availability columns and V9 stores catalog contents in the snapshot row.
+remain unchanged; V8 added strict selection and availability columns, V9 stores catalog contents in the snapshot row,
+and V11 adds the badge and status note properties to stored offerings.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
 schema node; it operates on schema values before OpenAPI serialization and does not
 traverse example, default, const, or extension payloads as schemas.

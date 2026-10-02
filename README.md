@@ -144,6 +144,8 @@ Active offerings expose required `selectionState` (`ENABLED`/`DISABLED`) and
 readable. All four combinations are valid independent facts; neither field implies the
 other. Disabled takes precedence over unavailable for the reported selection rejection
 reason, returning only `OFFERING_DISABLED` when both apply.
+Offerings also carry optional `badge` and `statusNote` presentation text beside
+`description`; omitting them from an update or restore clears them.
 Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
 list the enums without a cross-field exclusion. Kotlin update and restore operations also
 require both fields explicitly; new domain construction retains enabled/available defaults.

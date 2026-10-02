@@ -197,13 +197,31 @@ private fun Any.withCompletePriceShape(): Any {
 
     fun OfferingPriceDto?.completeOrSample() = (this ?: OfferingPriceDto("FIXED", "1.00", "USD")).complete()
 
-    fun OfferingDto.complete() = copy(description = description ?: "Description", price = price.completeOrSample())
+    fun OfferingDto.complete() =
+        copy(
+            description = description ?: "Description",
+            price = price.completeOrSample(),
+            badge = badge ?: "Badge",
+            statusNote = statusNote ?: "Status note",
+        )
     return when (this) {
         is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
-        is AddOfferingDto -> copy(description = description ?: "Description", price = price.completeOrSample())
-        is OfferingMutationDto -> copy(description = description ?: "Description", price = price.completeOrSample())
+        is AddOfferingDto ->
+            copy(
+                description = description ?: "Description",
+                price = price.completeOrSample(),
+                badge = badge ?: "Badge",
+                statusNote = statusNote ?: "Status note",
+            )
+        is OfferingMutationDto ->
+            copy(
+                description = description ?: "Description",
+                price = price.completeOrSample(),
+                badge = badge ?: "Badge",
+                statusNote = statusNote ?: "Status note",
+            )
         is RetiredOfferingsDto -> copy(offerings = offerings.map { it.copy(offering = it.offering.complete()) })
         is OfferingResultDto -> copy(offering = offering.complete())
         is OfferingsDto -> copy(offerings = offerings.map { it.complete() })

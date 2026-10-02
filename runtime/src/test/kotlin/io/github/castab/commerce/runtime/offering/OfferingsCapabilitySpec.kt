@@ -28,6 +28,7 @@ import io.github.castab.commerce.staff.PermissionResolver
 import io.github.castab.commerce.staff.ServiceId
 import io.github.castab.commerce.staff.UserId
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
@@ -1209,6 +1210,61 @@ class OfferingsCapabilitySpec :
             }
         }
 
+        test("HTTP carries badge and status note as optional text replaced with the rest of the offering") {
+            val base = "/catalog-b"
+            request(Method.POST, "$base/categories", """{"key":"notes","displayName":"Notes"}""").status shouldBe Status.CREATED
+            val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
+            listOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto").forEach { name ->
+                val schema = schemas[name]!!.jsonObject
+                val properties = schema["properties"]!!.jsonObject
+                listOf("badge", "statusNote").forEach { field ->
+                    withClue("$name.$field") {
+                        // Declared exactly like the optional description text.
+                        properties[field]!!.jsonObject.minus("example") shouldBe
+                            properties["description"]!!.jsonObject.minus("example")
+                        schema["required"]!!.jsonArray.map { it.jsonPrimitive.content }.contains(field) shouldBe false
+                    }
+                }
+            }
+            val path = "$base/offerings/peanut-butter"
+            val noted =
+                """{"category":"notes","displayName":"Peanut Butter","description":"Contains peanuts",
+                    "selectionState":"ENABLED","availability":"UNAVAILABLE","badge":"Popular","statusNote":"Back this fall"}"""
+            request(Method.POST, "$base/offerings", noted.replaceFirst("{", """{"key":"peanut-butter",""")).status shouldBe
+                Status.CREATED
+            request(Method.GET, path).json()["offering"]!!.jsonObject.let { offering ->
+                offering["badge"]!!.jsonPrimitive.content shouldBe "Popular"
+                offering["statusNote"]!!.jsonPrimitive.content shouldBe "Back this fall"
+                offering["availability"]!!.jsonPrimitive.content shouldBe "UNAVAILABLE"
+            }
+            listOf("badge", "statusNote").forEach { field ->
+                val before = request(Method.GET, base).json()
+                request(Method.PUT, path, noted.replace(Regex(""""$field":"[^"]*""""), """"$field":" """")).let {
+                    it.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    it.json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
+                }
+                request(Method.GET, base).json() shouldBe before
+            }
+            // An update is a full replacement: omitted optional text is absent afterwards, like description.
+            val plain = """{"category":"notes","displayName":"Peanut Butter","selectionState":"ENABLED","availability":"AVAILABLE"}"""
+            request(Method.PUT, path, plain).status shouldBe Status.OK
+            request(Method.GET, path).json()["offering"]!!.jsonObject.let { offering ->
+                offering.containsKey("badge") shouldBe false
+                offering.containsKey("statusNote") shouldBe false
+                offering.containsKey("description") shouldBe false
+            }
+            request(Method.PUT, path, noted).status shouldBe Status.OK
+            request(Method.DELETE, path).status shouldBe Status.OK
+            request(Method.GET, "$base/retired/offerings")
+                .json()["offerings"]!!
+                .jsonArray
+                .map { it.jsonObject["offering"]!!.jsonObject }
+                .single { it["key"]!!.jsonPrimitive.content == "peanut-butter" }["badge"]!!
+                .jsonPrimitive.content shouldBe "Popular"
+            request(Method.POST, "$path/restore", plain).status shouldBe Status.OK
+            request(Method.GET, path).json()["offering"]!!.jsonObject.containsKey("badge") shouldBe false
+        }
+
         test("OpenAPI selection enums remain strict when an offering example has no price") {
             val body = jsonBody(OfferingDto.serializer())
             val sample =
@@ -1252,6 +1308,8 @@ class OfferingsCapabilitySpec :
             val actual = host(Request(Method.GET, "/item")).json()
             actual.containsKey("price") shouldBe false
             actual.containsKey("description") shouldBe false
+            actual.containsKey("badge") shouldBe false
+            actual.containsKey("statusNote") shouldBe false
             actual["selectionState"]!!.jsonPrimitive.content shouldBe "DISABLED"
             actual["availability"]!!.jsonPrimitive.content shouldBe "AVAILABLE"
         }

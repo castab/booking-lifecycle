@@ -158,7 +158,8 @@ class OfferingsSnapshotRepositorySpec :
                     listOf(category("second", "shown first"), category("first")),
                     listOf(
                         offering("none", "second"),
-                        offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00"))),
+                        offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00")))
+                            .copy(badge = "Popular", statusNote = "Back this fall"),
                         offering("quantity", "first", price = OfferingPrice.PerQuantity(money("0.7500", eur), QuantityDimension("item"))),
                         offering(
                             "duration",
@@ -229,7 +230,8 @@ class OfferingsSnapshotRepositorySpec :
                     listOf(category("second", "shown first"), category("first").copy(minimumSelections = 1, maximumSelections = null)),
                     listOf(
                         offering("none", "second"),
-                        offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00"))),
+                        offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00")))
+                            .copy(badge = "Popular", statusNote = "Back this fall"),
                         offering("quantity", "first", price = OfferingPrice.PerQuantity(money("0.7500", eur), QuantityDimension("item")))
                             .copy(selectionState = OfferingSelectionState.DISABLED),
                         offering(
@@ -251,17 +253,18 @@ class OfferingsSnapshotRepositorySpec :
                          "minimumSelections": 1, "maximumSelections": null}],
                        "offerings": [
                         {"key": "none", "category": "second", "displayName": "none", "description": null, "price": null,
-                         "selectionState": "ENABLED", "availability": "AVAILABLE"},
+                         "selectionState": "ENABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null},
                         {"key": "fixed", "category": "first", "displayName": "fixed", "description": "a fixed price",
                          "price": {"kind": "FIXED", "amount": "120.00", "currency": "USD"},
-                         "selectionState": "ENABLED", "availability": "AVAILABLE"},
+                         "selectionState": "ENABLED", "availability": "AVAILABLE",
+                         "badge": "Popular", "statusNote": "Back this fall"},
                         {"key": "quantity", "category": "first", "displayName": "quantity", "description": null,
                          "price": {"kind": "PER_QUANTITY", "amount": "0.7500", "currency": "EUR", "dimension": "item"},
-                         "selectionState": "DISABLED", "availability": "AVAILABLE"},
+                         "selectionState": "DISABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null},
                         {"key": "duration", "category": "second", "displayName": "duration", "description": null,
                          "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
                                    "seconds": 3600, "nanos": 123456789},
-                         "selectionState": "ENABLED", "availability": "UNAVAILABLE"}]}""",
+                         "selectionState": "ENABLED", "availability": "UNAVAILABLE", "badge": null, "statusNote": null}]}""",
                 )
             transactor.inTransaction { repository.retrieveVersion(it, first.reference) } shouldBe first
         }
@@ -282,6 +285,9 @@ class OfferingsSnapshotRepositorySpec :
                 // wrong shape
                 "catalog || '{\"unexpected\": 1}'::jsonb",
                 "catalog #- '{offerings,0,description}'",
+                "catalog #- '{offerings,0,badge}'",
+                "catalog #- '{offerings,0,statusNote}'",
+                "jsonb_set(catalog, '{offerings,0,badge}', '1'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,unexpected}', '1'::jsonb)",
                 "jsonb_set(catalog, '{categories,0,minimumSelections}', '\"0\"'::jsonb)",
                 "jsonb_set(catalog, '{categories,0,minimumSelections}', 'null'::jsonb)",
@@ -298,6 +304,8 @@ class OfferingsSnapshotRepositorySpec :
                 // each value is well formed but a domain invariant is broken
                 "jsonb_set(catalog, '{offerings,0,key}', '\"has space\"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,displayName}', '\" \"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,badge}', '\" \"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,statusNote}', '\"\"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,1,key}', '\"item\"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,category}', '\"absent\"'::jsonb)",
                 "jsonb_set(catalog, '{categories,1,key}', '\"choice\"'::jsonb)",

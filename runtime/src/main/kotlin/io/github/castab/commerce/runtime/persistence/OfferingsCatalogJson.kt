@@ -26,7 +26,8 @@ import java.time.Duration
  *                                | {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
  *                                   "seconds": 3600, "nanos": 123456789},
  *                  "selectionState": "ENABLED" | "DISABLED",
- *                  "availability": "AVAILABLE" | "UNAVAILABLE"}]}
+ *                  "availability": "AVAILABLE" | "UNAVAILABLE",
+ *                  "badge": null | "...", "statusNote": null | "..."}]}
  * ```
  *
  * Every property is required, with `null` written explicitly where a value is absent. Price
@@ -58,6 +59,8 @@ internal class OfferingJson(
     val price: OfferingPriceJson?,
     val selectionState: String,
     val availability: String,
+    val badge: String?,
+    val statusNote: String?,
 )
 
 @Serializable
@@ -107,6 +110,8 @@ internal fun Offering.toStored(): OfferingJson =
                 OfferingAvailability.AVAILABLE -> "AVAILABLE"
                 OfferingAvailability.UNAVAILABLE -> "UNAVAILABLE"
             },
+        badge = badge,
+        statusNote = statusNote,
     )
 
 private fun OfferingPrice.toStored(): OfferingPriceJson =
@@ -153,6 +158,8 @@ internal fun OfferingJson.restore(): Offering =
             "UNAVAILABLE" -> OfferingAvailability.UNAVAILABLE
             else -> error("Unsupported offering availability: $availability")
         },
+        badge,
+        statusNote,
     )
 
 private fun OfferingPriceJson.restore(): OfferingPrice =

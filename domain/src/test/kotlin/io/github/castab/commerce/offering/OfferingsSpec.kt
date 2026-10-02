@@ -68,6 +68,26 @@ class OfferingsSpec :
             }
         }
 
+        test("badge and status note are optional nonblank text independent of selection and availability") {
+            val normal = offering("item", "choice")
+            normal.badge shouldBe null
+            normal.statusNote shouldBe null
+            val noted =
+                normal.copy(
+                    availability = OfferingAvailability.UNAVAILABLE,
+                    badge = "Popular",
+                    statusNote = "Back this fall",
+                )
+            noted.badge shouldBe "Popular"
+            noted.statusNote shouldBe "Back this fall"
+            noted.availability shouldBe OfferingAvailability.UNAVAILABLE
+            normal.copy(statusNote = "Sold out until spring").availability shouldBe OfferingAvailability.AVAILABLE
+            listOf("", " ", "	").forEach { blank ->
+                shouldThrow<IllegalArgumentException> { normal.copy(badge = blank) }
+                shouldThrow<IllegalArgumentException> { normal.copy(statusNote = blank) }
+            }
+        }
+
         test("disabled and unavailable remain readable and reject selections before policy while retirement stays absent") {
             val normal = offering("normal", "choice")
             val disabled = offering("disabled", "choice").copy(selectionState = OfferingSelectionState.DISABLED)

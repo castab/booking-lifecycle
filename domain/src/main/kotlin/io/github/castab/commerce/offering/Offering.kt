@@ -100,6 +100,11 @@ enum class OfferingAvailability {
  * One commercial item, service, or choice in exactly one category at a catalog revision.
  * Selection configuration and fulfillment availability are independent; all four combinations
  * are valid. Disabled and unavailable offerings remain readable but cannot be selected.
+ *
+ * [displayName], [description], [badge], and [statusNote] are presentation text, distinct from
+ * the machine [key]. [badge] is a short label meant to be shown with the offering at all times.
+ * [statusNote] describes the offering's current situation; it is descriptive text only and
+ * neither implies nor overrides [selectionState] or [availability]. Both are absent or nonblank.
  */
 data class Offering(
     val key: OfferingKey,
@@ -109,8 +114,12 @@ data class Offering(
     val price: OfferingPrice? = null,
     val selectionState: OfferingSelectionState = OfferingSelectionState.ENABLED,
     val availability: OfferingAvailability = OfferingAvailability.AVAILABLE,
+    val badge: String? = null,
+    val statusNote: String? = null,
 ) {
     init {
         require(displayName.isNotBlank()) { "Offering $key must have a nonblank display name" }
+        require(badge == null || badge.isNotBlank()) { "Offering $key badge must be absent or nonblank" }
+        require(statusNote == null || statusNote.isNotBlank()) { "Offering $key status note must be absent or nonblank" }
     }
 }

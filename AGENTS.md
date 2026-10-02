@@ -189,7 +189,8 @@ migration stream has the empty `V1__commerce_baseline.sql`, the offerings `V2` m
 the principal sessions `V3` migration, the authorization directory `V4` migration, the
 financial ledger `V5` migration, the refunds `V6` migration, the document timestamp
 `V7` migration, the offering selection/availability `V8` migration, the aggregate
-snapshots `V9` migration, and the service credentials `V10` migration. Do not create
+snapshots `V9` migration, the service credentials `V10` migration, and the offering
+badge/status note `V11` migration. Do not create
 placeholder commerce tables or fake repositories.
 
 The first financial-ledger slice persists immutable financial-document snapshots,
@@ -620,7 +621,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes, `Authentication.kt` (`RequestAuthenticator`, `authentication`), and `Authorization.kt` (the `authenticatedPrincipal` lens, `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, `V5` financial ledger, `V6` refunds, `V7` document timestamps, `V8` offering selection and availability, `V9` aggregate snapshots, and `V10` service credentials; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, `V5` financial ledger, `V6` refunds, `V7` document timestamps, `V8` offering selection and availability, `V9` aggregate snapshots, `V10` service credentials, and `V11` offering badge and status note; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, the stored JSON shape and malformed-JSON rejection, historical key and retired-value queries, revision rejection, and cross-schema atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/FinancialDocumentRepositorySpec.kt` | One-row snapshot round trips, the stored lines shape, malformed-lines rejection, history and latest reads, successor conflicts, and payment allocations' exact-version reference. |
@@ -1247,6 +1248,18 @@ unknown enum values are malformed (400). All four enum combinations are accepted
 The OpenAPI renderer declares both enums and required fields with no cross-field exclusion.
 `UpdateOffering` and `RestoreOffering` require both properties explicitly, even when
 changing unrelated fields; only new domain construction provides enabled/available defaults.
+
+An offering also carries optional presentation text beside `displayName` and
+`description`: `badge` (a short label shown with the offering at all times) and
+`statusNote` (its current situation, such as "Back this fall"). Each is absent or
+nonblank; the domain validates and never trims. `statusNote` is descriptive only and
+neither implies nor overrides `selectionState` or `availability`. Name such fields for
+their meaning, never for a widget (`chip`, `popover`, `tooltip`): how a client renders them
+is the consuming application's choice. Both are required properties of every stored
+offering (explicit `null` when absent). Over HTTP they are optional like `description`, so
+an update or restore that omits them clears them, as a full replacement does. V11 converts
+no data: it refuses a populated `commerce.offerings_snapshots`, and such ephemeral databases
+must be recreated.
 
 # Repository-wide rules
 
