@@ -1195,8 +1195,8 @@ restore. Retired entries are not flags on active items. No per-item UUIDs, revis
 timestamps, active/deleted flags, key rename, or general reordering are part of this model.
 
 An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
-and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Domain construction defaults to
-`ENABLED` / `AVAILABLE`. All four combinations are valid in construction and `copy`.
+and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Neither has a default: every
+construction states both explicitly. All four combinations are valid in construction and `copy`.
 Selection configuration and fulfillment availability are independent facts: disabled
 means selection is deliberately forbidden, while unavailable means the offering cannot
 currently be fulfilled. Neither property implies or rewrites the other. Both remain in
@@ -1259,6 +1259,16 @@ browser state. Neither protection retries or merges. The repository has no gener
 update or delete: update, retire, and restore are explicit successor-revision commands,
 and `save` accepts only the immediate successor of the current revision.
 
+Offering mutations are batches: `AddOfferings`, `UpdateOfferings`, `RetireOfferings`, and
+`RestoreOfferings` take a non-empty list (offerings, or keys for retire) with no key twice,
+one `expectedRevision`, and produce exactly one successor revision. A batch is all or
+nothing: every item is checked against the same latest revision, and the first invalid
+item fails the whole batch with its usual status, so nothing is saved. Add and restore
+append in batch order; update keeps each offering's position; retire keeps the others'
+order. Update and restore take complete `Offering` values (full replacements). Categories remain
+one at a time. There is no single-offering operation or per-key offering mutation route; a
+one-item batch is the single case.
+
 The Offerings HTTP capability is explicitly mounted and bound to one application-supplied
 catalog ID and base path. Its runtime-owned serializable DTOs translate domain values;
 domain types stay serialization-free. The original http4k contract routes are the single
@@ -1270,10 +1280,15 @@ ordinary reads of the current catalog only and needs no authorization dependency
 through the application's live `AccessControl` (`401` without a principal, `403` without
 the permission). `ReadOnly` never mounts retired management discovery. Ordinary reads
 retain the host's access policy. There is no exact-revision route.
-PUT/POST mutations carry a required integer `expectedRevision` in their JSON bodies;
-DELETE uses the required integer `expectedRevision` query parameter. Missing/malformed
+Offering writes are `POST /offerings` (add), `PUT /offerings` (update), `POST
+/offerings/retire` (body `{expectedRevision, keys}`), and `POST /offerings/restore`, each
+carrying `{expectedRevision, offerings: [...]}` (or `keys`) with each item's key in the
+item. Category PUT/POST mutations carry a required integer `expectedRevision` in their
+JSON bodies, and category DELETE uses the required integer `expectedRevision` query
+parameter; category identity on update/restore remains path-owned. Missing/malformed
 preconditions are 400, domain-invalid revisions are 422, valid mismatches are 409.
-Identity on update/restore remains path-owned. Persistence returns its own
+`GET /offerings/{offeringKey}` stays the item read, so keys such as `retire` remain
+readable. Persistence returns its own
 `RetiredCatalogValue<T>` (last-seen reference plus value); operations translate to
 `CatalogResult`. Persistence must not import the operation-layer result type.
 Hosts rendering these routes with http4k OpenAPI use `offeringsOpenApiRenderer` so the
@@ -1293,8 +1308,9 @@ offering and decode strictly, with no default for a missing, null, or unknown va
 reads and add/update/restore bodies require both non-null enum fields. Missing, null, or
 unknown enum values are malformed (400). All four enum combinations are accepted.
 The OpenAPI renderer declares both enums and required fields with no cross-field exclusion.
-`UpdateOffering` and `RestoreOffering` require both properties explicitly, even when
-changing unrelated fields; only new domain construction provides enabled/available defaults.
+Over HTTP every offering in an add, update, or restore batch states both properties, and
+in Kotlin every `Offering` does, since its constructor has no defaults for them. Do not
+reintroduce defaults for either property.
 
 An offering also carries optional presentation text beside `displayName` and
 `description`: `badge` (a short label shown with the offering at all times),

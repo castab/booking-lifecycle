@@ -26,7 +26,14 @@ private fun offering(
     key: String,
     category: String,
     price: OfferingPrice? = null,
-) = Offering(OfferingKey(key), OfferingCategoryKey(category), key, price = price)
+) = Offering(
+    OfferingKey(key),
+    OfferingCategoryKey(category),
+    key,
+    price = price,
+    selectionState = OfferingSelectionState.ENABLED,
+    availability = OfferingAvailability.AVAILABLE,
+)
 
 private fun snapshot(
     categories: List<OfferingCategory>,
@@ -46,10 +53,9 @@ private fun line(
 
 class OfferingsSpec :
     FunSpec({
-        test("offering defaults and construction and copy preserve all four independent combinations") {
+        // Neither property has a default, so every construction states both; the compiler enforces that.
+        test("offering construction and copy preserve all four independent combinations") {
             val normal = offering("item", "choice")
-            normal.selectionState shouldBe OfferingSelectionState.ENABLED
-            normal.availability shouldBe OfferingAvailability.AVAILABLE
             OfferingSelectionState.entries.forEach { selectionState ->
                 OfferingAvailability.entries.forEach { availability ->
                     val constructed =
@@ -180,7 +186,15 @@ class OfferingsSpec :
             shouldThrow<IllegalArgumentException> { category("bad", 2, 1) }
             shouldThrow<IllegalArgumentException> { category("bad", 0, 0) }
             shouldThrow<IllegalArgumentException> { OfferingCategory(OfferingCategoryKey("bad"), "  ") }
-            shouldThrow<IllegalArgumentException> { Offering(OfferingKey("bad"), OfferingCategoryKey("x"), " ") }
+            shouldThrow<IllegalArgumentException> {
+                Offering(
+                    OfferingKey("bad"),
+                    OfferingCategoryKey("x"),
+                    " ",
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                )
+            }
             offering("plain", "unbounded").price shouldBe null
             OfferingPrice.Fixed(money("120.00")).amount shouldBe money("120.00")
             OfferingPrice.PerQuantity(money("0.75"), QuantityDimension("guest")).dimension shouldBe QuantityDimension("guest")

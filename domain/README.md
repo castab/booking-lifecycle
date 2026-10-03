@@ -810,8 +810,8 @@ key and min/max selection counts:
 is unbounded. The category and offering order supplied to a snapshot is preserved.
 
 An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
-and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Domain construction defaults to
-`ENABLED` / `AVAILABLE`. All four combinations are valid in construction and `copy`.
+and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Neither has a default: every
+construction states both explicitly. All four combinations are valid in construction and `copy`.
 Selection configuration and fulfillment availability are independent facts: disabled
 means selection is deliberately forbidden, while unavailable means the offering cannot
 currently be fulfilled. Neither property implies or rewrites the other. Both remain in

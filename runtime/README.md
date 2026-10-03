@@ -605,10 +605,10 @@ key, `revision integer NOT NULL CHECK (revision >= 1)`, and the `catalog` JSONB)
 ### Offerings catalog operations and HTTP
 
 `io.github.castab.commerce.runtime.offering` provides `CreateOfferingsCatalog`,
-`AddOfferingCategory`, `AddOffering`, `GetOfferingsCatalog`,
+`AddOfferingCategory`, `AddOfferings`, `GetOfferingsCatalog`,
 `ListOfferingCategories`, `GetOfferingCategory`,
-`ListCategoryOfferings`, `ListOfferings`, and `GetOffering`, plus `UpdateOffering`,
-`RetireOffering`, `RestoreOffering`, `UpdateOfferingCategory`, `RetireOfferingCategory`,
+`ListCategoryOfferings`, `ListOfferings`, and `GetOffering`, plus `UpdateOfferings`,
+`RetireOfferings`, `RestoreOfferings`, `UpdateOfferingCategory`, `RetireOfferingCategory`,
 `RestoreOfferingCategory`, `ListRetiredOfferings`, and `ListRetiredCategories`.
 Every operation accepts an
 explicit `OfferingsCatalogId`.
@@ -619,6 +619,15 @@ duplicate keys and duplicate initialization are `Conflict`. Concurrent writers t
 derive the same successor revision serialize on the catalog row, and the later one
 receives `Conflict`. The runtime
 does not retry or merge it; the caller may reload and decide what to do.
+
+Offering mutations are batches. `AddOfferings`, `UpdateOfferings`, and `RestoreOfferings`
+take a list of complete `Offering` values and `RetireOfferings` a list of keys; a list must
+be non-empty and name no key twice (`ValidationFailed` otherwise). Every item is checked
+against the same latest revision, and the first invalid item fails the whole batch with its
+usual failure (`NotFound`, `Conflict`, or `ValidationFailed`), so a batch either saves all of
+its items in exactly one successor revision or saves nothing. Add and restore append in
+batch order, update keeps each offering's position, and retire keeps the others' order. A
+one-item list is the single-offering case. Categories are changed one at a time.
 
 Offering and category keys are durable natural identities within a catalog. Any key
 that has ever been used remains reserved. Latest-snapshot absence means retired; the
@@ -657,7 +666,7 @@ manager. `ReadOnly` does not mount these endpoints. Ordinary reads of the curren
 retain the host-owned read access policy. Paths use `/retired/offerings` and
 `/retired/categories` to keep the legal natural key `retired` accessible on item paths.
 
-Every mutation of an existing catalog, including `AddOffering` and
+Every mutation of an existing catalog, including `AddOfferings` and
 `AddOfferingCategory`, requires `expectedRevision: OfferingsRevision` immediately after
 `catalogId` in the operation signature. `CreateOfferingsCatalog` has no precondition.
 There are two separate concurrency guarantees:
@@ -726,9 +735,10 @@ At the chosen base path, the capability offers:
 | GET, PUT, DELETE | `/categories/{categoryKey}` | Read; replace properties; retire category |
 | POST | `/categories/{categoryKey}/restore` | Restore retired category |
 | GET | `/categories/{categoryKey}/offerings` | Ordered category offerings |
-| GET, POST | `/offerings` | List; append offering |
-| GET, PUT, DELETE | `/offerings/{offeringKey}` | Read; replace properties; retire offering |
-| POST | `/offerings/{offeringKey}/restore` | Restore retired offering |
+| GET, POST, PUT | `/offerings` | List; append a batch of offerings; replace a batch of offerings |
+| POST | `/offerings/retire` | Retire a batch of offerings |
+| POST | `/offerings/restore` | Restore a batch of retired offerings |
+| GET | `/offerings/{offeringKey}` | Read one offering |
 | GET | `/retired/offerings` | Last representations of retired offerings |
 | GET | `/retired/categories` | Last representations of retired categories |
 
@@ -747,20 +757,27 @@ ID supplies all write targets; request DTOs have no catalog ID or successor revi
 They carry the caller's required expected revision instead. The operation ID prefix prevents collisions when
 two catalogs are mounted in one host contract.
 
-PUT and restore POST use `OfferingMutationDto` or `OfferingCategoryMutationDto`, with
-the identity taken only from the path. Both require integer `expectedRevision`.
-Offering bodies also require `selectionState`, `availability`, `category`, and `displayName`,
-optional `description`, `badge`, `statusNote`, `infoNote`, and `price`; category bodies contain `displayName`,
-optional `description`, `minimumSelections` (default 0), and `maximumSelections`
-(default null). These are complete replacements: omitted optional values reset to their
-defaults. They reuse the existing DTO domain conversion and validation. Unknown additive
-fields follow `CommerceJson` conventions and cannot rename the path identity.
-Add POST uses the flat `AddOfferingDto`/`AddOfferingCategoryDto` request, retaining the
-existing new-key properties and adding required integer `expectedRevision`. Response
-DTOs remain unchanged; no precondition is added to ordinary catalog/item responses.
+Offering add (`POST /offerings`), update (`PUT /offerings`), and restore (`POST
+/offerings/restore`) take `OfferingsBatchDto`:
+`{"expectedRevision": 12, "offerings": [{"key": "...", ...}, ...]}`. Each item is a complete
+`OfferingDto` carrying its own key: it requires `key`, `category`, `displayName`,
+`selectionState`, and `availability`, with optional `description`, `badge`, `statusNote`,
+`infoNote`, and `price`. Retire (`POST /offerings/retire`) takes `RetireOfferingsDto`:
+`{"expectedRevision": 12, "keys": ["...", ...]}`. Updates and restores are complete
+replacements: omitted optional values reset to their defaults. Each batch applies in one
+transaction and one successor revision, all or nothing; an empty batch, a repeated key, or
+an invalid key is `422 validation_failed`, and any other invalid item fails the batch with
+its usual status. Responses are `OfferingsDto` (`{"revision": 13, "offerings": [...]}`, 201
+for add and 200 for update and restore) and `CatalogRevisionDto` for retire.
 
-DELETE uses a required integer query parameter for both kinds:
-`DELETE /offerings/{offeringKey}?expectedRevision=12` and
+Category PUT and restore POST use `OfferingCategoryMutationDto`, with the identity taken
+only from the path, and add POST uses the flat `AddOfferingCategoryDto`; all require integer
+`expectedRevision`. Category bodies contain `displayName`, optional `description`,
+`minimumSelections` (default 0), and `maximumSelections` (default null), also as complete
+replacements. They reuse the existing DTO domain conversion and validation. Unknown
+additive fields follow `CommerceJson` conventions and cannot rename the path identity.
+
+Category DELETE uses a required integer query parameter:
 `DELETE /categories/{categoryKey}?expectedRevision=12`. This is directly usable by browser
 clients and declared as a required integer query parameter in OpenAPI. There is no DELETE
 body or ETag machinery. Authentication and permission checks run before body/query
@@ -769,11 +786,11 @@ extraction. Missing, repeated, non-integer, or out-of-range query revisions retu
 integers below 1 use `OfferingsRevision.of` validation and return `422 validation_failed`.
 A valid revision different from latest returns `409 conflict` without a successor.
 
-Update and restore respond 200 with the existing `OfferingResultDto`/`CategoryDto`,
-including successor revision. DELETE responds 200 with `CatalogRevisionDto`, e.g.
-`{"revision": 6}`. Existing add routes retain 201 responses. Malformed mutation bodies
-return 400; invalid values return 422. Stable operation IDs append `UpdateOffering`,
-`RetireOffering`, `RestoreOffering`, `UpdateCategory`, `RetireCategory`, `RestoreCategory`,
+Category update and restore respond 200 with `CategoryDto`, including successor revision,
+and category DELETE responds 200 with `CatalogRevisionDto`, e.g. `{"revision": 6}`. Add
+routes respond 201. Malformed mutation bodies return 400; invalid values return 422. Stable
+operation IDs append `AddOfferings`, `UpdateOfferings`, `RetireOfferings`,
+`RestoreOfferings`, `UpdateCategory`, `RetireCategory`, `RestoreCategory`,
 `ListRetiredOfferings`, or `ListRetiredCategories` to the host's operation ID prefix.
 
 The catalog response groups ordered offerings beneath ordered categories and includes
@@ -794,13 +811,11 @@ values return `400 malformed_request`; all four enum combinations are accepted.
 The OpenAPI renderer lists both enum sets and requires both properties without a
 cross-field exclusion. A disabled or unavailable offering remains active/readable;
 retiring it still removes it from the successor.
-Changing either property uses `UpdateOffering`, retaining identity and position, checking
-`expectedRevision`, and saving the successor. Restoring a retired key also
-supplies both properties explicitly through HTTP. Kotlin `UpdateOffering` and
-`RestoreOffering` callers must also explicitly supply `selectionState` and `availability`,
-even when only changing an unrelated field. Neither parameter has a default; callers
-preserve existing values deliberately in a full replacement. Brand-new domain construction
-still defaults to enabled/available.
+Changing either property uses `UpdateOfferings`, retaining identity and position, checking
+`expectedRevision`, and saving the successor. Restoring a retired key also supplies both
+properties explicitly through HTTP. Kotlin `UpdateOfferings` and `RestoreOfferings` take
+complete `Offering` values, and `Offering` has no defaults for either property, so every
+caller states both.
 
 Selection evaluation remains application-invoked through `OfferingsEngine`, using the
 chosen snapshot. It rejects `DISABLED` with `OFFERING_DISABLED`, `UNAVAILABLE` with

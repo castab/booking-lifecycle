@@ -99,7 +99,8 @@ enum class OfferingAvailability {
 /**
  * One commercial item, service, or choice in exactly one category at a catalog revision.
  * Selection configuration and fulfillment availability are independent; all four combinations
- * are valid. Disabled and unavailable offerings remain readable but cannot be selected.
+ * are valid, and both are always stated explicitly: neither has a default. Disabled and
+ * unavailable offerings remain readable but cannot be selected.
  *
  * [displayName], [description], [badge], [statusNote], and [infoNote] are presentation text,
  * distinct from the machine [key]. [badge] is a short label meant to be shown with the offering at
@@ -113,8 +114,8 @@ data class Offering(
     val displayName: String,
     val description: String? = null,
     val price: OfferingPrice? = null,
-    val selectionState: OfferingSelectionState = OfferingSelectionState.ENABLED,
-    val availability: OfferingAvailability = OfferingAvailability.AVAILABLE,
+    val selectionState: OfferingSelectionState,
+    val availability: OfferingAvailability,
     val badge: String? = null,
     val statusNote: String? = null,
     val infoNote: String? = null,
