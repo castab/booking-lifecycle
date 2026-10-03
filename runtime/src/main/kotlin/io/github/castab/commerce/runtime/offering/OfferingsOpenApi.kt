@@ -203,6 +203,7 @@ private fun Any.withCompletePriceShape(): Any {
             price = price.completeOrSample(),
             badge = badge ?: "Badge",
             statusNote = statusNote ?: "Status note",
+            infoNote = infoNote ?: "Info note",
         )
     return when (this) {
         is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
@@ -214,6 +215,7 @@ private fun Any.withCompletePriceShape(): Any {
                 price = price.completeOrSample(),
                 badge = badge ?: "Badge",
                 statusNote = statusNote ?: "Status note",
+                infoNote = infoNote ?: "Info note",
             )
         is OfferingMutationDto ->
             copy(
@@ -221,6 +223,7 @@ private fun Any.withCompletePriceShape(): Any {
                 price = price.completeOrSample(),
                 badge = badge ?: "Badge",
                 statusNote = statusNote ?: "Status note",
+                infoNote = infoNote ?: "Info note",
             )
         is RetiredOfferingsDto -> copy(offerings = offerings.map { it.copy(offering = it.offering.complete()) })
         is OfferingResultDto -> copy(offering = offering.complete())

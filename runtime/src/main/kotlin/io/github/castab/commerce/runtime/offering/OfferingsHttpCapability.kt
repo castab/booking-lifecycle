@@ -150,6 +150,7 @@ fun offeringsHttpCapability(
             OfferingAvailabilityDto.AVAILABLE,
             "Popular",
             "Back this fall",
+            "Contains peanuts",
         )
     val sampleOfferingMutation =
         OfferingMutationDto(
@@ -162,6 +163,7 @@ fun offeringsHttpCapability(
             OfferingAvailabilityDto.AVAILABLE,
             "Popular",
             "Back this fall",
+            "Contains peanuts",
         )
     val sampleCategoryMutation = OfferingCategoryMutationDto(3, "Choice", "An optional choice", 0, 2)
     val sampleAddOffering =
@@ -176,6 +178,7 @@ fun offeringsHttpCapability(
             OfferingAvailabilityDto.AVAILABLE,
             "Popular",
             "Back this fall",
+            "Contains peanuts",
         )
     val sampleAddCategory = AddOfferingCategoryDto(1, "choice", "Choice", "An optional choice", 0, 2)
     // Examples follow one coherent history: initialization creates an empty r1, adding the
@@ -393,6 +396,7 @@ fun offeringsHttpCapability(
                                 value.availability,
                                 value.badge,
                                 value.statusNote,
+                                value.infoNote,
                             ).offeringDto(),
                     )
                 }
@@ -458,6 +462,7 @@ fun offeringsHttpCapability(
                                 value.availability,
                                 value.badge,
                                 value.statusNote,
+                                value.infoNote,
                             ).offeringDto(),
                     )
                 }

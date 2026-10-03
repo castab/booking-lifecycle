@@ -1185,14 +1185,14 @@ class OfferingsCapabilitySpec :
             }
         }
 
-        test("HTTP carries badge and status note as optional text replaced with the rest of the offering") {
+        test("HTTP carries badge, status note, and info note as optional text replaced with the rest of the offering") {
             val base = "/catalog-b"
             request(Method.POST, "$base/categories", """{"key":"notes","displayName":"Notes"}""").status shouldBe Status.CREATED
             val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
             listOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto").forEach { name ->
                 val schema = schemas[name]!!.jsonObject
                 val properties = schema["properties"]!!.jsonObject
-                listOf("badge", "statusNote").forEach { field ->
+                listOf("badge", "statusNote", "infoNote").forEach { field ->
                     withClue("$name.$field") {
                         // Declared exactly like the optional description text.
                         properties[field]!!.jsonObject.minus("example") shouldBe
@@ -1203,16 +1203,18 @@ class OfferingsCapabilitySpec :
             }
             val path = "$base/offerings/peanut-butter"
             val noted =
-                """{"category":"notes","displayName":"Peanut Butter","description":"Contains peanuts",
-                    "selectionState":"ENABLED","availability":"UNAVAILABLE","badge":"Popular","statusNote":"Back this fall"}"""
+                """{"category":"notes","displayName":"Peanut Butter","description":"Creamy",
+                    "selectionState":"ENABLED","availability":"UNAVAILABLE","badge":"Popular","statusNote":"Back this fall",
+                    "infoNote":"Contains peanuts"}"""
             request(Method.POST, "$base/offerings", noted.replaceFirst("{", """{"key":"peanut-butter",""")).status shouldBe
                 Status.CREATED
             request(Method.GET, path).json()["offering"]!!.jsonObject.let { offering ->
                 offering["badge"]!!.jsonPrimitive.content shouldBe "Popular"
                 offering["statusNote"]!!.jsonPrimitive.content shouldBe "Back this fall"
+                offering["infoNote"]!!.jsonPrimitive.content shouldBe "Contains peanuts"
                 offering["availability"]!!.jsonPrimitive.content shouldBe "UNAVAILABLE"
             }
-            listOf("badge", "statusNote").forEach { field ->
+            listOf("badge", "statusNote", "infoNote").forEach { field ->
                 val before = request(Method.GET, base).json()
                 request(Method.PUT, path, noted.replace(Regex(""""$field":"[^"]*""""), """"$field":" """")).let {
                     it.status shouldBe Status.UNPROCESSABLE_ENTITY
@@ -1226,6 +1228,7 @@ class OfferingsCapabilitySpec :
             request(Method.GET, path).json()["offering"]!!.jsonObject.let { offering ->
                 offering.containsKey("badge") shouldBe false
                 offering.containsKey("statusNote") shouldBe false
+                offering.containsKey("infoNote") shouldBe false
                 offering.containsKey("description") shouldBe false
             }
             request(Method.PUT, path, noted).status shouldBe Status.OK
@@ -1285,6 +1288,7 @@ class OfferingsCapabilitySpec :
             actual.containsKey("description") shouldBe false
             actual.containsKey("badge") shouldBe false
             actual.containsKey("statusNote") shouldBe false
+            actual.containsKey("infoNote") shouldBe false
             actual["selectionState"]!!.jsonPrimitive.content shouldBe "DISABLED"
             actual["availability"]!!.jsonPrimitive.content shouldBe "AVAILABLE"
         }

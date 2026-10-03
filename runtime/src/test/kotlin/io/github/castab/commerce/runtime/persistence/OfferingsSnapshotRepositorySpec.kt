@@ -168,7 +168,7 @@ class OfferingsSnapshotRepositorySpec :
                     listOf(
                         offering("none", "second"),
                         offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00")))
-                            .copy(badge = "Popular", statusNote = "Back this fall"),
+                            .copy(badge = "Popular", statusNote = "Back this fall", infoNote = "Contains peanuts"),
                         offering("quantity", "first", price = OfferingPrice.PerQuantity(money("0.7500", eur), QuantityDimension("item"))),
                         offering(
                             "duration",
@@ -247,7 +247,7 @@ class OfferingsSnapshotRepositorySpec :
                     listOf(
                         offering("none", "second"),
                         offering("fixed", "first", "a fixed price", OfferingPrice.Fixed(money("120.00")))
-                            .copy(badge = "Popular", statusNote = "Back this fall"),
+                            .copy(badge = "Popular", statusNote = "Back this fall", infoNote = "Contains peanuts"),
                         offering("quantity", "first", price = OfferingPrice.PerQuantity(money("0.7500", eur), QuantityDimension("item")))
                             .copy(selectionState = OfferingSelectionState.DISABLED),
                         offering(
@@ -269,18 +269,18 @@ class OfferingsSnapshotRepositorySpec :
                          "minimumSelections": 1, "maximumSelections": null}],
                        "offerings": [
                         {"key": "none", "category": "second", "displayName": "none", "description": null, "price": null,
-                         "selectionState": "ENABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null},
+                         "selectionState": "ENABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null, "infoNote": null},
                         {"key": "fixed", "category": "first", "displayName": "fixed", "description": "a fixed price",
                          "price": {"kind": "FIXED", "amount": "120.00", "currency": "USD"},
                          "selectionState": "ENABLED", "availability": "AVAILABLE",
-                         "badge": "Popular", "statusNote": "Back this fall"},
+                         "badge": "Popular", "statusNote": "Back this fall", "infoNote": "Contains peanuts"},
                         {"key": "quantity", "category": "first", "displayName": "quantity", "description": null,
                          "price": {"kind": "PER_QUANTITY", "amount": "0.7500", "currency": "EUR", "dimension": "item"},
-                         "selectionState": "DISABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null},
+                         "selectionState": "DISABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null, "infoNote": null},
                         {"key": "duration", "category": "second", "displayName": "duration", "description": null,
                          "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
                                    "seconds": 3600, "nanos": 123456789},
-                         "selectionState": "ENABLED", "availability": "UNAVAILABLE", "badge": null, "statusNote": null}],
+                         "selectionState": "ENABLED", "availability": "UNAVAILABLE", "badge": null, "statusNote": null, "infoNote": null}],
                        "retiredCategories": [],
                        "retiredOfferings": []}""",
                 )
@@ -297,10 +297,10 @@ class OfferingsSnapshotRepositorySpec :
                         {"key": "fixed", "category": "first", "displayName": "fixed", "description": "a fixed price",
                          "price": {"kind": "FIXED", "amount": "120.00", "currency": "USD"},
                          "selectionState": "ENABLED", "availability": "AVAILABLE",
-                         "badge": "Popular", "statusNote": "Back this fall"},
+                         "badge": "Popular", "statusNote": "Back this fall", "infoNote": "Contains peanuts"},
                         {"key": "quantity", "category": "first", "displayName": "quantity", "description": null,
                          "price": {"kind": "PER_QUANTITY", "amount": "0.7500", "currency": "EUR", "dimension": "item"},
-                         "selectionState": "DISABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null}],
+                         "selectionState": "DISABLED", "availability": "AVAILABLE", "badge": null, "statusNote": null, "infoNote": null}],
                        "retiredCategories": [
                         {"lastSeenRevision": 1,
                          "category": {"key": "second", "displayName": "second", "description": "shown first",
@@ -309,13 +309,13 @@ class OfferingsSnapshotRepositorySpec :
                         {"lastSeenRevision": 1,
                          "offering": {"key": "none", "category": "second", "displayName": "none", "description": null,
                                       "price": null, "selectionState": "ENABLED", "availability": "AVAILABLE",
-                                      "badge": null, "statusNote": null}},
+                                      "badge": null, "statusNote": null, "infoNote": null}},
                         {"lastSeenRevision": 1,
                          "offering": {"key": "duration", "category": "second", "displayName": "duration", "description": null,
                                       "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
                                                 "seconds": 3600, "nanos": 123456789},
                                       "selectionState": "ENABLED", "availability": "UNAVAILABLE",
-                                      "badge": null, "statusNote": null}}]}""",
+                                      "badge": null, "statusNote": null, "infoNote": null}}]}""",
                 )
         }
 
@@ -344,6 +344,8 @@ class OfferingsSnapshotRepositorySpec :
                 "catalog #- '{offerings,0,description}'",
                 "catalog #- '{offerings,0,badge}'",
                 "catalog #- '{offerings,0,statusNote}'",
+                "catalog #- '{offerings,0,infoNote}'",
+                "jsonb_set(catalog, '{offerings,0,infoNote}', 'true'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,badge}', '1'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,unexpected}', '1'::jsonb)",
                 "jsonb_set(catalog, '{categories,0,minimumSelections}', '\"0\"'::jsonb)",
@@ -366,6 +368,7 @@ class OfferingsSnapshotRepositorySpec :
                 "jsonb_set(catalog, '{offerings,0,displayName}', '\" \"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,badge}', '\" \"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,statusNote}', '\"\"'::jsonb)",
+                "jsonb_set(catalog, '{offerings,0,infoNote}', '\" \"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,1,key}', '\"item\"'::jsonb)",
                 "jsonb_set(catalog, '{offerings,0,category}', '\"absent\"'::jsonb)",
                 "jsonb_set(catalog, '{categories,1,key}', '\"choice\"'::jsonb)",

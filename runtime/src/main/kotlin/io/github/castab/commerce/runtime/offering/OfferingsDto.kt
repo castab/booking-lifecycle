@@ -90,6 +90,7 @@ data class OfferingDto(
     val availability: OfferingAvailabilityDto,
     val badge: String? = null,
     val statusNote: String? = null,
+    val infoNote: String? = null,
 ) {
     fun toDomain(): Offering =
         validating {
@@ -103,6 +104,7 @@ data class OfferingDto(
                 availability.toDomain(),
                 badge,
                 statusNote,
+                infoNote,
             )
         }
 }
@@ -132,9 +134,10 @@ data class AddOfferingDto(
     val availability: OfferingAvailabilityDto,
     val badge: String? = null,
     val statusNote: String? = null,
+    val infoNote: String? = null,
 ) {
     fun toDomain(): Offering =
-        OfferingDto(key, category, displayName, description, price, selectionState, availability, badge, statusNote).toDomain()
+        OfferingDto(key, category, displayName, description, price, selectionState, availability, badge, statusNote, infoNote).toDomain()
 }
 
 /** A new natural category identity appended against the catalog revision the caller observed. */
@@ -162,9 +165,21 @@ data class OfferingMutationDto(
     val availability: OfferingAvailabilityDto,
     val badge: String? = null,
     val statusNote: String? = null,
+    val infoNote: String? = null,
 ) {
     fun toDomain(key: OfferingKey): Offering =
-        OfferingDto(key.value, category, displayName, description, price, selectionState, availability, badge, statusNote).toDomain()
+        OfferingDto(
+            key.value,
+            category,
+            displayName,
+            description,
+            price,
+            selectionState,
+            availability,
+            badge,
+            statusNote,
+            infoNote,
+        ).toDomain()
 }
 
 /** Editable category properties. Identity comes only from the route/operation key. */
@@ -300,6 +315,7 @@ private fun Offering.dto(): OfferingDto =
         },
         badge,
         statusNote,
+        infoNote,
     )
 
 fun OfferingsSnapshot.dto(): OfferingsCatalogDto =

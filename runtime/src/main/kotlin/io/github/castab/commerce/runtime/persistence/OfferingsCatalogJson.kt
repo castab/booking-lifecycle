@@ -29,7 +29,7 @@ import java.time.Duration
  *                                   "seconds": 3600, "nanos": 123456789},
  *                  "selectionState": "ENABLED" | "DISABLED",
  *                  "availability": "AVAILABLE" | "UNAVAILABLE",
- *                  "badge": null | "...", "statusNote": null | "..."}],
+ *                  "badge": null | "...", "statusNote": null | "...", "infoNote": null | "..."}],
  *  "retiredCategories": [{"lastSeenRevision": 3, "category": {...a category...}}],
  *  "retiredOfferings":  [{"lastSeenRevision": 3, "offering": {...an offering...}}]}
  * ```
@@ -87,6 +87,7 @@ internal class OfferingJson(
     val availability: String,
     val badge: String?,
     val statusNote: String?,
+    val infoNote: String?,
 )
 
 @Serializable
@@ -138,6 +139,7 @@ internal fun Offering.toStored(): OfferingJson =
             },
         badge = badge,
         statusNote = statusNote,
+        infoNote = infoNote,
     )
 
 private fun OfferingPrice.toStored(): OfferingPriceJson =
@@ -188,6 +190,7 @@ internal fun OfferingJson.restore(): Offering =
         },
         badge,
         statusNote,
+        infoNote,
     )
 
 private fun OfferingPriceJson.restore(): OfferingPrice =

@@ -801,8 +801,9 @@ defining a particular business's catalog or price policy. An `Offering` has a st
 `OfferingKey`, one `OfferingCategoryKey`, presentation text, and an optional
 `OfferingPrice`, plus selection state and availability. Presentation text is the required
 `displayName` and the optional `description`, `badge` (a short label shown with the offering
-at all times, such as "Popular"), and `statusNote` (the offering's current situation, such
-as "Back this fall"). Optional text is absent or nonblank. A status note is descriptive only:
+at all times, such as "Popular"), `statusNote` (the offering's current situation, such
+as "Back this fall"), and `infoNote` (a lasting fact shown on demand, such as "Contains
+peanuts"). Optional text is absent or nonblank. A status note is descriptive only:
 it neither implies nor overrides selection state or availability. An `OfferingCategory` has a stable
 key and min/max selection counts:
 `0..1` is optional single selection, `1..1` required single selection, and a null maximum

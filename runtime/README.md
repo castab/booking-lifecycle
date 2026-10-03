@@ -523,7 +523,7 @@ never by serializing domain types:
                 "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
                           "seconds": 3600, "nanos": 123456789},
                 "selectionState": "ENABLED", "availability": "AVAILABLE",
-                "badge": null, "statusNote": null}],
+                "badge": null, "statusNote": null, "infoNote": null}],
  "retiredCategories": [],
  "retiredOfferings": [{"lastSeenRevision": 3, "offering": {...an offering...}}]}
 ```
@@ -594,7 +594,7 @@ selection states exist to restore; recreate the ephemeral database instead of ba
 restores them explicitly and rejects a missing, null, or unknown stored value.
 
 `V11__offering_badge_and_status_note.sql` changes no table. Every stored offering now has
-`badge` and `statusNote` properties (`null` or nonblank text), and strict decoding cannot
+`badge`, `statusNote`, and `infoNote` properties (`null` or nonblank text), and strict decoding cannot
 read an older catalog, so V11 refuses a populated `commerce.offerings_snapshots` instead of
 converting it; recreate the ephemeral database.
 
@@ -750,7 +750,7 @@ two catalogs are mounted in one host contract.
 PUT and restore POST use `OfferingMutationDto` or `OfferingCategoryMutationDto`, with
 the identity taken only from the path. Both require integer `expectedRevision`.
 Offering bodies also require `selectionState`, `availability`, `category`, and `displayName`,
-optional `description`, `badge`, `statusNote`, and `price`; category bodies contain `displayName`,
+optional `description`, `badge`, `statusNote`, `infoNote`, and `price`; category bodies contain `displayName`,
 optional `description`, `minimumSelections` (default 0), and `maximumSelections`
 (default null). These are complete replacements: omitted optional values reset to their
 defaults. They reuse the existing DTO domain conversion and validation. Unknown additive
@@ -809,7 +809,7 @@ For an offering that is both disabled and unavailable, disabled takes precedence
 `OFFERING_DISABLED` is reported. This chooses the rejection reason; it does not constrain
 or alter either stored fact. `offeringsValidationFailed` preserves these codes in 422
 structured violations. Applications own context-specific capacity/stock policy and evaluate new orders against the current catalog. Offerings carry optional
-`badge` and `statusNote` text with their other presentation text; a status note neither implies
+`badge`, `statusNote`, and `infoNote` text with their other presentation text; a status note neither implies
 nor overrides `selectionState` or `availability`. How a client renders that text (chips,
 labels, popovers) belongs to the consuming application or its BFF.
 
@@ -821,7 +821,7 @@ the error statuses among these that the route can actually return. It does not e
 an `OfferingsEngine` or own any application catalog contents. Lifecycle state conflicts
 are `conflict` (409). Released migrations, including `V2__offerings_snapshots.sql`,
 remain unchanged; V8 added strict selection and availability columns, V9 stores catalog contents in the snapshot row,
-V11 adds the badge and status note properties to stored offerings,
+V11 adds the badge, status note, and info note properties to stored offerings,
 and V12 keeps one current row per catalog.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
 schema node; it operates on schema values before OpenAPI serialization and does not
