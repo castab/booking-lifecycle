@@ -49,6 +49,19 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
         transaction: Transaction,
         snapshot: FinancialDocument,
     ) {
+        // Document successors and deposit approval share one lineage lock, without locking
+        // payment rows or the snapshot rows that payment foreign keys reference.
+        if (snapshot.previousVersion != null) {
+            val current =
+                try {
+                    lockLineage(transaction, snapshot.id)
+                } catch (_: CommerceFailure.NotFound) {
+                    throw CommerceFailure.Conflict("Financial document ${snapshot.reference} has no stored predecessor")
+                }
+            if (current != snapshot.previousVersion) {
+                throw CommerceFailure.Conflict("Financial document ${snapshot.reference} has a stale predecessor")
+            }
+        }
         val predecessor = snapshot.previousReference?.let { retrieveVersion(transaction, it) }
         if (snapshot.previousReference != null && predecessor == null) {
             throw CommerceFailure.Conflict("Financial document ${snapshot.reference} has no stored predecessor")
@@ -137,7 +150,50 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
             .map { rows, _ -> restore(rows) }
             .list()
 
-    private fun restore(rows: ResultSet): FinancialDocumentVersion {
+    /** Serializes document successors and requirement approvals, including the first approval. */
+    fun lockLineage(
+        transaction: Transaction,
+        id: UUID,
+    ): Version {
+        try {
+            val number =
+                transaction.handle
+                    .createQuery(
+                        """SELECT latest_version FROM commerce.financial_document_lineages
+                   WHERE document_id = :id FOR NO KEY UPDATE""",
+                    ).bind("id", id)
+                    .mapTo(Int::class.java)
+                    .findOne()
+                    .orElse(null)
+                    ?: throw CommerceFailure.NotFound("Financial document $id was not found")
+            return Version.of(number)
+        } catch (e: UnableToExecuteStatementException) {
+            if (e.isSerializationFailure()) {
+                throw CommerceFailure.Conflict(
+                    "Financial document $id changed after the transaction snapshot",
+                    e,
+                )
+            }
+            throw e
+        }
+    }
+
+    /** Set-based current versions; empty input is handled by the ledger before reaching SQL. */
+    fun latestVersions(
+        transaction: Transaction,
+        ids: Collection<UUID>,
+    ): Map<UUID, FinancialDocumentVersion> =
+        transaction.handle
+            .createQuery(
+                """SELECT DISTINCT ON (document_id) document_id, version, stage, created_at, lines::text AS lines
+               FROM commerce.financial_document_snapshots WHERE document_id IN (<ids>)
+               ORDER BY document_id, version DESC""",
+            ).bindList("ids", ids)
+            .map { rows, _ -> restore(rows) }
+            .list()
+            .associateBy { it.document.id }
+
+    internal fun restore(rows: ResultSet): FinancialDocumentVersion {
         val id = rows.getObject("document_id", UUID::class.java)
         val version = Version.of(rows.getInt("version"))
         val what = "financial document $id version ${version.number}"

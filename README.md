@@ -227,6 +227,25 @@ write in that same transaction. The runtime provides no generic document-creatio
 endpoint; the application owns its route, authorization, relationships, and pricing.
 See [the runtime ledger API](runtime/README.md#financial-ledger).
 
+Deposit requirements are generic approved financial terms in `commerce.deposit`. Fixed
+money or an explicit decimal percentage resolves against one exact document snapshot;
+percentage resolution rounds HALF_UP to the currency's minor units. The amount is frozen
+at approval, and later document versions leave it unchanged. `FinancialLedger` appends
+Active replacements/reactivations and Withdrawn revisions to one immutable lineage
+stream, and returns their database creation times. Satisfaction is derived from current
+lineage reconciliation (`netApplied >= requiredAmount`), so a refund can undo financial
+satisfaction. Applications own every workflow consequence; booking remains independent.
+
+V13 adds deposit requirements to populated V12 databases without inventing historical
+requirements. It also maintains each lineage's current snapshot reference for safe
+document/requirement write serialization. `financialLineages(ids)` reads explicit lineages
+with a fixed set of queries in one `REPEATABLE_READ` snapshot: current documents,
+reconciliation, requirements, satisfaction, and objective document/requirement/allocation/
+refund-unwind activity times. Hosts conventionally gate reads with
+`commerce.financial-document.read` and mutations with the new
+`commerce.deposit-requirement.manage`. See the
+[deposit API and concurrency contract](runtime/README.md#deposit-requirements-and-financial-lineage-reads).
+
 The module dependency points one way: `:runtime` → `:domain`, never the reverse. The build
 enforces it. `:domain`'s `check` fails if its runtime classpath ever contains anything
 beyond `kotlin-stdlib`.

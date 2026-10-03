@@ -103,6 +103,31 @@ interface PaymentRepository {
 internal class PostgresPaymentRepository(
     private val documents: FinancialDocumentRepository,
 ) : PaymentRepository {
+    /** Set-based allocation facts across explicit lineages, with no mutation locks. */
+    fun allocationsForLineages(
+        transaction: Transaction,
+        ids: Collection<UUID>,
+    ): List<PaymentAllocation> =
+        transaction.handle
+            .createQuery("SELECT * FROM commerce.payment_allocations WHERE document_id IN (<ids>) ORDER BY allocation_id")
+            .bindList("ids", ids)
+            .map { rows, _ -> allocation(rows) }
+            .list()
+
+    /** Set-based unwinds of the requested lineages' allocations, including fully refunded allocations. */
+    fun refundAllocationsForLineages(
+        transaction: Transaction,
+        ids: Collection<UUID>,
+    ): List<RefundAllocation> =
+        transaction.handle
+            .createQuery(
+                """SELECT ra.* FROM commerce.refund_allocations ra
+               JOIN commerce.payment_allocations a ON a.allocation_id = ra.payment_allocation_id
+               WHERE a.document_id IN (<ids>) ORDER BY ra.refund_allocation_id""",
+            ).bindList("ids", ids)
+            .map { rows, _ -> refundAllocation(rows) }
+            .list()
+
     /** Includes payments never allocated, for the ledger's derived-value discovery. */
     fun payments(transaction: Transaction): List<PaymentRecord> =
         transaction.handle

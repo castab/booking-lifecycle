@@ -1012,6 +1012,102 @@ and policy on which stages accept payments and which refunds are allowed. No fin
 payment, or refund routes are mounted by the runtime in this slice. Existing built-in commerce permission keys remain available
 for an application that exposes its own protected routes.
 
+### Deposit requirements and financial lineage reads
+
+`FinancialLedger` provides immutable, approved deposit terms for financial-document
+lineages. It imposes no stage eligibility or application workflow policy. The domain's
+`DepositTerms.Fixed(Money)` and `DepositTerms.Percentage(BigDecimal)` resolve against the
+exact approved snapshot; the resolved amount is frozen forever. Later document versions
+neither recalculate nor withdraw terms. Active satisfaction is derived on read from
+`FinancialDocumentReconciliation.netApplied >= requiredAmount`; refunds can undo it.
+
+| Ledger API | Contract |
+|---|---|
+| `activateDepositRequirement(documentId, expectedDocumentVersion, terms, expectedRequirementRevision)` | Append Active: first approval, replacement, or reactivation. Both expected tokens must match. Null expects no requirement history, including no withdrawal history. |
+| `withdrawDepositRequirement(documentId, expectedRequirementRevision)` | Append Withdrawn after current Active. Requires no expected document version. |
+| `latestDepositRequirement(documentId)` | Null means never configured; otherwise latest Active or Withdrawn with its timestamp. |
+| `depositRequirementHistory(documentId)` | Complete immutable history, oldest first, empty for never configured. |
+| `financialLineages(documentIds)` | Current coherent financial views of explicit lineages; also suitable for a single lineage. |
+
+Every method also takes a caller-owned `Transaction` as its first argument. Mutations
+return `DepositRequirementVersion(requirement, createdAt)`, a closed read model with a
+database-assigned timestamp. Stale expected tokens return `CommerceFailure.Conflict`;
+missing lineages or withdrawal without history return `NotFound`; an already withdrawn
+requirement returns `IllegalTransition`; invalid approval amounts return `ValidationFailed`.
+Term construction follows the domain's `require` convention and can be wrapped with
+`validating` when translating caller inputs.
+
+```kotlin
+val approval = context.transactor.inTransaction { transaction ->
+    context.financialLedger.activateDepositRequirement(
+        transaction,
+        document.id,
+        document.version,
+        DepositTerms.Percentage(BigDecimal("25")),
+        expectedRequirementRevision = null,
+    )
+    // Application-owned relationship writes may use this same transaction.
+}
+val view = context.financialLedger.financialLineages(listOf(document.id)).single()
+val satisfied: Boolean? = view.depositSatisfied
+```
+
+V13 creates `commerce.deposit_requirement_revisions`, identified by `(document_id,
+revision)`, with immediate predecessor links, one successor per predecessor, an exact
+approval-snapshot foreign key, checked Active/Withdrawn forms, and `created_at` assigned by
+`clock_timestamp()`. Withdrawn contains no terms. Exact decimal values and their original
+scales preserve both original terms and frozen money, including negative BigDecimal
+scales. Restoration validates the original approval snapshot and rejects malformed data
+with `IllegalStateException`. A database trigger rejects UPDATE/DELETE of revisions.
+The migration is additive: existing documents retain their timestamps and payment facts,
+and receive no invented requirement history.
+
+V13 also creates `commerce.financial_document_lineages`, holding only each document ID
+and its current snapshot reference. Snapshot-insert triggers maintain that reference,
+including inserts from older runtimes, and take the lineage lock before inserting a
+successor. It is internal concurrency infrastructure, not another financial fact or a
+balance. Requirements lock this row with `FOR NO KEY UPDATE` before checking both tokens
+and inserting. This protects first approval as well as replacement; competing writers
+receive Conflict. The reference changes when documents advance, so PostgreSQL also
+rejects a stale `REPEATABLE_READ` mutation as Conflict; retry the whole caller transaction.
+Document snapshots and requirement revisions remain immutable. These operations take
+no payment locks, and allocation/refund operations take no lineage locks: payment lock
+order is preserved. Reads take no mutation locks.
+
+`financialLineages(ids)` returns an unmodifiable list of `FinancialLineageView` in the
+input's iteration order. Empty input returns empty output; duplicates fail
+`ValidationFailed`; any missing ID fails `NotFound`, without omitting results. Each view
+contains `latestVersion`, `reconciliation`, nullable `depositRequirement`, nullable
+`depositSatisfied` (only Active has satisfaction), and `activity`. Four set-based queries
+read all requested lineages; no per-lineage queries or transactions are opened.
+
+`FinancialLineageActivity` reports objective facts:
+
+| Property | Event |
+|---|---|
+| `latestDocumentVersionAt` | Latest financial-document version's database creation instant. |
+| `latestDepositRequirementAt` | Latest requirement revision's database creation instant, including withdrawal. |
+| `latestPaymentAllocationAt` | Maximum allocation `allocatedAt` across every version of the lineage. |
+| `latestRefundAllocationAt` | Maximum matching refund-allocation `allocatedAt` that unwound a lineage allocation. |
+| `latestFinancialActivityAt` | Exactly the maximum of these available timestamps. |
+
+Unapplied payments, payment receipt times (including backdated receipts), standalone
+refunds, and unrelated refunds contribute nothing. Fully refunded allocations retain
+their historical allocation activity. Applications decide how to use these facts.
+
+Requirement convenience reads and the whole bulk read use one `REPEATABLE_READ`
+transaction. Their transaction-taking overloads use only the caller's transaction and
+never change its isolation. Choose `REPEATABLE_READ` at the outer boundary for coherent
+concurrent multi-query reads; `READ_COMMITTED` can combine different committed snapshots.
+Inside an application-owned transaction, use the transaction-taking overload rather than
+nesting a convenience method with a conflicting isolation request.
+
+Hosts conventionally gate deposit reads with `CommercePermissions.FinancialDocumentRead`
+and mutations with `CommercePermissions.DepositRequirementManage`
+(`commerce.deposit-requirement.manage`), described in the financial-documents permission
+group. Financial-document creation grants no authority to modify deposits. This package
+adds no deposit HTTP routes; hosts supply their own authorization and transport.
+
 ### Transactions
 
 `Transactor.inTransaction { transaction -> ... }` commits when the block returns and rolls
@@ -1457,7 +1553,9 @@ catalog to keep it so.
 The runtime describes every key in `CommercePermissions` and `RuntimePermissions`. Its own
 routes enforce `OfferingsManage`, `PrincipalRead`, `PrincipalManage`, `RoleRead`,
 `RoleManage`, `RoleAssign`, and `RuntimePermissions.ServiceCredentialManage`; the booking, financial-document, payment, and refund keys are conventional
-names for operations an application enforces.
+names for operations an application enforces. `DepositRequirementManage`
+(`commerce.deposit-requirement.manage`) conventionally gates deposit mutations, and
+`FinancialDocumentRead` gates their reads; both appear in the financial-documents group.
 
 An application contributes its permissions and chooses which routes to mount:
 

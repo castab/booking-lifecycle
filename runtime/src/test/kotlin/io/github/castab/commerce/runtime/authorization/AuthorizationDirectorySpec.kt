@@ -85,7 +85,7 @@ class AuthorizationDirectorySpec :
                     .migrate()
                 dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3")
                 MigrationLifecycle(dataSource).migrate()
-                dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                 dataSource.relationExists("commerce.principal_roles") shouldBe true
             }
         }
@@ -93,7 +93,8 @@ class AuthorizationDirectorySpec :
         test("V4 schema enforces principal kinds, unique normalized usernames, assignments, and references") {
             withTestDatabase { database, dataSource ->
                 commerceRuntime(database.configuration(), ApplicationContributions()).use {
-                    dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                    dataSource.appliedVersions("commerce") shouldBe
+                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                     listOf("principals", "users", "service_identities", "roles", "role_permissions", "principal_roles")
                         .forEach { table -> dataSource.relationExists("commerce.$table") shouldBe true }
                     shouldThrow<Exception> {

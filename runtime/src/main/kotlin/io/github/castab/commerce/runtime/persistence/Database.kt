@@ -51,3 +51,7 @@ fun Throwable.isUniqueViolation(): Boolean =
     generateSequence(this) { it.cause }
         .filterIsInstance<SQLException>()
         .any { it.sqlState == UNIQUE_VIOLATION }
+
+/** A stale PostgreSQL transaction snapshot must be retried by the caller as a whole. */
+internal fun Throwable.isSerializationFailure(): Boolean =
+    generateSequence(this) { it.cause }.filterIsInstance<SQLException>().any { it.sqlState == "40001" }
