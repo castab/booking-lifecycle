@@ -8,6 +8,34 @@ before adding a dependency, a module, or a lifecycle concept.
 and [`runtime/README.md`](runtime/README.md) introduce each artifact to adopters. This file
 explains the rules and why seemingly reasonable changes can be architecturally wrong.
 
+# Architectural authority
+
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is the repository-wide high-level architectural
+constitution. This `AGENTS.md` is the detailed contributor and implementation contract.
+Use them together: `ARCHITECTURE.md` supplies the decision principles for where concepts
+belong and how the layers relate; this file supplies the repository-specific invariants,
+contracts, and implementation rules that make those principles concrete.
+
+Read `ARCHITECTURE.md` before making a change that affects any of the following:
+
+- ownership between `:domain`, `:runtime`, and a consuming application;
+- a new domain concept, relationship, lifecycle concept, or reusable abstraction;
+- persistence structure, aggregate boundaries, snapshot/history strategy, or schema ownership;
+- financial document, payment, refund, allocation, deposit, offering, or reconciliation semantics;
+- authentication, authorization, principal, role, permission, session, or service-identity architecture;
+- transaction boundaries, isolation, locking, consistency, or concurrency behavior;
+- reusable HTTP capabilities, API exposure boundaries, or OpenAPI contracts.
+
+Treat `ARCHITECTURE.md` as an architectural constraint, not optional background reading.
+The more specific rules in this file continue to apply simultaneously. If a requested
+change appears to conflict with `ARCHITECTURE.md`, if the two documents appear to disagree,
+or if ownership between domain, runtime, and application is unclear, surface the conflict
+explicitly before implementation. Do not silently resolve architectural ambiguity by
+choosing the smallest local implementation.
+
+Small implementation changes that preserve existing architectural boundaries do not require
+rereading `ARCHITECTURE.md`.
+
 # Project architecture
 
 `commerce` is a Gradle multi-project build with exactly two modules:
