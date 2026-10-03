@@ -2,7 +2,12 @@ package io.github.castab.commerce.offering
 
 import java.util.Collections
 
-/** The 1-based revision of one catalog. Independent of financial document versions. */
+/**
+ * The 1-based revision of one catalog, advanced by every change. Independent of financial
+ * document versions. A revision is a concurrency and staleness token: it tells a caller
+ * whether the catalog changed since it was read. It does not promise that an earlier
+ * revision can be read back.
+ */
 class OfferingsRevision private constructor(
     val number: Int,
 ) : Comparable<OfferingsRevision> {
@@ -26,13 +31,17 @@ class OfferingsRevision private constructor(
     }
 }
 
-/** Identifies exactly one immutable snapshot. */
+/** Identifies one catalog at one revision. */
 data class OfferingsSnapshotReference(
     val catalogId: OfferingsCatalogId,
     val revision: OfferingsRevision,
 )
 
-/** One immutable, ordered revision of the commercial choices in a catalog. */
+/**
+ * The ordered commercial choices of one catalog at one revision, as an immutable value.
+ * Every change derives the immediate successor, at the next revision. Whether earlier
+ * revisions are retained is a persistence decision, not part of this type.
+ */
 class OfferingsSnapshot private constructor(
     val catalogId: OfferingsCatalogId,
     val revision: OfferingsRevision,
@@ -127,7 +136,7 @@ class OfferingsSnapshot private constructor(
             offerings: List<Offering> = emptyList(),
         ): OfferingsSnapshot = OfferingsSnapshot(catalogId, OfferingsRevision.INITIAL, null, categories, offerings)
 
-        /** Reconstructs one stored revision; persistence must verify its predecessor exists. */
+        /** Reconstructs a stored revision. Its predecessor is the immediately preceding revision number. */
         fun restore(
             catalogId: OfferingsCatalogId,
             revision: OfferingsRevision,

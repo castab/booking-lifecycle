@@ -14,8 +14,10 @@ import kotlinx.serialization.Serializable
 import java.time.Duration
 
 /**
- * The stored contents of one offerings catalog revision, the `catalog` column of
- * `commerce.offerings_snapshots`. Array order is category and offering order.
+ * The stored contents of one offerings catalog at its current revision, the `catalog` column
+ * of `commerce.offerings_catalogs`. Array order is category and offering order. The retired
+ * arrays hold the last representation of every key that was once present and is not now,
+ * with the revision it was last present in.
  *
  * ```
  * {"categories": [{"key": "...", "displayName": "...", "description": null,
@@ -27,18 +29,42 @@ import java.time.Duration
  *                                   "seconds": 3600, "nanos": 123456789},
  *                  "selectionState": "ENABLED" | "DISABLED",
  *                  "availability": "AVAILABLE" | "UNAVAILABLE",
- *                  "badge": null | "...", "statusNote": null | "..."}]}
+ *                  "badge": null | "...", "statusNote": null | "..."}],
+ *  "retiredCategories": [{"lastSeenRevision": 3, "category": {...a category...}}],
+ *  "retiredOfferings":  [{"lastSeenRevision": 3, "offering": {...an offering...}}]}
  * ```
  *
  * Every property is required, with `null` written explicitly where a value is absent. Price
  * kinds and the enums are explicit names, never class names or ordinals, and money is a
- * plain decimal string with its currency code. The catalog id, revision, and predecessor are
- * columns of the row and are not repeated here.
+ * plain decimal string with its currency code. The catalog id and revision are columns of the
+ * row and are not repeated here.
  */
 @Serializable
 internal class OfferingsCatalogJson(
     val categories: List<OfferingCategoryJson>,
     val offerings: List<OfferingJson>,
+    val retiredCategories: List<RetiredOfferingCategoryJson>,
+    val retiredOfferings: List<RetiredOfferingJson>,
+)
+
+@Serializable
+internal class RetiredOfferingCategoryJson(
+    @Serializable(with = StrictIntSerializer::class) val lastSeenRevision: Int,
+    val category: OfferingCategoryJson,
+)
+
+@Serializable
+internal class RetiredOfferingJson(
+    @Serializable(with = StrictIntSerializer::class) val lastSeenRevision: Int,
+    val offering: OfferingJson,
+)
+
+/** A catalog's current contents and the last representations of its retired keys. */
+internal class StoredCatalog(
+    val categories: List<OfferingCategory>,
+    val offerings: List<Offering>,
+    val retiredCategories: List<Pair<Int, OfferingCategory>>,
+    val retiredOfferings: List<Pair<Int, Offering>>,
 )
 
 @Serializable
@@ -129,13 +155,15 @@ private fun OfferingPrice.toStored(): OfferingPriceJson =
             )
     }
 
-internal fun toStoredCatalog(
-    categories: List<OfferingCategory>,
-    offerings: List<Offering>,
-): String =
+internal fun StoredCatalog.toStored(): String =
     encodeStored(
         OfferingsCatalogJson.serializer(),
-        OfferingsCatalogJson(categories.map { it.toStored() }, offerings.map { it.toStored() }),
+        OfferingsCatalogJson(
+            categories.map { it.toStored() },
+            offerings.map { it.toStored() },
+            retiredCategories.map { (revision, category) -> RetiredOfferingCategoryJson(revision, category.toStored()) },
+            retiredOfferings.map { (revision, offering) -> RetiredOfferingJson(revision, offering.toStored()) },
+        ),
     )
 
 internal fun OfferingCategoryJson.restore(): OfferingCategory =
@@ -176,7 +204,12 @@ private fun OfferingPriceJson.restore(): OfferingPrice =
 internal fun restoreStoredCatalog(
     what: String,
     json: String,
-): Pair<List<OfferingCategory>, List<Offering>> =
+): StoredCatalog =
     restoreStored(what, OfferingsCatalogJson.serializer(), json) { catalog ->
-        catalog.categories.map { it.restore() } to catalog.offerings.map { it.restore() }
+        StoredCatalog(
+            catalog.categories.map { it.restore() },
+            catalog.offerings.map { it.restore() },
+            catalog.retiredCategories.map { it.lastSeenRevision to it.category.restore() },
+            catalog.retiredOfferings.map { it.lastSeenRevision to it.offering.restore() },
+        )
     }

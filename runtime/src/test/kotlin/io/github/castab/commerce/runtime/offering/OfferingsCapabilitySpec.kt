@@ -8,7 +8,6 @@ import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
-import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.offering.QuantityDimension
 import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.CommerceRuntime
@@ -304,7 +303,8 @@ class OfferingsCapabilitySpec :
             listOf(null, viewerToken, "not-a-token").forEach { token ->
                 request(Method.GET, "/catalog-c", token = token).status shouldBe Status.OK
                 request(Method.GET, "/catalog-c/categories", token = token).status shouldBe Status.OK
-                request(Method.GET, "/catalog-c/revisions/1", token = token).status shouldBe Status.OK
+                // Earlier revisions are not retained, so there is no exact-revision read.
+                request(Method.GET, "/catalog-c/revisions/1", token = token).status shouldBe Status.NOT_FOUND
                 // Read-only bindings have no write routes to authorize.
                 request(Method.POST, "/catalog-ro", token = token).status shouldBe Status.NOT_FOUND
             }
@@ -320,12 +320,11 @@ class OfferingsCapabilitySpec :
             }
         }
 
-        test("catalog operations append revisions and preserve exact historical reads") {
+        test("catalog operations advance one current revision") {
             val create = CreateOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)
             val addCategory = AddOfferingCategory(context.transactor, context.offeringsSnapshotRepository)
             val addOffering = AddOffering(context.transactor, context.offeringsSnapshotRepository)
             val latest = GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)
-            val revision = GetOfferingsCatalogRevision(context.transactor, context.offeringsSnapshotRepository)
             val id = OfferingsCatalogId(UUID.randomUUID())
             shouldThrow<CommerceFailure.NotFound> { latest(id) }
             create(id).revision.number shouldBe 1
@@ -363,24 +362,22 @@ class OfferingsCapabilitySpec :
             latest(id).categories.map { it.key.value }.shouldContainExactly("a", "b")
             latest(id).offerings.map { it.key.value }.shouldContainExactly("item0", "item1", "item2", "item3")
             latest(id).offerings.map { it.price }.shouldContainExactly(prices)
-            revision(OfferingsSnapshotReference(id, OfferingsRevision.INITIAL)).categories.size shouldBe 0
-            revision(OfferingsSnapshotReference(id, OfferingsRevision.of(3))).offerings.size shouldBe 0
+            latest(id).revision.number shouldBe 7
             shouldThrow<CommerceFailure.Conflict> {
                 addOffering(id, observedRevision(id), Offering(OfferingKey("item0"), OfferingCategoryKey("a"), "Again"))
             }
-            shouldThrow<CommerceFailure.NotFound> { revision(OfferingsSnapshotReference(id, OfferingsRevision.of(999))) }
             val staleA = latest(id)
             val staleB = latest(id)
             val nextA = staleA.revise(staleA.categories + OfferingCategory(OfferingCategoryKey("c"), "C"), staleA.offerings)
             val nextB = staleB.revise(staleB.categories + OfferingCategory(OfferingCategoryKey("d"), "D"), staleB.offerings)
-            context.transactor.inTransaction { context.offeringsSnapshotRepository.insert(it, nextA) }
+            context.transactor.inTransaction { context.offeringsSnapshotRepository.save(it, nextA) }
             shouldThrow<CommerceFailure.Conflict> {
-                context.transactor.inTransaction { context.offeringsSnapshotRepository.insert(it, nextB) }
+                context.transactor.inTransaction { context.offeringsSnapshotRepository.save(it, nextB) }
             }
             latest(id).categories.map { it.key.value }.shouldContainExactly("a", "b", "c")
         }
 
-        test("HTTP routes, historical revisions, read-only exposure, and host OpenAPI compose") {
+        test("HTTP routes, read-only exposure, and host OpenAPI compose") {
             request(Method.POST, "/catalog-a").status shouldBe Status.CREATED
             request(Method.POST, "/catalog-b").status shouldBe Status.CREATED
             request(Method.POST, "/catalog-a/categories", """{"key":"flavors","displayName":"Flavors"}""").status shouldBe Status.CREATED
@@ -392,17 +389,8 @@ class OfferingsCapabilitySpec :
             ).status shouldBe
                 Status.CREATED
             request(Method.GET, "/catalog-a").json()["revision"]!!.jsonPrimitive.content shouldBe "3"
-            request(Method.GET, "/catalog-a/revisions/1").json()["categories"]!!.jsonArray.size shouldBe 0
-            request(
-                Method.GET,
-                "/catalog-a/revisions/2",
-            ).json()["categories"]!!.jsonArray.first().jsonObject["offerings"]!!.jsonArray.size shouldBe
-                0
-            request(
-                Method.GET,
-                "/catalog-a/revisions/3",
-            ).json()["categories"]!!.jsonArray.first().jsonObject["offerings"]!!.jsonArray.size shouldBe
-                1
+            request(Method.GET, "/catalog-a").json()["previousRevision"]!!.jsonPrimitive.content shouldBe "2"
+            request(Method.GET, "/catalog-a/revisions/2").status shouldBe Status.NOT_FOUND
             request(Method.GET, "/catalog-b").json()["categories"]!!.jsonArray.size shouldBe 0
             request(Method.GET, "/catalog-a/categories").status shouldBe Status.OK
             request(Method.GET, "/catalog-a/categories/flavors").status shouldBe Status.OK
@@ -414,7 +402,6 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "/catalog-ro/categories").status shouldBe Status.NOT_FOUND
             request(Method.POST, "/catalog-ro/offerings").status shouldBe Status.NOT_FOUND
             request(Method.GET, "/catalog-a/offerings/missing").json()["code"]!!.jsonPrimitive.content shouldBe "not_found"
-            request(Method.GET, "/catalog-a/revisions/0").json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
             val malformed = request(Method.POST, "/catalog-a/offerings", "{")
             malformed.json()["code"]!!.jsonPrimitive.content shouldBe "malformed_request"
             val fixed =
@@ -532,8 +519,8 @@ class OfferingsCapabilitySpec :
             paths.containsKey("/host") shouldBe true
             paths.containsKey("/catalog-a") shouldBe true
             paths.containsKey("/catalog-b") shouldBe true
+            paths.keys.none { it.contains("/revisions") } shouldBe true
             listOf(
-                "/catalog-a/revisions/{revision}",
                 "/catalog-a/categories",
                 "/catalog-a/categories/{categoryKey}",
                 "/catalog-a/categories/{categoryKey}/offerings",
@@ -572,9 +559,9 @@ class OfferingsCapabilitySpec :
                     .values
                     .flatMap { it.jsonObject.values }
                     .map { operation -> operation.jsonObject["tags"]!!.jsonArray.map { it.jsonPrimitive.content } }
-            operationTags("/catalog-a").size shouldBe 18
+            operationTags("/catalog-a").size shouldBe 17
             operationTags("/catalog-a").forEach { it shouldContainExactly listOf("Catalog A") }
-            operationTags("/catalog-b").size shouldBe 18
+            operationTags("/catalog-b").size shouldBe 17
             operationTags("/catalog-b").forEach { it shouldContainExactly listOf("Catalog B") }
             (operationTags("/catalog-c") + operationTags("/catalog-ro")).forEach { tags ->
                 tags.none { it == "Catalog A" || it == "Catalog B" } shouldBe true
@@ -726,7 +713,6 @@ class OfferingsCapabilitySpec :
                 Triple("/catalog-a/categories/{categoryKey}/offerings", "get", "200"),
                 Triple("/catalog-a", "get", "200"),
                 Triple("/catalog-a", "post", "201"),
-                Triple("/catalog-a/revisions/{revision}", "get", "200"),
             ).forEach { (path, method, status) ->
                 reachesPrice(responseSchema(path, method, status)) shouldBe true
             }
@@ -756,7 +742,6 @@ class OfferingsCapabilitySpec :
                 Triple("/catalog-a/categories", "post", "201") to 2,
                 Triple("/catalog-a/offerings", "post", "201") to 3,
                 Triple("/catalog-a", "get", "200") to 3,
-                Triple("/catalog-a/revisions/{revision}", "get", "200") to 3,
                 Triple("/catalog-a/categories", "get", "200") to 3,
                 Triple("/catalog-a/categories/{categoryKey}", "get", "200") to 3,
                 Triple("/catalog-a/categories/{categoryKey}/offerings", "get", "200") to 3,
@@ -875,7 +860,7 @@ class OfferingsCapabilitySpec :
             }
         }
 
-        test("HTTP lifecycle preserves exact history and exposes last retired representations and successor revisions") {
+        test("HTTP lifecycle exposes last retired representations and successor revisions") {
             val base = "/catalog-b"
             val category = """{"key":"lifecycle","displayName":"Flavors"}"""
             request(Method.POST, "$base/categories", category).status shouldBe Status.CREATED
@@ -925,9 +910,10 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.OK
             val restored = request(Method.GET, base).json()
             request(Method.GET, "$base/retired/offerings").json()["offerings"]!!.jsonArray shouldBe JsonArray(emptyList())
-            listOf(added, updated, retired, restored).forEach { snapshot ->
-                request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
-            }
+            listOf(added, updated, retired, restored)
+                .map { it["revision"]!!.jsonPrimitive.content.toInt() }
+                .zipWithNext()
+                .forEach { (earlier, later) -> later shouldBe earlier + 1 }
 
             request(Method.DELETE, path).status shouldBe Status.OK
             val categoryPath = "$base/categories/lifecycle"
@@ -949,9 +935,6 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "$categoryPath/restore", editCategory).status shouldBe Status.OK
             request(Method.POST, "$categoryPath/restore", editCategory).status shouldBe Status.CONFLICT
             request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.OK
-            listOf(updatedCategory, retiredCategory).forEach { snapshot ->
-                request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
-            }
             request(Method.GET, "$base/retired/categories").json()["categories"]!!.jsonArray shouldBe JsonArray(emptyList())
             request(Method.POST, "$base/categories", """{"key":"retired","displayName":"Retired is a legal key"}""").status shouldBe
                 Status.CREATED
@@ -988,8 +971,8 @@ class OfferingsCapabilitySpec :
                     .jsonObject["responses"]!!
                     .jsonObject.keys shouldBe setOf("200", "401", "403", "404")
             }
-            // Historical reads retain the host's ordinary read policy.
-            request(Method.GET, "/catalog-ro/revisions/1", token = null).status shouldBe Status.OK
+            // Ordinary reads retain the host's read policy.
+            request(Method.GET, "/catalog-ro", token = null).status shouldBe Status.OK
         }
 
         test("expected revisions are required, typed, and distinguish malformed, invalid, and stale requests") {
@@ -1073,7 +1056,7 @@ class OfferingsCapabilitySpec :
             }
         }
 
-        test("HTTP rejects a stale full replacement without overwriting price or advancing history") {
+        test("HTTP rejects a stale full replacement without overwriting price or advancing the revision") {
             val base = "/catalog-b"
             request(Method.POST, "$base/categories", """{"key":"stale-guard","displayName":"Guard"}""").status shouldBe Status.CREATED
             val body = """{"selectionState":"ENABLED","availability":"AVAILABLE",
@@ -1098,9 +1081,6 @@ class OfferingsCapabilitySpec :
                 .jsonObject["amount"]!!
                 .jsonPrimitive.content shouldBe
                 "0.75"
-            val next = committed["revision"]!!.jsonPrimitive.content.toInt() + 1
-            request(Method.GET, "$base/revisions/$next").status shouldBe Status.NOT_FOUND
-            request(Method.GET, "$base/revisions/${observed["revision"]!!.jsonPrimitive.content}").json() shouldBe observed
             // The caller can reload and explicitly acknowledge the new revision.
             request(
                 Method.PUT,
@@ -1132,7 +1112,6 @@ class OfferingsCapabilitySpec :
                         values.forEach { property.accepts(JsonPrimitive(it), schemas) shouldBe true }
                     }
             }
-            val snapshots = mutableListOf<JsonObject>()
             val combinations =
                 listOf(
                     "ENABLED" to "AVAILABLE",
@@ -1185,7 +1164,6 @@ class OfferingsCapabilitySpec :
                         if (target == "$base/offerings") Status.CREATED else Status.OK
                     val current = request(Method.GET, base).json()
                     current["revision"]!!.jsonPrimitive.content.toInt() shouldBe before["revision"]!!.jsonPrimitive.content.toInt() + 1
-                    snapshots += current
                     val read = request(Method.GET, path).json()["offering"]!!.jsonObject
                     read["selectionState"] shouldBe fields["selectionState"]
                     read["availability"] shouldBe fields["availability"]
@@ -1204,9 +1182,6 @@ class OfferingsCapabilitySpec :
                         .map { it.jsonObject }
                         .single { it["key"] == fields["key"] } shouldBe read
                 }
-            }
-            snapshots.forEach { snapshot ->
-                request(Method.GET, "$base/revisions/${snapshot["revision"]!!.jsonPrimitive.content}").json() shouldBe snapshot
             }
         }
 
@@ -1316,23 +1291,7 @@ class OfferingsCapabilitySpec :
 
         test("path parameter failures match each route's documented error statuses") {
             val paths = request(Method.GET, "/openapi.json").json()["paths"]!!.jsonObject
-            paths["/catalog-a/revisions/{revision}"]!!
-                .jsonObject["get"]!!
-                .jsonObject["parameters"]!!
-                .jsonArray
-                .single()
-                .jsonObject["schema"]!!
-                .jsonObject["type"]!!
-                .jsonPrimitive.content shouldBe "integer"
             mapOf(
-                "/catalog-a/revisions/{revision}" to
-                    listOf(
-                        "/catalog-a/revisions/abc" to "malformed_request",
-                        "/catalog-a/revisions/1.5" to "malformed_request",
-                        "/catalog-a/revisions/0" to "validation_failed",
-                        "/catalog-a/revisions/-1" to "validation_failed",
-                        "/catalog-a/revisions/999" to "not_found",
-                    ),
                 "/catalog-a/categories/{categoryKey}" to
                     listOf(
                         "/catalog-a/categories/%20" to "validation_failed",

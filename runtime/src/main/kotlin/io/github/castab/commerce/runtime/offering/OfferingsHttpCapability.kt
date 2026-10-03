@@ -4,7 +4,6 @@ import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
-import io.github.castab.commerce.offering.OfferingsSnapshotReference
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.ErrorCategory
@@ -26,14 +25,11 @@ import org.http4k.core.Response
 import org.http4k.core.Status
 import org.http4k.core.then
 import org.http4k.core.with
-import org.http4k.lens.BiDiMapping
 import org.http4k.lens.Invalid
 import org.http4k.lens.LensFailure
-import org.http4k.lens.ParamMeta
 import org.http4k.lens.Path
 import org.http4k.lens.Query
 import org.http4k.lens.int
-import org.http4k.lens.mapWithNewMeta
 
 /**
  * Which catalog routes a binding exposes, and how its write routes are authorized.
@@ -44,7 +40,7 @@ import org.http4k.lens.mapWithNewMeta
  */
 sealed interface OfferingsHttpAccess {
     /**
-     * Only ordinary active and historical reads. Retired management discovery is absent.
+     * Only the ordinary reads of the current catalog. Retired management discovery is absent.
      * These reads carry no permission requirement of their own: they are as
      * public as the place the host mounts them.
      */
@@ -107,7 +103,6 @@ fun offeringsHttpCapability(
     val transactor = context.transactor
     val repository = context.offeringsSnapshotRepository
     val getCatalog = GetOfferingsCatalog(transactor, repository)
-    val getRevision = GetOfferingsCatalogRevision(transactor, repository)
     val listCategories = ListOfferingCategories(getCatalog)
     val getCategory = GetOfferingCategory(getCatalog)
     val listCategoryOfferings = ListCategoryOfferings(getCatalog)
@@ -132,9 +127,6 @@ fun offeringsHttpCapability(
     val retiredCategoriesBody = jsonBody(RetiredCategoriesDto.serializer())
     val errorBody = jsonBody(ErrorResponse.serializer())
     val validationErrorBody = jsonBody(ValidationErrorResponse.serializer())
-    // Documented as an integer but read as text: a contract path lens that fails to parse
-    // makes the route not match (404), whereas a non-integer revision is a malformed request.
-    val revisionPath = Path.mapWithNewMeta(BiDiMapping<String, String>({ it }, { it }), ParamMeta.IntegerParam).of("revision")
     val expectedRevisionQuery = Query.int().required("expectedRevision", "Catalog revision observed by the caller")
 
     fun expectedRevisionFromQuery(request: Request): OfferingsRevision {
@@ -226,19 +218,6 @@ fun offeringsHttpCapability(
                     errors(Status.NOT_FOUND)
                 } bindContract Method.GET to { _: Request ->
                     Response(Status.OK).with(catalogBody of getCatalog(catalogId).dto())
-                }
-            ),
-            (
-                "$base/revisions" / revisionPath meta {
-                    describe("GetCatalogRevision", "Get an exact historical catalog revision")
-                    returning(Status.OK, catalogBody to sampleCatalog)
-                    errors(Status.BAD_REQUEST, Status.UNPROCESSABLE_ENTITY, Status.NOT_FOUND)
-                } bindContract Method.GET to { text: String ->
-                    { request: Request ->
-                        val revision = text.toIntOrNull() ?: throw LensFailure(Invalid(revisionPath.meta), target = request)
-                        val reference = validating { OfferingsSnapshotReference(catalogId, OfferingsRevision.of(revision)) }
-                        Response(Status.OK).with(catalogBody of getRevision(reference).dto())
-                    }
                 }
             ),
             (

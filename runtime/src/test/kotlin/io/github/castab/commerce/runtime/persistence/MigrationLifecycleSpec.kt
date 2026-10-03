@@ -99,9 +99,9 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V11 coexist with application V1 in separate version spaces.
+                // Runtime V1 to V12 coexist with application V1 in separate version spaces.
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
@@ -142,7 +142,7 @@ class MigrationLifecycleSpec :
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
@@ -160,7 +160,7 @@ class MigrationLifecycleSpec :
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
                 RuntimeMigrations(dataSource).migrate()
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
                 dataSource.strings(
                     """SELECT is_nullable || ':' || column_default
                        FROM information_schema.columns
@@ -237,7 +237,7 @@ class MigrationLifecycleSpec :
 
         test("V9 stores aggregate-owned values in their snapshot rows and drops the child tables") {
             withTestDatabase { _, dataSource ->
-                RuntimeMigrations(dataSource).migrate()
+                migrateRuntimeThrough(dataSource, "9")
 
                 listOf("financial_document_lines", "offerings", "offering_categories").forEach {
                     dataSource.relationExists("commerce.$it") shouldBe false
@@ -340,7 +340,7 @@ class MigrationLifecycleSpec :
                 migrateRuntimeThrough(dataSource, "8")
                 RuntimeMigrations(dataSource).migrate()
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
                 dataSource.relationExists("commerce.offerings") shouldBe false
             }
         }
@@ -364,9 +364,51 @@ class MigrationLifecycleSpec :
         test("an empty V10 database migrates through V11") {
             withTestDatabase { _, dataSource ->
                 migrateRuntimeThrough(dataSource, "10")
-                RuntimeMigrations(dataSource).migrate()
+                migrateRuntimeThrough(dataSource, "11")
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
                     listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+            }
+        }
+
+        test("V12 refuses preexisting offerings catalog revisions and leaves their rows intact") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "11")
+                val id = "00000000-0000-0000-0000-00000000000d"
+                dataSource.execute(
+                    """INSERT INTO commerce.offerings_snapshots (catalog_id, revision, catalog)
+                       VALUES ('$id', 1, '{"categories": [], "offerings": []}')""",
+                )
+                shouldThrow<FlywayException> { RuntimeMigrations(dataSource).migrate() }
+                    .message shouldContain "V12 cannot convert preexisting offerings catalog revisions"
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                dataSource.strings("SELECT catalog_id::text FROM commerce.offerings_snapshots").shouldContainExactly(id)
+                dataSource.relationExists("commerce.offerings_catalogs") shouldBe false
+            }
+        }
+
+        test("V12 replaces catalog revisions with one current row per catalog") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "11")
+                RuntimeMigrations(dataSource).migrate()
+                dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                dataSource.relationExists("commerce.offerings_snapshots") shouldBe false
+                dataSource
+                    .strings(
+                        """SELECT column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, 'NONE')
+                           FROM information_schema.columns
+                           WHERE table_schema = 'commerce' AND table_name = 'offerings_catalogs' ORDER BY ordinal_position""",
+                    ).shouldContainExactly("catalog_id:uuid:NO:NONE", "revision:integer:NO:NONE", "catalog:jsonb:NO:NONE")
+                dataSource
+                    .strings(
+                        """SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+                           FROM pg_constraint c
+                           CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                           WHERE c.contype = 'p' AND c.conrelid = 'commerce.offerings_catalogs'::regclass
+                           GROUP BY c.conrelid""",
+                    ).shouldContainExactly("catalog_id")
             }
         }
 
@@ -537,7 +579,7 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
                     dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

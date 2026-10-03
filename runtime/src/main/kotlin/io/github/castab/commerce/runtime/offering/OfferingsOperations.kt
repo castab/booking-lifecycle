@@ -17,7 +17,7 @@ import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 
-/** An item read from, or appended to, one immutable catalog revision. */
+/** An item read from, or written to, a catalog at the revision that holds it. */
 data class CatalogResult<T>(
     val reference: OfferingsSnapshotReference,
     val value: T,
@@ -32,7 +32,7 @@ class CreateOfferingsCatalog(
             if (repository.retrieveLatestVersion(transaction, catalogId) != null) {
                 throw CommerceFailure.Conflict("Offerings catalog $catalogId already exists")
             }
-            OfferingsSnapshot.create(catalogId).also { repository.insert(transaction, it) }
+            OfferingsSnapshot.create(catalogId).also { repository.save(transaction, it) }
         }
 }
 
@@ -51,11 +51,11 @@ class AddOfferingCategory(
             if (latest.category(category.key) != null) {
                 throw CommerceFailure.Conflict("Offering category ${category.key.value} already exists")
             }
-            if (repository.categoryKeyExistsInHistory(transaction, catalogId, category.key)) {
-                throw CommerceFailure.Conflict("Offering category ${category.key.value} exists historically; restore it instead")
+            if (repository.categoryKeyReserved(transaction, catalogId, category.key)) {
+                throw CommerceFailure.Conflict("Offering category ${category.key.value} is retired; restore it instead")
             }
             val next = latest.revise(latest.categories + category, latest.offerings)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             CatalogResult(next.reference, category)
         }
 }
@@ -75,12 +75,12 @@ class AddOffering(
             if (latest.offering(offering.key) != null) {
                 throw CommerceFailure.Conflict("Offering ${offering.key.value} already exists")
             }
-            if (repository.offeringKeyExistsInHistory(transaction, catalogId, offering.key)) {
-                throw CommerceFailure.Conflict("Offering ${offering.key.value} exists historically; restore it instead")
+            if (repository.offeringKeyReserved(transaction, catalogId, offering.key)) {
+                throw CommerceFailure.Conflict("Offering ${offering.key.value} is retired; restore it instead")
             }
             requireCategory(latest, offering.category)
             val next = latest.revise(latest.categories, latest.offerings + offering)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             CatalogResult(next.reference, offering)
         }
 }
@@ -92,17 +92,6 @@ class GetOfferingsCatalog(
     operator fun invoke(catalogId: OfferingsCatalogId): OfferingsSnapshot =
         transactor.inTransaction { transaction ->
             repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
-        }
-}
-
-class GetOfferingsCatalogRevision(
-    private val transactor: Transactor,
-    private val repository: OfferingsSnapshotRepository,
-) {
-    operator fun invoke(reference: OfferingsSnapshotReference): OfferingsSnapshot =
-        transactor.inTransaction { transaction ->
-            repository.retrieveVersion(transaction, reference)
-                ?: throw CommerceFailure.NotFound("Offerings catalog revision ${reference.revision} was not found")
         }
 }
 
@@ -197,7 +186,7 @@ class UpdateOffering(
             val replacement =
                 validating { Offering(key, category, displayName, description, price, selectionState, availability, badge, statusNote) }
             val next = latest.replaceOffering(key, replacement)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             CatalogResult(next.reference, replacement)
         }
 }
@@ -217,7 +206,7 @@ class RetireOffering(
             requireExpectedRevision(latest, expectedRevision)
             requireActiveOffering(repository, transaction, latest, key)
             val next = latest.withoutOffering(key)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             next.reference
         }
 }
@@ -249,14 +238,14 @@ class RestoreOffering(
             if (latest.offering(key) != null) {
                 throw CommerceFailure.Conflict("Offering ${key.value} is already active")
             }
-            if (!repository.offeringKeyExistsInHistory(transaction, catalogId, key)) {
+            if (!repository.offeringKeyReserved(transaction, catalogId, key)) {
                 throw CommerceFailure.NotFound("Offering ${key.value} was not found")
             }
             requireCategory(latest, category)
             val replacement =
                 validating { Offering(key, category, displayName, description, price, selectionState, availability, badge, statusNote) }
             val next = latest.revise(latest.categories, latest.offerings + replacement)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             CatalogResult(next.reference, replacement)
         }
 }
@@ -268,7 +257,7 @@ private fun requireActiveOffering(
     key: OfferingKey,
 ) {
     if (latest.offering(key) != null) return
-    if (repository.offeringKeyExistsInHistory(transaction, latest.catalogId, key)) {
+    if (repository.offeringKeyReserved(transaction, latest.catalogId, key)) {
         throw CommerceFailure.Conflict("Offering ${key.value} is retired; restore it before updating or retiring it")
     }
     throw CommerceFailure.NotFound("Offering ${key.value} was not found")
@@ -294,7 +283,7 @@ class UpdateOfferingCategory(
             requireActiveOfferingCategory(repository, transaction, latest, key)
             val replacement = validating { OfferingCategory(key, displayName, description, minimumSelections, maximumSelections) }
             val next = latest.replaceCategory(key, replacement)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             CatalogResult(next.reference, replacement)
         }
 }
@@ -317,7 +306,7 @@ class RetireOfferingCategory(
                 throw CommerceFailure.Conflict("Offering category ${key.value} still contains offerings; retire or move them first")
             }
             val next = latest.withoutCategory(key)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             next.reference
         }
 }
@@ -342,12 +331,12 @@ class RestoreOfferingCategory(
             if (latest.category(key) != null) {
                 throw CommerceFailure.Conflict("Offering category ${key.value} is already active")
             }
-            if (!repository.categoryKeyExistsInHistory(transaction, catalogId, key)) {
+            if (!repository.categoryKeyReserved(transaction, catalogId, key)) {
                 throw CommerceFailure.NotFound("Offering category ${key.value} was not found")
             }
             val replacement = validating { OfferingCategory(key, displayName, description, minimumSelections, maximumSelections) }
             val next = latest.revise(latest.categories + replacement, latest.offerings)
-            repository.insert(transaction, next)
+            repository.save(transaction, next)
             CatalogResult(next.reference, replacement)
         }
 }
@@ -359,13 +348,13 @@ private fun requireActiveOfferingCategory(
     key: OfferingCategoryKey,
 ) {
     if (latest.category(key) != null) return
-    if (repository.categoryKeyExistsInHistory(transaction, latest.catalogId, key)) {
+    if (repository.categoryKeyReserved(transaction, latest.catalogId, key)) {
         throw CommerceFailure.Conflict("Offering category ${key.value} is retired; restore it before updating or retiring it")
     }
     throw CommerceFailure.NotFound("Offering category ${key.value} was not found")
 }
 
-/** Discovers retired identities at the latest revision, with their last representations in key order. */
+/** Discovers retired identities, with their last representations and last revisions, in key order. */
 class ListRetiredOfferings(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
@@ -375,14 +364,14 @@ class ListRetiredOfferings(
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             CatalogResult(
                 latest.reference,
-                repository.retrieveRetiredOfferings(transaction, latest.reference).map {
-                    CatalogResult(it.reference, it.value)
+                repository.retrieveRetiredOfferings(transaction, catalogId).map {
+                    CatalogResult(it.lastSeen, it.value)
                 },
             )
         }
 }
 
-/** Discovers retired identities at the latest revision, with their last representations in key order. */
+/** Discovers retired identities, with their last representations and last revisions, in key order. */
 class ListRetiredCategories(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
@@ -392,14 +381,14 @@ class ListRetiredCategories(
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             CatalogResult(
                 latest.reference,
-                repository.retrieveRetiredCategories(transaction, latest.reference).map {
-                    CatalogResult(it.reference, it.value)
+                repository.retrieveRetiredCategories(transaction, catalogId).map {
+                    CatalogResult(it.lastSeen, it.value)
                 },
             )
         }
 }
 
-/** Client precondition, checked in the same transaction that appends the successor. The primary key still guards true races. */
+/** Client precondition, checked in the same transaction that saves the successor. The repository's row lock still guards true races. */
 private fun requireExpectedRevision(
     latest: OfferingsSnapshot,
     expectedRevision: OfferingsRevision,

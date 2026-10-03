@@ -154,7 +154,7 @@ runtime Transactor
 use the same `Transaction`. Repositories never open their own transactions.
 
 `OfferingsSnapshotRepository` is the first commerce-owned repository. An application
-can insert an offering snapshot and write its own catalog or audit row in the same
+can save an offerings catalog revision and write its own catalog or audit row in the same
 transaction. The PostgreSQL integration tests prove that both writes commit or roll back
 together across the `commerce` and application schemas. Neither module knows the
 application's relationships.
@@ -430,7 +430,9 @@ The runtime migration stream starts with `V1__commerce_baseline.sql` and adds th
 offerings tables in `V2__offerings_snapshots.sql`, which created
 `commerce.offerings_snapshots`, `commerce.offering_categories`, and `commerce.offerings`;
 `V9__aggregate_snapshots.sql` later replaced the two child tables with a JSONB column (see
-[Aggregate snapshot persistence](#aggregate-snapshot-persistence)).
+[Aggregate snapshot persistence](#aggregate-snapshot-persistence)), and
+`V12__offerings_current_catalogs.sql` replaced `commerce.offerings_snapshots` with
+`commerce.offerings_catalogs`, one row per catalog (see [Offerings catalogs](#offerings-catalogs)).
 `V3__principal_sessions.sql` creates `commerce.principal_sessions` for
 [sessions](#sessions-and-authorization): the session ID, the principal as a
 runtime-controlled kind (`USER` or `SERVICE`) plus its UUID, the unique SHA-256 token
@@ -498,10 +500,10 @@ children had no identity of their own:
 | Table | Relational identity | Contents column |
 |---|---|---|
 | `commerce.financial_document_snapshots` | `(document_id, version)`, `previous_version`, `stage`, `created_at` | `lines jsonb NOT NULL`: the ordered line items |
-| `commerce.offerings_snapshots` | `(catalog_id, revision)`, `previous_revision` | `catalog jsonb NOT NULL`: the ordered categories and offerings |
+| `commerce.offerings_catalogs` (since V12) | `catalog_id`, `revision` | `catalog jsonb NOT NULL`: the current ordered categories and offerings, and the retired entries |
 
 `commerce.financial_document_lines`, `commerce.offering_categories`, and
-`commerce.offerings` are gone. Payments, allocations, refunds, principals, roles, and
+`commerce.offerings` are gone, and V12 replaced V9's `commerce.offerings_snapshots`. Payments, allocations, refunds, principals, roles, and
 sessions are independent facts and remain relational; `commerce.payment_allocations` still
 references `(document_id, version)`. Reading a snapshot is one query for one row, and a
 history read is one query for the lineage.
@@ -521,7 +523,9 @@ never by serializing domain types:
                 "price": {"kind": "PER_DURATION", "amount": "50.125", "currency": "USD",
                           "seconds": 3600, "nanos": 123456789},
                 "selectionState": "ENABLED", "availability": "AVAILABLE",
-                "badge": null, "statusNote": null}]}
+                "badge": null, "statusNote": null}],
+ "retiredCategories": [],
+ "retiredOfferings": [{"lastSeenRevision": 3, "offering": {...an offering...}}]}
 ```
 
 An offering's `price` is `null`, or has a `kind` of `FIXED`, `PER_QUANTITY` (adds
@@ -532,31 +536,33 @@ required value, an unknown `kind` or enum name, a quoted number, a malformed dec
 currency, or UUID, or a restored value that breaks a domain invariant fails with an
 `IllegalStateException` that names the snapshot. Nothing is defaulted or repaired. Schema
 checks only guarantee the outer shape (`lines` is an array; `catalog` is an object with
-`categories` and `offerings` arrays). Unique keys, category references, line id uniqueness,
+`categories`, `offerings`, `retiredCategories`, and `retiredOfferings` arrays). Unique keys, category references, line id uniqueness,
 and currency agreement are enforced by the domain constructors on every read, as they are
 on every write.
 
-Catalog history is answered from the immutable revisions of one catalog, which the primary
-key already bounds. Every history method restores each revision it consults through the same
-strict path as `retrieveVersion` and computes in Kotlin, so a corrupt revision fails the
-question with an `IllegalStateException` instead of influencing its answer. Key existence
-checks every revision. Retirement considers the revisions up to the requested one, treats the
-restored snapshot at that revision as what is present (an unstored revision has nothing
-present), keeps each absent key's last representation with the revision it came from, and
-orders by UTF-8 byte order, matching PostgreSQL `"C"`. There is no projection or JSONB index.
+Key reservation and retired discovery are answered from the one catalog row, restored
+strictly: retired keys must be unique, absent from the current contents, and last seen
+before the current revision, so a corrupt row fails the question with an
+`IllegalStateException` instead of influencing its answer. Retired values are ordered by
+UTF-8 byte order, matching PostgreSQL `"C"`. There is no projection or JSONB index.
 
 V9 does not convert populated databases. Like V7 and V8, it fails and leaves the schema
 untouched when a financial snapshot or an offerings revision already exists; recreate the
 ephemeral database rather than backfilling.
 
-### Offerings snapshots
+### Offerings catalogs
 
-`CommerceRuntimeContext.offeringsSnapshotRepository` exposes the append-only
+A catalog keeps only its current revision. The revision number advances on every change
+and is the concurrency (`expectedRevision`) and staleness token; earlier revisions are not
+retained and cannot be read back. An application that must know what an earlier catalog
+said records that itself, for example in the estimate it created from an evaluation.
+
+`CommerceRuntimeContext.offeringsSnapshotRepository` exposes the
 `OfferingsSnapshotRepository`. Each method takes the caller's `Transaction` first:
 
 ```kotlin
 context.transactor.inTransaction { transaction ->
-    context.offeringsSnapshotRepository.insert(transaction, snapshot)
+    context.offeringsSnapshotRepository.save(transaction, snapshot)
     // Application-owned writes may use transaction.handle here too.
 }
 
@@ -565,16 +571,19 @@ val latest = context.transactor.inTransaction { transaction ->
 }
 ```
 
-`retrieveVersion(transaction, reference)` retrieves an exact revision or returns null;
-`retrieveLatestVersion` returns the highest revision for one catalog or null. `insert`
-never updates existing rows. The `(catalog_id, revision)` primary key rejects duplicate
-revisions, and a self-reference requires a successor's immediate predecessor to exist.
-Categories and offerings are stored in array order inside the revision's one row, so round trips preserve snapshot order.
+`retrieveLatestVersion` returns the catalog's current revision or null. `save` creates a
+catalog from a revision-1 snapshot or replaces the current revision with its immediate
+successor; it locks the catalog row (`SELECT ... FOR UPDATE`), so concurrent writers
+serialize and the later one conflicts. Saving a first revision for an existing catalog, a
+successor of a revision that is no longer current, or a successor of a missing catalog is
+`CommerceFailure.Conflict`. `save` also maintains the retired entries: keys absent from the
+successor are retired with the replaced revision as their last-seen revision, and keys
+present again are no longer retired.
+Categories and offerings are stored in array order inside the catalog's one row, so round trips preserve snapshot order.
 Price forms have stable `FIXED`, `PER_QUANTITY`, and `PER_DURATION` discriminators;
 amounts are exact decimal strings, and durations store seconds plus nanoseconds.
 The repository maps rows to domain values explicitly through `OfferingsSnapshot.restore`.
-It does not open a connection or transaction. A duplicate revision is reported as
-`CommerceFailure.Conflict`.
+It does not open a connection or transaction.
 
 `V8__offering_selection_and_availability.sql` added `selection_state` and `availability`
 to `commerce.offerings` as `NOT NULL` text columns with no defaults. Checks accepted only
@@ -589,28 +598,32 @@ restores them explicitly and rejects a missing, null, or unknown stored value.
 read an older catalog, so V11 refuses a populated `commerce.offerings_snapshots` instead of
 converting it; recreate the ephemeral database.
 
+`V12__offerings_current_catalogs.sql` refuses a populated `commerce.offerings_snapshots`
+the same way, drops it, and creates `commerce.offerings_catalogs` (`catalog_id` primary
+key, `revision integer NOT NULL CHECK (revision >= 1)`, and the `catalog` JSONB).
+
 ### Offerings catalog operations and HTTP
 
 `io.github.castab.commerce.runtime.offering` provides `CreateOfferingsCatalog`,
 `AddOfferingCategory`, `AddOffering`, `GetOfferingsCatalog`,
-`GetOfferingsCatalogRevision`, `ListOfferingCategories`, `GetOfferingCategory`,
+`ListOfferingCategories`, `GetOfferingCategory`,
 `ListCategoryOfferings`, `ListOfferings`, and `GetOffering`, plus `UpdateOffering`,
 `RetireOffering`, `RestoreOffering`, `UpdateOfferingCategory`, `RetireOfferingCategory`,
 `RestoreOfferingCategory`, `ListRetiredOfferings`, and `ListRetiredCategories`.
 Every operation accepts an
-explicit `OfferingsCatalogId` (the revision query accepts a reference containing it).
+explicit `OfferingsCatalogId`.
 Commands each open one transaction through `Transactor`, read the latest catalog, derive
-an immutable immediate successor, and append it through `OfferingsSnapshotRepository`.
+the immediate successor, and save it through `OfferingsSnapshotRepository`.
 Initialization creates an empty revision 1. A missing catalog or item is `NotFound`;
 duplicate keys and duplicate initialization are `Conflict`. Concurrent writers that
-derive the same successor revision receive `Conflict` on the losing insert. The runtime
+derive the same successor revision serialize on the catalog row, and the later one
+receives `Conflict`. The runtime
 does not retry or merge it; the caller may reload and decide what to do.
 
 Offering and category keys are durable natural identities within a catalog. Any key
-that has appeared in history remains reserved. Latest-snapshot absence means retired;
-retirement does not delete history, and restoration reactivates the same identity with
-caller-supplied properties. Update never changes the key. Historical revisions remain
-immutable, including decimal price scale, category relationships, and ordering.
+that has ever been used remains reserved. Latest-snapshot absence means retired; the
+catalog keeps the retired key's last representation, and restoration reactivates the same
+identity with caller-supplied properties. Update never changes the key.
 
 | Current identity | Add | Update | Retire | Restore |
 |---|---|---|---|---|
@@ -625,30 +638,23 @@ An offering update or restore requires a current category (404 when missing or r
 There is no cascade, general reorder, key rename, per-item timestamp/version/UUID, or
 mutable active/deleted flag.
 
-`offeringKeyExistsInHistory(transaction, catalogId, key)` and
-`categoryKeyExistsInHistory(...)` use PostgreSQL `EXISTS` over the existing revision rows.
-`retrieveRetiredOfferings(transaction, reference)` and `retrieveRetiredCategories(...)`
-select each key's last representation up to that reference, excluding keys present at it.
-They return persistence-owned `HistoricalCatalogValue<T>` items whose reference is the
-last revision containing that key. Operations translate these into their `CatalogResult`
-read models, so persistence has no dependency on `runtime.offering`.
-The catalog ID scopes both identity checks and discovery. The queries use the existing
-revision tables and indexes without a new index. All methods use the caller's transaction,
-with no history scan in application memory.
+`offeringKeyReserved(transaction, catalogId, key)` and `categoryKeyReserved(...)` answer
+whether a key is active or retired. `retrieveRetiredOfferings(transaction, catalogId)` and
+`retrieveRetiredCategories(...)` return each retired key's last representation as a
+persistence-owned `RetiredCatalogValue<T>` whose `lastSeen` reference is the last revision
+containing that key. Operations translate these into their `CatalogResult` read models, so
+persistence has no dependency on `runtime.offering`. The catalog ID scopes both identity
+checks and discovery. All methods read the one catalog row in the caller's transaction.
 
 `ListRetiredOfferings` and `ListRetiredCategories` return the latest catalog reference and
-those last representations in ascending key order (PostgreSQL `C` collation). The SQL is
-bounded to that immutable reference, so a concurrent successor cannot change the meaning
-of the discovery response, even under the default READ COMMITTED isolation. HTTP returns
+those last representations in ascending key order (PostgreSQL `C` collation). HTTP returns
 `{"revision": 5, "offerings": [{"lastSeenRevision": 4, "offering": {...}}]}` (or
 `categories`/`category`). The current revision and last-seen revision refer to the catalog
 timeline, not per-item versions. Retired discovery belongs exclusively to the managed
 `ReadWrite` surface and requires `commerce.offerings.manage` through the supplied live
 `AccessControl`: 401 without a principal, 403 without the permission, and 200 for a
-manager. `ReadOnly` does not mount these endpoints. Ordinary active and exact historical
-reads retain the host-owned read access policy. If the host exposes historical revisions
-publicly, a reader can still infer retired identities by comparing those revisions;
-protecting management discovery is not a guarantee of historical-data confidentiality. Paths use `/retired/offerings` and
+manager. `ReadOnly` does not mount these endpoints. Ordinary reads of the current catalog
+retain the host-owned read access policy. Paths use `/retired/offerings` and
 `/retired/categories` to keep the legal natural key `retired` accessible on item paths.
 
 Every mutation of an existing catalog, including `AddOffering` and
@@ -663,15 +669,15 @@ There are two separate concurrency guarantees:
   successor is created and the committed values remain unchanged. Callers must acknowledge
   the latest revision before replacing, adding, retiring, or restoring anything.
 - **Database successor concurrency:** two transactions can both read r12 and satisfy
-  expected r12 before deriving r13. The `(catalog_id, revision)` primary key permits only
-  one successor; the losing insert returns 409 and rolls its entire transaction back.
-  This constraint alone does not protect against a stale browser submitting after r13
-  has already committed.
+  expected r12 before deriving r13. `save` locks the catalog row, so the second waits,
+  then sees r13 committed and returns 409, rolling its entire transaction back. This guard
+  alone does not protect against a stale browser submitting after r13 has already
+  committed.
 
-There is no automatic retry, merge, or added lock. Callers reload and decide what to do.
-Tests cover stale requests for all eight mutations, the stale full-replacement price
-regression, and synchronized PostgreSQL writers that satisfy the same expected revision
-and then race to insert one successor.
+There is no automatic retry or merge. Callers reload and decide what to do. Tests cover
+stale requests for all eight mutations, the stale full-replacement price regression, and
+synchronized PostgreSQL writers that satisfy the same expected revision and then race to
+save one successor.
 
 The HTTP capability is opt-in. A concrete application can bind a catalog and compose its
 original http4k contract routes into its own contract. A write-capable binding carries the
@@ -716,7 +722,6 @@ At the chosen base path, the capability offers:
 | Method | Relative path | Purpose |
 |---|---|---|
 | GET, POST | `/` | Latest catalog; initialize empty catalog |
-| GET | `/revisions/{revision}` | Exact historical catalog |
 | GET, POST | `/categories` | List; append category |
 | GET, PUT, DELETE | `/categories/{categoryKey}` | Read; replace properties; retire category |
 | POST | `/categories/{categoryKey}/restore` | Restore retired category |
@@ -735,7 +740,7 @@ without a principal and `403 forbidden` without the permission, before the reque
 read. The runtime declares that requirement; the application's `AccessControl` supplies the
 authentication and the `PermissionResolver` that evaluates it, so which roles grant the
 permission is the application's decision. A write-capable binding cannot be built without
-one. Ordinary active and exact historical reads carry no permission requirement: they
+one. Ordinary reads of the current catalog carry no permission requirement: they
 are as public as the place the host mounts them, and the host may still wrap them in its
 own filters. Management routes document `401` and `403` in OpenAPI. The binding's catalog
 ID supplies all write targets; request DTOs have no catalog ID or successor revision.
@@ -782,7 +787,7 @@ additive fields are ignored, as for every `CommerceJson` body, so each OpenAPI b
 forbids only the conflicting variant fields (`not` + `required`), never all additional
 properties. The runtime validates the discriminator's fields and domain values.
 
-Every offering read (catalog, category, item, exact revision, and retired discovery) includes
+Every offering read (catalog, category, item, and retired discovery) includes
 required non-null `selectionState` and `availability` enum fields. Add, update, and restore
 requests require explicit values with no deserialization defaults. Missing, null, or unknown
 values return `400 malformed_request`; all four enum combinations are accepted.
@@ -790,7 +795,7 @@ The OpenAPI renderer lists both enum sets and requires both properties without a
 cross-field exclusion. A disabled or unavailable offering remains active/readable;
 retiring it still removes it from the successor.
 Changing either property uses `UpdateOffering`, retaining identity and position, checking
-`expectedRevision`, and appending an immutable successor. Restoring a retired key also
+`expectedRevision`, and saving the successor. Restoring a retired key also
 supplies both properties explicitly through HTTP. Kotlin `UpdateOffering` and
 `RestoreOffering` callers must also explicitly supply `selectionState` and `availability`,
 even when only changing an unrelated field. Neither parameter has a default; callers
@@ -803,8 +808,7 @@ chosen snapshot. It rejects `DISABLED` with `OFFERING_DISABLED`, `UNAVAILABLE` w
 For an offering that is both disabled and unavailable, disabled takes precedence and only
 `OFFERING_DISABLED` is reported. This chooses the rejection reason; it does not constrain
 or alter either stored fact. `offeringsValidationFailed` preserves these codes in 422
-structured violations. Applications own context-specific capacity/stock policy and should use the current catalog for new orders;
-historical reads retain the selection semantics at their revision. Offerings carry optional
+structured violations. Applications own context-specific capacity/stock policy and evaluate new orders against the current catalog. Offerings carry optional
 `badge` and `statusNote` text with their other presentation text; a status note neither implies
 nor overrides `selectionState` or `availability`. How a client renders that text (chips,
 labels, popovers) belongs to the consuming application or its BFF.
@@ -817,7 +821,8 @@ the error statuses among these that the route can actually return. It does not e
 an `OfferingsEngine` or own any application catalog contents. Lifecycle state conflicts
 are `conflict` (409). Released migrations, including `V2__offerings_snapshots.sql`,
 remain unchanged; V8 added strict selection and availability columns, V9 stores catalog contents in the snapshot row,
-and V11 adds the badge and status note properties to stored offerings.
+V11 adds the badge and status note properties to stored offerings,
+and V12 keeps one current row per catalog.
 `offeringsOpenApiRenderer` also omits `format` when http4k supplies a null format in a
 schema node; it operates on schema values before OpenAPI serialization and does not
 traverse example, default, const, or extension payloads as schemas.
@@ -1673,9 +1678,11 @@ construction of `PaymentHistory`, reads inside an uncommitted caller transaction
 the checksums of released runtime migrations and migrates a released `V5` database
 forward.
 
-`OfferingsSnapshotRepositorySpec` proves append-only round trips, revision constraints,
-price subtype reconstruction, ordering, and atomic commit and rollback of an offering
-snapshot with an application-owned row.
+`OfferingsSnapshotRepositorySpec` proves round trips of one current row per catalog, save
+conflicts (duplicate, stale, missing catalog), concurrent successors serialized on the row
+lock, retirement and key reservation across saves, price subtype reconstruction, ordering,
+the stored shape including retired entries, strict rejection of malformed rows, and atomic
+commit and rollback of a catalog with an application-owned row.
 
 The session specs cover the security contract. `SessionTokenSpec` proves tokens come from
 the supplied `SecureRandom`, are canonical 256-bit base64url values that identifiers can
