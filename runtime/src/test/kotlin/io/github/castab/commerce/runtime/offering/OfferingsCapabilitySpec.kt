@@ -2,10 +2,12 @@ package io.github.castab.commerce.runtime.offering
 
 import io.github.castab.commerce.financial.Money
 import io.github.castab.commerce.offering.Offering
+import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
 import io.github.castab.commerce.offering.OfferingPrice
+import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.QuantityDimension
@@ -239,6 +241,56 @@ class OfferingsCapabilitySpec :
 
         fun Response.json(): JsonObject = CommerceJson.parse(bodyString()).jsonObject
 
+        // Offering writes take batches. Single-offering behavior is exercised through these
+        // helpers, which send one flat offering body as a one-item batch; for update, retire, and
+        // restore, the key comes from the last segment of an item path such as `/catalog-b/offerings/x`.
+        // Malformed bodies pass through unchanged.
+        fun oneOffering(
+            body: String,
+            key: String? = null,
+        ): String {
+            val fields = runCatching { CommerceJson.parse(body).jsonObject }.getOrNull() ?: return body
+            val item = JsonObject(fields - "expectedRevision" + (key?.let { mapOf("key" to JsonPrimitive(it)) } ?: emptyMap()))
+            return JsonObject(fields.filterKeys { it == "expectedRevision" } + ("offerings" to JsonArray(listOf(item)))).toString()
+        }
+
+        fun addOffering(
+            base: String,
+            body: String?,
+            token: String? = editorToken,
+            supplyExpectedRevision: Boolean = true,
+        ): Response = request(Method.POST, "$base/offerings", body?.let { oneOffering(it) }, token, supplyExpectedRevision)
+
+        fun updateOffering(
+            path: String,
+            body: String,
+            token: String? = editorToken,
+            supplyExpectedRevision: Boolean = true,
+        ): Response =
+            request(
+                Method.PUT,
+                path.substringBeforeLast('/'),
+                oneOffering(body, path.substringAfterLast('/')),
+                token,
+                supplyExpectedRevision,
+            )
+
+        fun retireOffering(
+            path: String,
+            token: String? = editorToken,
+        ): Response =
+            request(Method.POST, "${path.substringBeforeLast('/')}/retire", """{"keys":["${path.substringAfterLast('/')}"]}""", token)
+
+        fun restoreOffering(
+            path: String,
+            body: String,
+            token: String? = editorToken,
+        ): Response =
+            request(Method.POST, "${path.substringBeforeLast('/')}/restore", oneOffering(body, path.substringAfterLast('/')), token)
+
+        /** The single offering of a one-item batch response. */
+        fun Response.offering(): JsonObject = json()["offerings"]!!.jsonArray.single().jsonObject
+
         test("bindings reject ambiguous paths, operation ID prefixes, and blank OpenAPI tags") {
             listOf("", "catalog", "/catalog/", "/catalog?x=1", "/catalog/{id}", "/catalog//nested").forEach { path ->
                 shouldThrow<IllegalArgumentException> {
@@ -327,17 +379,25 @@ class OfferingsCapabilitySpec :
         test("catalog operations advance one current revision") {
             val create = CreateOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)
             val addCategory = AddOfferingCategory(context.transactor, context.offeringsSnapshotRepository)
-            val addOffering = AddOffering(context.transactor, context.offeringsSnapshotRepository)
+            val addOfferings = AddOfferings(context.transactor, context.offeringsSnapshotRepository)
             val latest = GetOfferingsCatalog(context.transactor, context.offeringsSnapshotRepository)
             val id = OfferingsCatalogId(UUID.randomUUID())
             shouldThrow<CommerceFailure.NotFound> { latest(id) }
             create(id).revision.number shouldBe 1
             shouldThrow<CommerceFailure.Conflict> { create(id) }
             shouldThrow<CommerceFailure.NotFound> {
-                addOffering(
+                addOfferings(
                     id,
                     observedRevision(id),
-                    Offering(OfferingKey("missing"), OfferingCategoryKey("absent"), "Missing"),
+                    listOf(
+                        Offering(
+                            OfferingKey("missing"),
+                            OfferingCategoryKey("absent"),
+                            "Missing",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             addCategory(id, observedRevision(id), OfferingCategory(OfferingCategoryKey("a"), "A")).reference.revision.number shouldBe 2
@@ -356,19 +416,42 @@ class OfferingsCapabilitySpec :
                     OfferingPrice.PerQuantity(Money(BigDecimal("0.75"), Currency.getInstance("USD")), QuantityDimension("guest")),
                     OfferingPrice.PerDuration(Money(BigDecimal("50.00"), Currency.getInstance("USD")), Duration.ofNanos(123456789)),
                 )
-            prices.forEachIndexed { index, price ->
-                addOffering(
-                    id,
-                    observedRevision(id),
-                    Offering(OfferingKey("item$index"), OfferingCategoryKey("a"), "Item $index", price = price),
-                )
-            }
+            // One batch adds all four in order, in one successor revision.
+            addOfferings(
+                id,
+                observedRevision(id),
+                prices.mapIndexed {
+                    index,
+                    price,
+                    ->
+                    Offering(
+                        OfferingKey("item$index"),
+                        OfferingCategoryKey("a"),
+                        "Item $index",
+                        price = price,
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    )
+                },
+            ).reference.revision.number shouldBe 4
             latest(id).categories.map { it.key.value }.shouldContainExactly("a", "b")
             latest(id).offerings.map { it.key.value }.shouldContainExactly("item0", "item1", "item2", "item3")
             latest(id).offerings.map { it.price }.shouldContainExactly(prices)
-            latest(id).revision.number shouldBe 7
+            latest(id).revision.number shouldBe 4
             shouldThrow<CommerceFailure.Conflict> {
-                addOffering(id, observedRevision(id), Offering(OfferingKey("item0"), OfferingCategoryKey("a"), "Again"))
+                addOfferings(
+                    id,
+                    observedRevision(id),
+                    listOf(
+                        Offering(
+                            OfferingKey("item0"),
+                            OfferingCategoryKey("a"),
+                            "Again",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
+                )
             }
             val staleA = latest(id)
             val staleB = latest(id)
@@ -385,9 +468,8 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "/catalog-a").status shouldBe Status.CREATED
             request(Method.POST, "/catalog-b").status shouldBe Status.CREATED
             request(Method.POST, "/catalog-a/categories", """{"key":"flavors","displayName":"Flavors"}""").status shouldBe Status.CREATED
-            request(
-                Method.POST,
-                "/catalog-a/offerings",
+            addOffering(
+                "/catalog-a",
                 """{"key":"vanilla","selectionState":"ENABLED","availability":"AVAILABLE",
                     "category":"flavors","displayName":"Vanilla","price":null}""",
             ).status shouldBe
@@ -404,9 +486,9 @@ class OfferingsCapabilitySpec :
             request(Method.GET, "/catalog-ro", token = null).status shouldBe Status.OK
             request(Method.POST, "/catalog-ro").status shouldBe Status.NOT_FOUND
             request(Method.POST, "/catalog-ro/categories").status shouldBe Status.NOT_FOUND
-            request(Method.POST, "/catalog-ro/offerings").status shouldBe Status.NOT_FOUND
+            addOffering("/catalog-ro", null).status shouldBe Status.NOT_FOUND
             request(Method.GET, "/catalog-a/offerings/missing").json()["code"]!!.jsonPrimitive.content shouldBe "not_found"
-            val malformed = request(Method.POST, "/catalog-a/offerings", "{")
+            val malformed = addOffering("/catalog-a", "{")
             malformed.json()["code"]!!.jsonPrimitive.content shouldBe "malformed_request"
             val fixed =
                 Json.encodeToString(
@@ -444,7 +526,21 @@ class OfferingsCapabilitySpec :
                         price = OfferingPriceDto("PER_DURATION", "50.00", "USD", interval = "PT0.123456789S"),
                     ),
                 )
-            listOf(fixed, quantity, duration).forEach { request(Method.POST, "/catalog-a/offerings", it).status shouldBe Status.CREATED }
+            // One request adds all three, in order, in one successor revision.
+            val before =
+                request(Method.GET, "/catalog-a")
+                    .json()["revision"]!!
+                    .jsonPrimitive.content
+                    .toInt()
+            request(Method.POST, "/catalog-a/offerings", """{"offerings":[$fixed,$quantity,$duration]}""").let {
+                it.status shouldBe Status.CREATED
+                it
+                    .json()["revision"]!!
+                    .jsonPrimitive.content
+                    .toInt() shouldBe before + 1
+                it.json()["offerings"]!!.jsonArray.map { item -> item.jsonObject["key"]!!.jsonPrimitive.content } shouldBe
+                    listOf("fixed", "quantity", "duration")
+            }
             val prices = request(Method.GET, "/catalog-a/offerings").json()["offerings"]!!.jsonArray
             prices[1]
                 .jsonObject["price"]!!
@@ -474,9 +570,8 @@ class OfferingsCapabilitySpec :
                     duration.replace("\"interval\":\"PT0.123456789S\"", "\"dimension\":\"guest\",\"interval\":\"PT0.123456789S\""),
                 )
             invalid.forEach { body ->
-                request(
-                    Method.POST,
-                    "/catalog-a/offerings",
+                addOffering(
+                    "/catalog-a",
                     body
                         .replace(
                             "\"key\":\"fixed\"",
@@ -487,16 +582,15 @@ class OfferingsCapabilitySpec :
                     Status.UNPROCESSABLE_ENTITY
             }
             val additive =
-                request(
-                    Method.POST,
-                    "/catalog-a/offerings",
+                addOffering(
+                    "/catalog-a",
                     """{"key":"fixed-with-extra","selectionState":"ENABLED","availability":"AVAILABLE",
                     "category":"flavors","displayName":"Fixed with Extra",
                       "price":{"kind":"FIXED","amount":"120.00","currency":"USD","futureField":"ignored"}}""",
                 )
             additive.status shouldBe Status.CREATED
             additive
-                .json()["offering"]!!
+                .offering()
                 .jsonObject["price"]!!
                 .jsonObject.keys shouldBe setOf("kind", "amount", "currency")
             request(Method.GET, "/catalog-a/offerings/fixed-with-extra")
@@ -504,9 +598,8 @@ class OfferingsCapabilitySpec :
                 .jsonObject["price"]!!
                 .jsonObject.keys shouldBe setOf("kind", "amount", "currency")
             val conflicting =
-                request(
-                    Method.POST,
-                    "/catalog-a/offerings",
+                addOffering(
+                    "/catalog-a",
                     """{"key":"fixed-with-dimension","selectionState":"ENABLED","availability":"AVAILABLE",
                     "category":"flavors","displayName":"Fixed with Dimension",
                       "price":{"kind":"FIXED","amount":"120.00","currency":"USD","dimension":"guest"}}""",
@@ -516,7 +609,7 @@ class OfferingsCapabilitySpec :
             priceShapes.forEachIndexed { index, (price, status) ->
                 val body = """{"key":"shape$index","selectionState":"ENABLED","availability":"AVAILABLE",
                     "category":"flavors","displayName":"Shape $index","price":$price}"""
-                request(Method.POST, "/catalog-a/offerings", body).status shouldBe status
+                addOffering("/catalog-a", body).status shouldBe status
             }
             val openapi = request(Method.GET, "/openapi.json").json()
             val paths = openapi["paths"]!!.jsonObject
@@ -695,8 +788,8 @@ class OfferingsCapabilitySpec :
             val createRequest = create["requestBody"]!!.jsonObject["content"]!!.jsonObject["application/json"]!!.jsonObject["schema"]!!
             reachesPrice(createRequest) shouldBe true
             listOf(
-                "/catalog-a/offerings/{offeringKey}" to "put",
-                "/catalog-a/offerings/{offeringKey}/restore" to "post",
+                "/catalog-a/offerings" to "put",
+                "/catalog-a/offerings/restore" to "post",
             ).forEach { (path, method) ->
                 val schema =
                     paths[path]!!
@@ -711,8 +804,8 @@ class OfferingsCapabilitySpec :
                 Triple("/catalog-a/offerings", "post", "201"),
                 Triple("/catalog-a/offerings/{offeringKey}", "get", "200"),
                 Triple("/catalog-a/offerings", "get", "200"),
-                Triple("/catalog-a/offerings/{offeringKey}", "put", "200"),
-                Triple("/catalog-a/offerings/{offeringKey}/restore", "post", "200"),
+                Triple("/catalog-a/offerings", "put", "200"),
+                Triple("/catalog-a/offerings/restore", "post", "200"),
                 Triple("/catalog-a/retired/offerings", "get", "200"),
                 Triple("/catalog-a/categories/{categoryKey}/offerings", "get", "200"),
                 Triple("/catalog-a", "get", "200"),
@@ -806,13 +899,15 @@ class OfferingsCapabilitySpec :
                     .token.value
             val paths = request(Method.GET, "/openapi.json").json()["paths"]!!.jsonObject
             val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
-            listOf("OfferingMutationDto", "OfferingCategoryMutationDto").forEach { name ->
-                schemas[name]!!.jsonObject["properties"]!!.jsonObject.containsKey("key") shouldBe false
-            }
+            schemas["OfferingCategoryMutationDto"]!!.jsonObject["properties"]!!.jsonObject.containsKey("key") shouldBe false
+            // Offering batches carry each key in the item; the per-key offering mutation routes are gone.
+            schemas["OfferingsBatchDto"]!!.jsonObject["properties"]!!.jsonObject.keys shouldBe setOf("expectedRevision", "offerings")
+            listOf("put", "delete").forEach { paths["/catalog-a/offerings/{offeringKey}"]!!.jsonObject.containsKey(it) shouldBe false }
+            paths.containsKey("/catalog-a/offerings/{offeringKey}/restore") shouldBe false
             listOf(
-                Triple("offerings/{offeringKey}", Method.PUT, "UpdateOffering"),
-                Triple("offerings/{offeringKey}", Method.DELETE, "RetireOffering"),
-                Triple("offerings/{offeringKey}/restore", Method.POST, "RestoreOffering"),
+                Triple("offerings", Method.PUT, "UpdateOfferings"),
+                Triple("offerings/retire", Method.POST, "RetireOfferings"),
+                Triple("offerings/restore", Method.POST, "RestoreOfferings"),
                 Triple("categories/{categoryKey}", Method.PUT, "UpdateCategory"),
                 Triple("categories/{categoryKey}", Method.DELETE, "RetireCategory"),
                 Triple("categories/{categoryKey}/restore", Method.POST, "RestoreCategory"),
@@ -829,15 +924,21 @@ class OfferingsCapabilitySpec :
                 if (method != Method.DELETE) {
                     request(method, "/catalog-b/$concrete", "{").status shouldBe Status.BAD_REQUEST
                     val invalid =
-                        if (suffix.startsWith("offerings")) {
-                            """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":" "}"""
+                        if (suffix == "offerings/retire") {
+                            """{"keys":["has space"]}"""
+                        } else if (suffix.startsWith("offerings")) {
+                            """{"offerings":[{"key":"missing","selectionState":"ENABLED","availability":"AVAILABLE",
+                                "category":"lifecycle","displayName":" "}]}"""
                         } else {
                             """{"displayName":" ","minimumSelections":-1}"""
                         }
                     request(method, "/catalog-b/$concrete", invalid).status shouldBe Status.UNPROCESSABLE_ENTITY
                     val body =
-                        if (suffix.startsWith("offerings")) {
-                            """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"Unknown"}"""
+                        if (suffix == "offerings/retire") {
+                            """{"keys":["missing"]}"""
+                        } else if (suffix.startsWith("offerings")) {
+                            """{"offerings":[{"key":"missing","selectionState":"ENABLED","availability":"AVAILABLE",
+                                "category":"lifecycle","displayName":"Unknown"}]}"""
                         } else {
                             """{"displayName":"Unknown"}"""
                         }
@@ -845,14 +946,10 @@ class OfferingsCapabilitySpec :
                 } else {
                     request(method, "/catalog-b/$concrete").status shouldBe Status.NOT_FOUND
                 }
-                val badKeyPath = concrete.replace("missing", "%20")
-                val validBody =
-                    if (suffix.startsWith("offerings")) {
-                        """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"Item"}"""
-                    } else {
-                        """{"displayName":"Category"}"""
-                    }
-                request(method, "/catalog-b/$badKeyPath", validBody).status shouldBe Status.UNPROCESSABLE_ENTITY
+                if (suffix.startsWith("categories")) {
+                    request(method, "/catalog-b/${concrete.replace("missing", "%20")}", """{"displayName":"Category"}""").status shouldBe
+                        Status.UNPROCESSABLE_ENTITY
+                }
             }
             listOf("offerings", "categories").forEach { kind ->
                 request(Method.GET, "/catalog-ro/retired/$kind", token = null).status shouldBe Status.NOT_FOUND
@@ -873,24 +970,19 @@ class OfferingsCapabilitySpec :
                 """{"selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"Horchata",
                     "price":{"kind":"PER_QUANTITY","amount":"$amount","currency":"USD","dimension":"guest"}}"""
             val addBody = body("0.50").replaceFirst("{", """{"key":"horchata", """)
-            request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CREATED
+            addOffering("$base", addBody).status shouldBe Status.CREATED
             val added = request(Method.GET, base).json()
             val path = "$base/offerings/horchata"
-            request(Method.POST, "$path/restore", body("0.75")).status shouldBe Status.CONFLICT
-            request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CONFLICT
-            // Unknown additive JSON keys follow CommerceJson conventions; they cannot change path identity.
-            request(Method.PUT, path, body("0.75").replaceFirst("{", """{"key":"unrelated", """)).let {
+            restoreOffering(path, body("0.75")).status shouldBe Status.CONFLICT
+            addOffering("$base", addBody).status shouldBe Status.CONFLICT
+            updateOffering(path, body("0.75")).let {
                 it.status shouldBe Status.OK
-                it
-                    .json()["offering"]!!
-                    .jsonObject["key"]!!
-                    .jsonPrimitive.content shouldBe "horchata"
+                it.offering()["key"]!!.jsonPrimitive.content shouldBe "horchata"
             }
-            request(Method.GET, "$base/offerings/unrelated").status shouldBe Status.NOT_FOUND
             val updated = request(Method.GET, base).json()
             request(Method.DELETE, "$base/categories/lifecycle").status shouldBe Status.CONFLICT
-            request(Method.PUT, path, body("0.75").replace("lifecycle", "missing-category")).status shouldBe Status.NOT_FOUND
-            request(Method.DELETE, path).let {
+            updateOffering(path, body("0.75").replace("lifecycle", "missing-category")).status shouldBe Status.NOT_FOUND
+            retireOffering(path).let {
                 it.status shouldBe Status.OK
                 it
                     .json()["revision"]!!
@@ -899,9 +991,9 @@ class OfferingsCapabilitySpec :
             }
             val retired = request(Method.GET, base).json()
             request(Method.GET, path).status shouldBe Status.NOT_FOUND
-            request(Method.POST, "$base/offerings", addBody).status shouldBe Status.CONFLICT
-            request(Method.PUT, path, body("0.75")).status shouldBe Status.CONFLICT
-            request(Method.DELETE, path).status shouldBe Status.CONFLICT
+            addOffering("$base", addBody).status shouldBe Status.CONFLICT
+            updateOffering(path, body("0.75")).status shouldBe Status.CONFLICT
+            retireOffering(path).status shouldBe Status.CONFLICT
             request(Method.GET, "$base/retired/offerings").json().let { response ->
                 response["revision"] shouldBe retired["revision"]
                 val entry = response["offerings"]!!.jsonArray.single().jsonObject
@@ -911,7 +1003,7 @@ class OfferingsCapabilitySpec :
                     .jsonObject["amount"]!!
                     .jsonPrimitive.content shouldBe "0.75"
             }
-            request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.OK
+            restoreOffering(path, body("1.00")).status shouldBe Status.OK
             val restored = request(Method.GET, base).json()
             request(Method.GET, "$base/retired/offerings").json()["offerings"]!!.jsonArray shouldBe JsonArray(emptyList())
             listOf(added, updated, retired, restored)
@@ -919,7 +1011,7 @@ class OfferingsCapabilitySpec :
                 .zipWithNext()
                 .forEach { (earlier, later) -> later shouldBe earlier + 1 }
 
-            request(Method.DELETE, path).status shouldBe Status.OK
+            retireOffering(path).status shouldBe Status.OK
             val categoryPath = "$base/categories/lifecycle"
             val editCategory = """{"displayName":"New Flavors","description":"Changed","minimumSelections":1,"maximumSelections":2}"""
             request(Method.PUT, categoryPath, editCategory).status shouldBe Status.OK
@@ -929,7 +1021,7 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "$base/categories", category).status shouldBe Status.CONFLICT
             request(Method.PUT, categoryPath, editCategory).status shouldBe Status.CONFLICT
             request(Method.DELETE, categoryPath).status shouldBe Status.CONFLICT
-            request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.NOT_FOUND
+            restoreOffering(path, body("1.00")).status shouldBe Status.NOT_FOUND
             request(Method.GET, "$base/retired/categories").json().let { response ->
                 response["revision"] shouldBe retiredCategory["revision"]
                 val entry = response["categories"]!!.jsonArray.single().jsonObject
@@ -938,14 +1030,13 @@ class OfferingsCapabilitySpec :
             }
             request(Method.POST, "$categoryPath/restore", editCategory).status shouldBe Status.OK
             request(Method.POST, "$categoryPath/restore", editCategory).status shouldBe Status.CONFLICT
-            request(Method.POST, "$path/restore", body("1.00")).status shouldBe Status.OK
+            restoreOffering(path, body("1.00")).status shouldBe Status.OK
             request(Method.GET, "$base/retired/categories").json()["categories"]!!.jsonArray shouldBe JsonArray(emptyList())
             request(Method.POST, "$base/categories", """{"key":"retired","displayName":"Retired is a legal key"}""").status shouldBe
                 Status.CREATED
             request(Method.GET, "$base/categories/retired").status shouldBe Status.OK
-            request(
-                Method.POST,
-                "$base/offerings",
+            addOffering(
+                "$base",
                 """{"key":"retired","selectionState":"ENABLED","availability":"AVAILABLE",
                     "category":"retired","displayName":"Legal key"}""",
             ).status shouldBe
@@ -981,7 +1072,7 @@ class OfferingsCapabilitySpec :
 
         test("expected revisions are required, typed, and distinguish malformed, invalid, and stale requests") {
             val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
-            listOf("OfferingMutationDto", "OfferingCategoryMutationDto", "AddOfferingDto", "AddOfferingCategoryDto").forEach { name ->
+            listOf("OfferingsBatchDto", "RetireOfferingsDto", "OfferingCategoryMutationDto", "AddOfferingCategoryDto").forEach { name ->
                 val schema = schemas[name]!!.jsonObject
                 schema["required"]!!.jsonArray.map { it.jsonPrimitive.content }.contains("expectedRevision") shouldBe true
                 schema["properties"]!!
@@ -990,16 +1081,20 @@ class OfferingsCapabilitySpec :
                     .jsonPrimitive.content shouldBe "integer"
             }
             listOf(
-                "offerings/new" to Method.PUT,
-                "offerings/new/restore" to Method.POST,
+                "offerings" to Method.PUT,
+                "offerings/restore" to Method.POST,
+                "offerings/retire" to Method.POST,
                 "offerings" to Method.POST,
                 "categories/new" to Method.PUT,
                 "categories/new/restore" to Method.POST,
                 "categories" to Method.POST,
             ).forEach { (suffix, method) ->
                 val baseBody =
-                    if (suffix.startsWith("offerings")) {
-                        """{"key":"new","selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle","displayName":"New"}"""
+                    if (suffix == "offerings/retire") {
+                        """{"keys":["new"]}"""
+                    } else if (suffix.startsWith("offerings")) {
+                        """{"offerings":[{"key":"new","selectionState":"ENABLED","availability":"AVAILABLE","category":"lifecycle",
+                            "displayName":"New"}]}"""
                     } else {
                         """{"key":"new","displayName":"New"}"""
                     }
@@ -1025,7 +1120,7 @@ class OfferingsCapabilitySpec :
                 }
             }
             val paths = request(Method.GET, "/openapi.json").json()["paths"]!!.jsonObject
-            listOf("offerings" to "offeringKey", "categories" to "categoryKey").forEach { (kind, key) ->
+            listOf("categories" to "categoryKey").forEach { (kind, key) ->
                 val template = "/catalog-b/$kind/{$key}"
                 val parameter =
                     paths[template]!!
@@ -1065,16 +1160,16 @@ class OfferingsCapabilitySpec :
             request(Method.POST, "$base/categories", """{"key":"stale-guard","displayName":"Guard"}""").status shouldBe Status.CREATED
             val body = """{"selectionState":"ENABLED","availability":"AVAILABLE",
                     "category":"stale-guard","displayName":"Horchata","price":{"kind":"FIXED","amount":"0.50","currency":"USD"}}"""
-            request(Method.POST, "$base/offerings", body.replaceFirst("{", """{"key":"stale-horchata", """)).status shouldBe Status.CREATED
+            addOffering("$base", body.replaceFirst("{", """{"key":"stale-horchata", """)).status shouldBe Status.CREATED
             val observed = request(Method.GET, base).json()
             val path = "$base/offerings/stale-horchata"
-            request(Method.PUT, path, body.replace("0.50", "0.75")).status shouldBe Status.OK
+            updateOffering(path, body.replace("0.50", "0.75")).status shouldBe Status.OK
             val committed = request(Method.GET, base).json()
             val stale =
                 body
                     .replaceFirst("{", "{\"expectedRevision\":${observed["revision"]!!.jsonPrimitive.content},")
                     .replace("Horchata", "Changed display name")
-            request(Method.PUT, path, stale, supplyExpectedRevision = false).let {
+            updateOffering(path, stale, supplyExpectedRevision = false).let {
                 it.status shouldBe Status.CONFLICT
                 it.json()["code"]!!.jsonPrimitive.content shouldBe "conflict"
             }
@@ -1086,8 +1181,7 @@ class OfferingsCapabilitySpec :
                 .jsonPrimitive.content shouldBe
                 "0.75"
             // The caller can reload and explicitly acknowledge the new revision.
-            request(
-                Method.PUT,
+            updateOffering(
                 path,
                 body.replaceFirst("{", "{\"expectedRevision\":${committed["revision"]!!.jsonPrimitive.content},"),
                 supplyExpectedRevision = false,
@@ -1098,7 +1192,7 @@ class OfferingsCapabilitySpec :
             val base = "/catalog-b"
             request(Method.POST, "$base/categories", """{"key":"eligibility","displayName":"Eligibility"}""").status shouldBe Status.CREATED
             val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
-            listOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto").forEach { name ->
+            listOf("OfferingDto").forEach { name ->
                 val schema = schemas[name]!!.jsonObject
                 schema["required"]!!
                     .jsonArray
@@ -1135,10 +1229,14 @@ class OfferingsCapabilitySpec :
                         ),
                     )
                 val path = "$base/offerings/eligibility-$index"
-                listOf(Method.POST to "$base/offerings", Method.PUT to path, Method.POST to "$path/restore").forEach { (method, target) ->
-                    if (target.endsWith("/restore")) {
+                listOf<Pair<String, (String) -> Response>>(
+                    "add" to { body -> addOffering(base, body) },
+                    "update" to { body -> updateOffering(path, body) },
+                    "restore" to { body -> restoreOffering(path, body) },
+                ).forEach { (action, write) ->
+                    if (action == "restore") {
                         val lastSeen = request(Method.GET, base).json()["revision"]
-                        request(Method.DELETE, path).status shouldBe Status.OK
+                        retireOffering(path).status shouldBe Status.OK
                         request(Method.GET, "$base/retired/offerings")
                             .json()["offerings"]!!
                             .jsonArray
@@ -1157,15 +1255,14 @@ class OfferingsCapabilitySpec :
                             JsonObject(fields + (field to JsonNull)),
                             JsonObject(fields + (field to JsonPrimitive("UNKNOWN"))),
                         ).forEach { malformed ->
-                            request(method, target, malformed.toString()).let {
+                            write(malformed.toString()).let {
                                 it.status shouldBe Status.BAD_REQUEST
                                 it.json()["code"]!!.jsonPrimitive.content shouldBe "malformed_request"
                             }
                         }
                     }
                     request(Method.GET, base).json() shouldBe before
-                    request(method, target, fields.toString()).status shouldBe
-                        if (target == "$base/offerings") Status.CREATED else Status.OK
+                    write(fields.toString()).status shouldBe if (action == "add") Status.CREATED else Status.OK
                     val current = request(Method.GET, base).json()
                     current["revision"]!!.jsonPrimitive.content.toInt() shouldBe before["revision"]!!.jsonPrimitive.content.toInt() + 1
                     val read = request(Method.GET, path).json()["offering"]!!.jsonObject
@@ -1189,11 +1286,89 @@ class OfferingsCapabilitySpec :
             }
         }
 
+        test("HTTP offering writes take batches and apply each batch atomically in one revision") {
+            val base = "/catalog-b"
+            request(Method.POST, "$base/categories", """{"key":"batch","displayName":"Batch"}""").status shouldBe Status.CREATED
+
+            fun item(
+                key: String,
+                name: String = key,
+                category: String = "batch",
+            ) = """{"key":"$key","category":"$category","displayName":"$name","selectionState":"ENABLED","availability":"AVAILABLE"}"""
+
+            fun batch(vararg items: String) = """{"offerings":[${items.joinToString(",")}]}"""
+
+            fun revision() =
+                request(Method.GET, base)
+                    .json()["revision"]!!
+                    .jsonPrimitive.content
+                    .toInt()
+
+            fun keys() =
+                request(Method.GET, "$base/categories/batch/offerings")
+                    .json()["offerings"]!!
+                    .jsonArray
+                    .map { it.jsonObject["key"]!!.jsonPrimitive.content }
+
+            val start = revision()
+            request(Method.POST, "$base/offerings", batch(item("b1"), item("b2"), item("b3"))).let {
+                it.status shouldBe Status.CREATED
+                it
+                    .json()["revision"]!!
+                    .jsonPrimitive.content
+                    .toInt() shouldBe start + 1
+            }
+            keys() shouldBe listOf("b1", "b2", "b3")
+            request(Method.PUT, "$base/offerings", batch(item("b3", "Third"), item("b1", "First"))).let {
+                it.status shouldBe Status.OK
+                it.json()["offerings"]!!.jsonArray.map { o -> o.jsonObject["displayName"]!!.jsonPrimitive.content } shouldBe
+                    listOf("Third", "First")
+            }
+            keys() shouldBe listOf("b1", "b2", "b3")
+            request(Method.POST, "$base/offerings/retire", """{"keys":["b1","b3"]}""").let {
+                it.status shouldBe Status.OK
+                it
+                    .json()["revision"]!!
+                    .jsonPrimitive.content
+                    .toInt() shouldBe start + 3
+            }
+            keys() shouldBe listOf("b2")
+            request(Method.POST, "$base/offerings/restore", batch(item("b3"), item("b1"))).status shouldBe Status.OK
+            keys() shouldBe listOf("b2", "b3", "b1")
+            revision() shouldBe start + 4
+            // The item-path read still serves an offering whose key is "retire" or "restore".
+            request(Method.GET, "$base/offerings/retire").status shouldBe Status.NOT_FOUND
+
+            // One bad item rejects the whole batch: no offering and no revision is written.
+            val before = request(Method.GET, base).json()
+            listOf(
+                Triple(Method.POST, "$base/offerings", batch(item("fresh"), item("b2"))) to Status.CONFLICT,
+                Triple(Method.POST, "$base/offerings", batch(item("fresh"), item("other", category = "absent"))) to Status.NOT_FOUND,
+                Triple(Method.POST, "$base/offerings", batch(item("fresh"), item("blank", " "))) to Status.UNPROCESSABLE_ENTITY,
+                Triple(Method.PUT, "$base/offerings", batch(item("b2", "Changed"), item("missing"))) to Status.NOT_FOUND,
+                Triple(Method.POST, "$base/offerings/retire", """{"keys":["b2","missing"]}""") to Status.NOT_FOUND,
+                Triple(Method.POST, "$base/offerings/restore", batch(item("b2"))) to Status.CONFLICT,
+                // A batch names at least one offering, each once, by a valid key.
+                Triple(Method.POST, "$base/offerings", batch()) to Status.UNPROCESSABLE_ENTITY,
+                Triple(Method.PUT, "$base/offerings", batch(item("b2"), item("b2"))) to Status.UNPROCESSABLE_ENTITY,
+                Triple(Method.POST, "$base/offerings/retire", """{"keys":[]}""") to Status.UNPROCESSABLE_ENTITY,
+                Triple(Method.POST, "$base/offerings/retire", """{"keys":["b2","b2"]}""") to Status.UNPROCESSABLE_ENTITY,
+                Triple(Method.POST, "$base/offerings/retire", """{"keys":["has space"]}""") to Status.UNPROCESSABLE_ENTITY,
+                Triple(Method.POST, "$base/offerings/retire", """{"keys":"b2"}""") to Status.BAD_REQUEST,
+                Triple(Method.PUT, "$base/offerings", """{"offerings":{}}""") to Status.BAD_REQUEST,
+            ).forEach { (call, status) ->
+                val (method, path, body) = call
+                withClue("$method $path $body") { request(method, path, body).status shouldBe status }
+            }
+            request(Method.GET, base).json() shouldBe before
+            request(Method.GET, "$base/offerings/fresh").status shouldBe Status.NOT_FOUND
+        }
+
         test("HTTP carries badge, status note, and info note as optional text replaced with the rest of the offering") {
             val base = "/catalog-b"
             request(Method.POST, "$base/categories", """{"key":"notes","displayName":"Notes"}""").status shouldBe Status.CREATED
             val schemas = request(Method.GET, "/openapi.json").json()["components"]!!.jsonObject["schemas"]!!.jsonObject
-            listOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto").forEach { name ->
+            listOf("OfferingDto").forEach { name ->
                 val schema = schemas[name]!!.jsonObject
                 val properties = schema["properties"]!!.jsonObject
                 listOf("badge", "statusNote", "infoNote").forEach { field ->
@@ -1210,7 +1385,7 @@ class OfferingsCapabilitySpec :
                 """{"category":"notes","displayName":"Peanut Butter","description":"Creamy",
                     "selectionState":"ENABLED","availability":"UNAVAILABLE","badge":"Popular","statusNote":"Back this fall",
                     "infoNote":"Contains peanuts"}"""
-            request(Method.POST, "$base/offerings", noted.replaceFirst("{", """{"key":"peanut-butter",""")).status shouldBe
+            addOffering("$base", noted.replaceFirst("{", """{"key":"peanut-butter",""")).status shouldBe
                 Status.CREATED
             request(Method.GET, path).json()["offering"]!!.jsonObject.let { offering ->
                 offering["badge"]!!.jsonPrimitive.content shouldBe "Popular"
@@ -1220,7 +1395,7 @@ class OfferingsCapabilitySpec :
             }
             listOf("badge", "statusNote", "infoNote").forEach { field ->
                 val before = request(Method.GET, base).json()
-                request(Method.PUT, path, noted.replace(Regex(""""$field":"[^"]*""""), """"$field":" """")).let {
+                updateOffering(path, noted.replace(Regex(""""$field":"[^"]*""""), """"$field":" """")).let {
                     it.status shouldBe Status.UNPROCESSABLE_ENTITY
                     it.json()["code"]!!.jsonPrimitive.content shouldBe "validation_failed"
                 }
@@ -1228,22 +1403,22 @@ class OfferingsCapabilitySpec :
             }
             // An update is a full replacement: omitted optional text is absent afterwards, like description.
             val plain = """{"category":"notes","displayName":"Peanut Butter","selectionState":"ENABLED","availability":"AVAILABLE"}"""
-            request(Method.PUT, path, plain).status shouldBe Status.OK
+            updateOffering(path, plain).status shouldBe Status.OK
             request(Method.GET, path).json()["offering"]!!.jsonObject.let { offering ->
                 offering.containsKey("badge") shouldBe false
                 offering.containsKey("statusNote") shouldBe false
                 offering.containsKey("infoNote") shouldBe false
                 offering.containsKey("description") shouldBe false
             }
-            request(Method.PUT, path, noted).status shouldBe Status.OK
-            request(Method.DELETE, path).status shouldBe Status.OK
+            updateOffering(path, noted).status shouldBe Status.OK
+            retireOffering(path).status shouldBe Status.OK
             request(Method.GET, "$base/retired/offerings")
                 .json()["offerings"]!!
                 .jsonArray
                 .map { it.jsonObject["offering"]!!.jsonObject }
                 .single { it["key"]!!.jsonPrimitive.content == "peanut-butter" }["badge"]!!
                 .jsonPrimitive.content shouldBe "Popular"
-            request(Method.POST, "$path/restore", plain).status shouldBe Status.OK
+            restoreOffering(path, plain).status shouldBe Status.OK
             request(Method.GET, path).json()["offering"]!!.jsonObject.containsKey("badge") shouldBe false
         }
 

@@ -1,12 +1,9 @@
 package io.github.castab.commerce.runtime.offering
 
 import io.github.castab.commerce.offering.Offering
-import io.github.castab.commerce.offering.OfferingAvailability
 import io.github.castab.commerce.offering.OfferingCategory
 import io.github.castab.commerce.offering.OfferingCategoryKey
 import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingPrice
-import io.github.castab.commerce.offering.OfferingSelectionState
 import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
@@ -60,28 +57,36 @@ class AddOfferingCategory(
         }
 }
 
-class AddOffering(
+/**
+ * Appends new offering identities, in order, in one successor when the expected revision is
+ * current. The batch is all or nothing: one invalid item saves nothing.
+ */
+class AddOfferings(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
 ) {
     operator fun invoke(
         catalogId: OfferingsCatalogId,
         expectedRevision: OfferingsRevision,
-        offering: Offering,
-    ): CatalogResult<Offering> =
+        offerings: List<Offering>,
+    ): CatalogResult<List<Offering>> =
         transactor.inTransaction { transaction ->
+            requireBatch(offerings.map { it.key })
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             requireExpectedRevision(latest, expectedRevision)
-            if (latest.offering(offering.key) != null) {
-                throw CommerceFailure.Conflict("Offering ${offering.key.value} already exists")
+            val retired = retiredOfferingKeys(repository, transaction, catalogId)
+            offerings.forEach { offering ->
+                if (latest.offering(offering.key) != null) {
+                    throw CommerceFailure.Conflict("Offering ${offering.key.value} already exists")
+                }
+                if (offering.key in retired) {
+                    throw CommerceFailure.Conflict("Offering ${offering.key.value} is retired; restore it instead")
+                }
+                requireCategory(latest, offering.category)
             }
-            if (repository.offeringKeyReserved(transaction, catalogId, offering.key)) {
-                throw CommerceFailure.Conflict("Offering ${offering.key.value} is retired; restore it instead")
-            }
-            requireCategory(latest, offering.category)
-            val next = latest.revise(latest.categories, latest.offerings + offering)
+            val next = latest.revise(latest.categories, latest.offerings + offerings)
             repository.save(transaction, next)
-            CatalogResult(next.reference, offering)
+            CatalogResult(next.reference, offerings.toList())
         }
 }
 
@@ -158,138 +163,125 @@ class GetOffering(
 }
 
 /**
- * Replaces an active identity in a successor when the expected revision is current.
- * Both independent selection properties are required, even for an unrelated property change.
+ * Replaces active identities in one successor when the expected revision is current. Each
+ * offering is a full replacement of the active offering with its key; each keeps its position.
+ * The batch is all or nothing: one invalid item saves nothing.
  */
-class UpdateOffering(
+class UpdateOfferings(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
 ) {
     operator fun invoke(
         catalogId: OfferingsCatalogId,
         expectedRevision: OfferingsRevision,
-        key: OfferingKey,
-        category: OfferingCategoryKey,
-        displayName: String,
-        description: String? = null,
-        price: OfferingPrice? = null,
-        selectionState: OfferingSelectionState,
-        availability: OfferingAvailability,
-        badge: String? = null,
-        statusNote: String? = null,
-        infoNote: String? = null,
-    ): CatalogResult<Offering> =
+        offerings: List<Offering>,
+    ): CatalogResult<List<Offering>> =
         transactor.inTransaction { transaction ->
+            requireBatch(offerings.map { it.key })
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             requireExpectedRevision(latest, expectedRevision)
-            requireActiveOffering(repository, transaction, latest, key)
-            requireCategory(latest, category)
-            val replacement =
-                validating {
-                    Offering(
-                        key,
-                        category,
-                        displayName,
-                        description,
-                        price,
-                        selectionState,
-                        availability,
-                        badge,
-                        statusNote,
-                        infoNote,
-                    )
-                }
-            val next = latest.replaceOffering(key, replacement)
+            val retired = retiredOfferingKeys(repository, transaction, catalogId)
+            offerings.forEach { replacement ->
+                requireActiveOffering(latest, retired, replacement.key)
+                requireCategory(latest, replacement.category)
+            }
+            val replacements = offerings.associateBy { it.key }
+            val next = latest.revise(latest.categories, latest.offerings.map { replacements[it.key] ?: it })
             repository.save(transaction, next)
-            CatalogResult(next.reference, replacement)
+            CatalogResult(next.reference, offerings.toList())
         }
 }
 
-/** Retires an active identity only when the caller's expected catalog revision is current. */
-class RetireOffering(
+/**
+ * Retires active identities in one successor when the expected revision is current. Other
+ * offerings retain their order. The batch is all or nothing.
+ */
+class RetireOfferings(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
 ) {
     operator fun invoke(
         catalogId: OfferingsCatalogId,
         expectedRevision: OfferingsRevision,
-        key: OfferingKey,
+        keys: List<OfferingKey>,
     ): OfferingsSnapshotReference =
         transactor.inTransaction { transaction ->
+            requireBatch(keys)
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             requireExpectedRevision(latest, expectedRevision)
-            requireActiveOffering(repository, transaction, latest, key)
-            val next = latest.withoutOffering(key)
+            val retired = retiredOfferingKeys(repository, transaction, catalogId)
+            keys.forEach { requireActiveOffering(latest, retired, it) }
+            val removed = keys.toSet()
+            val next = latest.revise(latest.categories, latest.offerings.filterNot { it.key in removed })
             repository.save(transaction, next)
             next.reference
         }
 }
 
 /**
- * Appends a retired identity in a successor when the expected revision is current.
- * The caller explicitly supplies both selection configuration and fulfillment availability.
+ * Appends retired identities, in order, in one successor when the expected revision is
+ * current. Each offering is the restored identity's complete new representation. The batch is
+ * all or nothing.
  */
-class RestoreOffering(
+class RestoreOfferings(
     private val transactor: Transactor,
     private val repository: OfferingsSnapshotRepository,
 ) {
     operator fun invoke(
         catalogId: OfferingsCatalogId,
         expectedRevision: OfferingsRevision,
-        key: OfferingKey,
-        category: OfferingCategoryKey,
-        displayName: String,
-        description: String? = null,
-        price: OfferingPrice? = null,
-        selectionState: OfferingSelectionState,
-        availability: OfferingAvailability,
-        badge: String? = null,
-        statusNote: String? = null,
-        infoNote: String? = null,
-    ): CatalogResult<Offering> =
+        offerings: List<Offering>,
+    ): CatalogResult<List<Offering>> =
         transactor.inTransaction { transaction ->
+            requireBatch(offerings.map { it.key })
             val latest = repository.retrieveLatestVersion(transaction, catalogId) ?: missingCatalog(catalogId)
             requireExpectedRevision(latest, expectedRevision)
-            if (latest.offering(key) != null) {
-                throw CommerceFailure.Conflict("Offering ${key.value} is already active")
-            }
-            if (!repository.offeringKeyReserved(transaction, catalogId, key)) {
-                throw CommerceFailure.NotFound("Offering ${key.value} was not found")
-            }
-            requireCategory(latest, category)
-            val replacement =
-                validating {
-                    Offering(
-                        key,
-                        category,
-                        displayName,
-                        description,
-                        price,
-                        selectionState,
-                        availability,
-                        badge,
-                        statusNote,
-                        infoNote,
-                    )
+            val retired = retiredOfferingKeys(repository, transaction, catalogId)
+            offerings.forEach { restored ->
+                if (latest.offering(restored.key) != null) {
+                    throw CommerceFailure.Conflict("Offering ${restored.key.value} is already active")
                 }
-            val next = latest.revise(latest.categories, latest.offerings + replacement)
+                if (restored.key !in retired) {
+                    throw CommerceFailure.NotFound("Offering ${restored.key.value} was not found")
+                }
+                requireCategory(latest, restored.category)
+            }
+            val next = latest.revise(latest.categories, latest.offerings + offerings)
             repository.save(transaction, next)
-            CatalogResult(next.reference, replacement)
+            CatalogResult(next.reference, offerings.toList())
         }
 }
 
-private fun requireActiveOffering(
+private fun retiredOfferingKeys(
     repository: OfferingsSnapshotRepository,
     transaction: Transaction,
+    catalogId: OfferingsCatalogId,
+): Set<OfferingKey> = repository.retrieveRetiredOfferings(transaction, catalogId).map { it.value.key }.toSet()
+
+private fun requireActiveOffering(
     latest: OfferingsSnapshot,
+    retired: Set<OfferingKey>,
     key: OfferingKey,
 ) {
     if (latest.offering(key) != null) return
-    if (repository.offeringKeyReserved(transaction, latest.catalogId, key)) {
+    if (key in retired) {
         throw CommerceFailure.Conflict("Offering ${key.value} is retired; restore it before updating or retiring it")
     }
     throw CommerceFailure.NotFound("Offering ${key.value} was not found")
 }
+
+/** A batch names at least one offering and no offering twice. */
+private fun requireBatch(keys: List<OfferingKey>) =
+    validating {
+        require(keys.isNotEmpty()) { "At least one offering is required" }
+        val repeated =
+            keys
+                .groupingBy { it }
+                .eachCount()
+                .filterValues { it > 1 }
+                .keys
+        require(repeated.isEmpty()) { "Offerings appear more than once: ${repeated.joinToString { it.value }}" }
+    }
 
 /** Replaces an active identity in place only when the caller's expected catalog revision is current. */
 class UpdateOfferingCategory(

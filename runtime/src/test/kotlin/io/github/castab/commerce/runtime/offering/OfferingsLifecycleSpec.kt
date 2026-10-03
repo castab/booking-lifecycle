@@ -68,8 +68,15 @@ class OfferingsLifecycleSpec :
 
         test("independent selection transitions advance the revision and retirement retains both facts") {
             val id = catalog()
-            val original = Offering(horchata, flavors, "Horchata")
-            AddOffering(transactor, repository)(id, observedRevision(id), original)
+            val original =
+                Offering(
+                    horchata,
+                    flavors,
+                    "Horchata",
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                )
+            AddOfferings(transactor, repository)(id, observedRevision(id), listOf(original))
             val states =
                 listOf(
                     OfferingSelectionState.ENABLED to OfferingAvailability.AVAILABLE,
@@ -88,14 +95,21 @@ class OfferingsLifecycleSpec :
             states.drop(1).forEach { (selectionState, availability) ->
                 val previous = history.last()
                 val replacement = previous.offerings.single().copy(selectionState = selectionState, availability = availability)
-                UpdateOffering(transactor, repository)(
+                UpdateOfferings(
+                    transactor,
+                    repository,
+                )(
                     id,
                     previous.revision,
-                    horchata,
-                    flavors,
-                    replacement.displayName,
-                    selectionState = replacement.selectionState,
-                    availability = replacement.availability,
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            replacement.displayName,
+                            selectionState = replacement.selectionState,
+                            availability = replacement.availability,
+                        ),
+                    ),
                 )
                 val current = latest(id)
                 current.previousRevision shouldBe previous.revision
@@ -106,42 +120,51 @@ class OfferingsLifecycleSpec :
             history.map { it.offerings.single().selectionState to it.offerings.single().availability }.shouldContainExactly(states)
             val both = history.last()
             shouldThrow<CommerceFailure.Conflict> {
-                UpdateOffering(transactor, repository)(
+                UpdateOfferings(
+                    transactor,
+                    repository,
+                )(
                     id,
                     history.first().revision,
-                    horchata,
-                    flavors,
-                    "Stale",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Stale",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             latest(id) shouldBe both
-            RetireOffering(transactor, repository)(id, both.revision, horchata)
+            RetireOfferings(transactor, repository)(id, both.revision, listOf(horchata))
             val retired = latest(id)
             retired.offerings shouldBe emptyList()
             ListRetiredOfferings(
                 transactor,
                 repository,
             )(id).value.shouldContainExactly(CatalogResult(both.reference, both.offerings.single()))
-            RestoreOffering(transactor, repository)(
+            RestoreOfferings(
+                transactor,
+                repository,
+            )(
                 id,
                 retired.revision,
-                horchata,
-                flavors,
-                "Horchata",
-                selectionState = OfferingSelectionState.DISABLED,
-                availability = OfferingAvailability.UNAVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata",
+                        selectionState = OfferingSelectionState.DISABLED,
+                        availability = OfferingAvailability.UNAVAILABLE,
+                    ),
+                ),
             )
             latest(id).offerings.single() shouldBe both.offerings.single()
         }
 
-        test("full replacement mutation API requires both properties and unrelated updates preserve them explicitly") {
-            listOf(UpdateOffering::class, RestoreOffering::class).forEach { operation ->
-                val parameters = operation.members.single { it.name == "invoke" }.parameters
-                parameters.single { it.name == "selectionState" }.isOptional shouldBe false
-                parameters.single { it.name == "availability" }.isOptional shouldBe false
-            }
+        test("an update is a full replacement, so unrelated changes keep both properties only when the caller supplies them") {
             val id = catalog()
             val both =
                 Offering(
@@ -151,78 +174,209 @@ class OfferingsLifecycleSpec :
                     selectionState = OfferingSelectionState.DISABLED,
                     availability = OfferingAvailability.UNAVAILABLE,
                 )
-            AddOffering(transactor, repository)(id, observedRevision(id), both)
+            AddOfferings(transactor, repository)(id, observedRevision(id), listOf(both))
             val before = latest(id)
-            UpdateOffering(transactor, repository)(
+            UpdateOfferings(
+                transactor,
+                repository,
+            )(
                 id,
                 before.revision,
-                horchata,
-                flavors,
-                "Updated name",
-                selectionState = both.selectionState,
-                availability = both.availability,
+                listOf(Offering(horchata, flavors, "Updated name", selectionState = both.selectionState, availability = both.availability)),
             )
             latest(id).offerings.single() shouldBe both.copy(displayName = "Updated name")
             latest(id).previousRevision shouldBe before.revision
         }
 
+        test("each batch adds, updates, retires, or restores several offerings in exactly one successor revision") {
+            val id = catalog()
+            val (a, b, c) =
+                listOf("a", "b", "c").map {
+                    Offering(
+                        OfferingKey(it),
+                        flavors,
+                        it.uppercase(),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    )
+                }
+            val start = observedRevision(id)
+
+            AddOfferings(transactor, repository)(id, start, listOf(a, b, c)).let {
+                it.reference.revision shouldBe start.next()
+                it.value.shouldContainExactly(a, b, c)
+            }
+            latest(id).offerings.shouldContainExactly(a, b, c)
+
+            val renamedC = c.copy(displayName = "C2")
+            val renamedA = a.copy(displayName = "A2", price = price("1.00"))
+            // Update order in the batch does not move offerings: each keeps its position.
+            UpdateOfferings(transactor, repository)(id, observedRevision(id), listOf(renamedC, renamedA))
+            latest(id).offerings.shouldContainExactly(renamedA, b, renamedC)
+            latest(id).revision shouldBe start.next().next()
+
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(OfferingKey("c"), OfferingKey("a")))
+            val retired = latest(id)
+            retired.offerings.shouldContainExactly(b)
+            ListRetiredOfferings(transactor, repository)(id).value.map { it.value.key.value to it.reference.revision }.shouldContainExactly(
+                "a" to start.next().next(),
+                "c" to start.next().next(),
+            )
+
+            // Restoration appends in batch order.
+            RestoreOfferings(transactor, repository)(id, observedRevision(id), listOf(c, a))
+            latest(id).offerings.shouldContainExactly(b, c, a)
+            latest(id).revision.number shouldBe start.number + 4
+        }
+
+        test("a batch is all or nothing: one invalid item saves no item and no revision") {
+            val id = catalog()
+            val existing =
+                Offering(
+                    OfferingKey("existing"),
+                    flavors,
+                    "Existing",
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                )
+            AddOfferings(transactor, repository)(id, observedRevision(id), listOf(existing))
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(existing.key))
+            AddOfferings(transactor, repository)(id, observedRevision(id), listOf(existing.copy(key = OfferingKey("active"))))
+            val before = latest(id)
+            val fresh =
+                Offering(
+                    OfferingKey("fresh"),
+                    flavors,
+                    "Fresh",
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                )
+            val missing =
+                Offering(
+                    OfferingKey("missing"),
+                    flavors,
+                    "Missing",
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                )
+            val active = before.offerings.single()
+
+            shouldThrow<CommerceFailure.Conflict> { AddOfferings(transactor, repository)(id, before.revision, listOf(fresh, active)) }
+            shouldThrow<CommerceFailure.Conflict> { AddOfferings(transactor, repository)(id, before.revision, listOf(fresh, existing)) }
+            shouldThrow<CommerceFailure.NotFound> {
+                AddOfferings(
+                    transactor,
+                    repository,
+                )(id, before.revision, listOf(fresh, fresh.copy(key = OfferingKey("x"), category = OfferingCategoryKey("absent"))))
+            }
+            shouldThrow<CommerceFailure.NotFound> {
+                UpdateOfferings(transactor, repository)(id, before.revision, listOf(active.copy(displayName = "Changed"), missing))
+            }
+            shouldThrow<CommerceFailure.Conflict> {
+                UpdateOfferings(transactor, repository)(id, before.revision, listOf(active.copy(displayName = "Changed"), existing))
+            }
+            shouldThrow<CommerceFailure.NotFound> {
+                RetireOfferings(transactor, repository)(id, before.revision, listOf(active.key, missing.key))
+            }
+            shouldThrow<CommerceFailure.Conflict> {
+                RestoreOfferings(transactor, repository)(id, before.revision, listOf(existing, active))
+            }
+            shouldThrow<CommerceFailure.NotFound> {
+                RestoreOfferings(transactor, repository)(id, before.revision, listOf(existing, missing))
+            }
+            latest(id) shouldBe before
+
+            // A batch names at least one offering, and each offering once.
+            listOf<() -> Any>(
+                { AddOfferings(transactor, repository)(id, before.revision, emptyList()) },
+                { UpdateOfferings(transactor, repository)(id, before.revision, emptyList()) },
+                { RetireOfferings(transactor, repository)(id, before.revision, emptyList()) },
+                { RestoreOfferings(transactor, repository)(id, before.revision, emptyList()) },
+                { AddOfferings(transactor, repository)(id, before.revision, listOf(fresh, fresh.copy(displayName = "Twice"))) },
+                { UpdateOfferings(transactor, repository)(id, before.revision, listOf(active, active)) },
+                { RetireOfferings(transactor, repository)(id, before.revision, listOf(active.key, active.key)) },
+                { RestoreOfferings(transactor, repository)(id, before.revision, listOf(existing, existing)) },
+            ).forEach { attempt -> shouldThrow<CommerceFailure.ValidationFailed> { attempt() } }
+            latest(id) shouldBe before
+        }
+
         test("offering keys remain reserved through retirement and restoration") {
             val id = catalog()
             val initial = latest(id)
-            val offering = Offering(horchata, flavors, "Horchata", price = price("0.50"))
-            AddOffering(transactor, repository)(id, observedRevision(id), offering)
+            val offering =
+                Offering(
+                    horchata,
+                    flavors,
+                    "Horchata",
+                    price = price("0.50"),
+                    selectionState = OfferingSelectionState.ENABLED,
+                    availability = OfferingAvailability.AVAILABLE,
+                )
+            AddOfferings(transactor, repository)(id, observedRevision(id), listOf(offering))
             val added = latest(id)
-            UpdateOffering(
+            UpdateOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                horchata,
-                flavors,
-                "Horchata Soft Serve",
-                price = price("0.75"),
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata Soft Serve",
+                        price = price("0.75"),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             val updated = latest(id)
-            RetireOffering(transactor, repository)(id, observedRevision(id), horchata).revision.number shouldBe 5
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata)).revision.number shouldBe 5
             val retired = latest(id)
             shouldThrow<CommerceFailure.Conflict> {
-                AddOffering(transactor, repository)(id, observedRevision(id), offering.copy(displayName = "Unrelated"))
+                AddOfferings(transactor, repository)(id, observedRevision(id), listOf(offering.copy(displayName = "Unrelated")))
             }
             shouldThrow<CommerceFailure.Conflict> {
-                UpdateOffering(
+                UpdateOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     observedRevision(id),
-                    horchata,
-                    flavors,
-                    "Again",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Again",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
-            shouldThrow<CommerceFailure.Conflict> { RetireOffering(transactor, repository)(id, observedRevision(id), horchata) }
+            shouldThrow<CommerceFailure.Conflict> { RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata)) }
             latest(id) shouldBe retired
             ListRetiredOfferings(transactor, repository)(id).let {
                 it.reference shouldBe retired.reference
                 it.value.shouldContainExactly(CatalogResult(updated.reference, updated.offerings.single()))
             }
-            RestoreOffering(
+            RestoreOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                horchata,
-                flavors,
-                "Restored Horchata",
-                price = price("1.00"),
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Restored Horchata",
+                        price = price("1.00"),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             val restored = latest(id)
             restored.offerings.single().key shouldBe horchata
@@ -234,7 +388,7 @@ class OfferingsLifecycleSpec :
                 repository.offeringKeyReserved(it, id, horchata) shouldBe true
                 repository.offeringKeyReserved(it, OfferingsCatalogId(UUID.randomUUID()), horchata) shouldBe false
             }
-            RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
             transactor.inTransaction {
                 repository.retrieveRetiredOfferings(it, id).shouldContainExactly(
                     RetiredCatalogValue(restored.reference, restored.offerings.single()),
@@ -290,31 +444,39 @@ class OfferingsLifecycleSpec :
                 shouldThrow<CommerceFailure.NotFound> {
                     when (action) {
                         "update" ->
-                            UpdateOffering(
+                            UpdateOfferings(
                                 transactor,
                                 repository,
                             )(
                                 id,
                                 observedRevision(id),
-                                horchata,
-                                flavors,
-                                "Unknown",
-                                selectionState = OfferingSelectionState.ENABLED,
-                                availability = OfferingAvailability.AVAILABLE,
+                                listOf(
+                                    Offering(
+                                        horchata,
+                                        flavors,
+                                        "Unknown",
+                                        selectionState = OfferingSelectionState.ENABLED,
+                                        availability = OfferingAvailability.AVAILABLE,
+                                    ),
+                                ),
                             )
-                        "retire" -> RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+                        "retire" -> RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
                         else ->
-                            RestoreOffering(
+                            RestoreOfferings(
                                 transactor,
                                 repository,
                             )(
                                 id,
                                 observedRevision(id),
-                                horchata,
-                                flavors,
-                                "Unknown",
-                                selectionState = OfferingSelectionState.ENABLED,
-                                availability = OfferingAvailability.AVAILABLE,
+                                listOf(
+                                    Offering(
+                                        horchata,
+                                        flavors,
+                                        "Unknown",
+                                        selectionState = OfferingSelectionState.ENABLED,
+                                        availability = OfferingAvailability.AVAILABLE,
+                                    ),
+                                ),
                             )
                     }
                 }
@@ -332,25 +494,36 @@ class OfferingsLifecycleSpec :
 
         test("add and restore reject active identities and missing catalogs remain not found") {
             val id = catalog()
-            val offering = Offering(horchata, flavors, "Horchata")
-            AddOffering(transactor, repository)(id, observedRevision(id), offering)
-            val before = latest(id)
-            shouldThrow<CommerceFailure.Conflict> { AddOffering(transactor, repository)(id, observedRevision(id), offering) }
-            shouldThrow<CommerceFailure.Conflict> {
-                AddOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategory(flavors, "Flavors"))
-            }
-            shouldThrow<CommerceFailure.Conflict> {
-                RestoreOffering(
-                    transactor,
-                    repository,
-                )(
-                    id,
-                    observedRevision(id),
+            val offering =
+                Offering(
                     horchata,
                     flavors,
                     "Horchata",
                     selectionState = OfferingSelectionState.ENABLED,
                     availability = OfferingAvailability.AVAILABLE,
+                )
+            AddOfferings(transactor, repository)(id, observedRevision(id), listOf(offering))
+            val before = latest(id)
+            shouldThrow<CommerceFailure.Conflict> { AddOfferings(transactor, repository)(id, observedRevision(id), listOf(offering)) }
+            shouldThrow<CommerceFailure.Conflict> {
+                AddOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategory(flavors, "Flavors"))
+            }
+            shouldThrow<CommerceFailure.Conflict> {
+                RestoreOfferings(
+                    transactor,
+                    repository,
+                )(
+                    id,
+                    observedRevision(id),
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             shouldThrow<CommerceFailure.Conflict> {
@@ -364,17 +537,21 @@ class OfferingsLifecycleSpec :
             shouldThrow<CommerceFailure.NotFound> { ListRetiredOfferings(transactor, repository)(missing) }
             shouldThrow<CommerceFailure.NotFound> { ListRetiredCategories(transactor, repository)(missing) }
             shouldThrow<CommerceFailure.NotFound> {
-                UpdateOffering(
+                UpdateOfferings(
                     transactor,
                     repository,
                 )(
                     missing,
                     observedRevision(missing),
-                    horchata,
-                    flavors,
-                    "Horchata",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             shouldThrow<CommerceFailure.NotFound> {
@@ -391,41 +568,79 @@ class OfferingsLifecycleSpec :
                 AddOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategory(OfferingCategoryKey(it), it))
             }
             listOf("vanilla", "horchata", "chocolate").forEach {
-                AddOffering(transactor, repository)(id, observedRevision(id), Offering(OfferingKey(it), flavors, it))
+                AddOfferings(
+                    transactor,
+                    repository,
+                )(
+                    id,
+                    observedRevision(id),
+                    listOf(
+                        Offering(
+                            OfferingKey(it),
+                            flavors,
+                            it,
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
+                )
             }
-            UpdateOffering(
+            UpdateOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                horchata,
-                flavors,
-                "Changed",
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Changed",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             UpdateOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategoryKey("second"), "Changed")
             latest(id).offerings.map { it.key.value }.shouldContainExactly("vanilla", "horchata", "chocolate")
             latest(id).categories.map { it.key.value }.shouldContainExactly("flavors", "second", "third")
-            RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
             RetireOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategoryKey("second"))
             latest(id).offerings.map { it.key.value }.shouldContainExactly("vanilla", "chocolate")
             latest(id).categories.map { it.key.value }.shouldContainExactly("flavors", "third")
-            RestoreOffering(
+            RestoreOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                horchata,
-                flavors,
-                "Restored",
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Restored",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             RestoreOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategoryKey("second"), "Restored")
-            AddOffering(transactor, repository)(id, observedRevision(id), Offering(OfferingKey("last"), flavors, "Last"))
+            AddOfferings(
+                transactor,
+                repository,
+            )(
+                id,
+                observedRevision(id),
+                listOf(
+                    Offering(
+                        OfferingKey("last"),
+                        flavors,
+                        "Last",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
+            )
             AddOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategory(OfferingCategoryKey("last"), "Last"))
             latest(id).offerings.map { it.key.value }.shouldContainExactly("vanilla", "chocolate", "horchata", "last")
             latest(id).categories.map { it.key.value }.shouldContainExactly("flavors", "third", "second", "last")
@@ -433,96 +648,135 @@ class OfferingsLifecycleSpec :
 
         test("category retirement never cascades and offering moves and restores require a current category") {
             val id = catalog()
-            AddOffering(transactor, repository)(id, observedRevision(id), Offering(horchata, flavors, "Horchata"))
+            AddOfferings(
+                transactor,
+                repository,
+            )(
+                id,
+                observedRevision(id),
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
+            )
             val original = latest(id)
             shouldThrow<CommerceFailure.Conflict> { RetireOfferingCategory(transactor, repository)(id, observedRevision(id), flavors) }
             val missing = OfferingCategoryKey("missing")
             shouldThrow<CommerceFailure.NotFound> {
-                UpdateOffering(
+                UpdateOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     observedRevision(id),
-                    horchata,
-                    missing,
-                    "Horchata",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            missing,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             val target = OfferingCategoryKey("target")
             AddOfferingCategory(transactor, repository)(id, observedRevision(id), OfferingCategory(target, "Target"))
             RetireOfferingCategory(transactor, repository)(id, observedRevision(id), target)
             shouldThrow<CommerceFailure.NotFound> {
-                UpdateOffering(
+                UpdateOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     observedRevision(id),
-                    horchata,
-                    target,
-                    "Horchata",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            target,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
-            RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
             shouldThrow<CommerceFailure.NotFound> {
-                RestoreOffering(
+                RestoreOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     observedRevision(id),
-                    horchata,
-                    missing,
-                    "Horchata",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            missing,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             shouldThrow<CommerceFailure.NotFound> {
-                RestoreOffering(
+                RestoreOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     observedRevision(id),
-                    horchata,
-                    target,
-                    "Horchata",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            target,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             RetireOfferingCategory(transactor, repository)(id, observedRevision(id), flavors)
             RestoreOfferingCategory(transactor, repository)(id, observedRevision(id), target, "Target")
-            RestoreOffering(
+            RestoreOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                horchata,
-                target,
-                "Horchata",
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        target,
+                        "Horchata",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             RestoreOfferingCategory(transactor, repository)(id, observedRevision(id), flavors, "Flavors")
-            UpdateOffering(
+            UpdateOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                horchata,
-                flavors,
-                "Horchata",
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             RetireOfferingCategory(transactor, repository)(id, observedRevision(id), target)
         }
@@ -531,27 +785,61 @@ class OfferingsLifecycleSpec :
             val id = catalog()
             val other = catalog()
             listOf("z", "a").forEach {
-                AddOffering(transactor, repository)(id, observedRevision(id), Offering(OfferingKey(it), flavors, it))
+                AddOfferings(
+                    transactor,
+                    repository,
+                )(
+                    id,
+                    observedRevision(id),
+                    listOf(
+                        Offering(
+                            OfferingKey(it),
+                            flavors,
+                            it,
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
+                )
             }
-            UpdateOffering(
+            UpdateOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 observedRevision(id),
-                OfferingKey("a"),
-                flavors,
-                "Last A",
-                "Description",
-                price("2.5000"),
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        OfferingKey("a"),
+                        flavors,
+                        "Last A",
+                        "Description",
+                        price("2.5000"),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             val lastA = latest(id)
-            RetireOffering(transactor, repository)(id, observedRevision(id), OfferingKey("a"))
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(OfferingKey("a")))
             val lastZ = latest(id)
-            RetireOffering(transactor, repository)(id, observedRevision(id), OfferingKey("z"))
-            AddOffering(transactor, repository)(other, observedRevision(other), Offering(OfferingKey("a"), flavors, "Other catalog"))
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(OfferingKey("z")))
+            AddOfferings(
+                transactor,
+                repository,
+            )(
+                other,
+                observedRevision(other),
+                listOf(
+                    Offering(
+                        OfferingKey("a"),
+                        flavors,
+                        "Other catalog",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
+            )
             val retired = ListRetiredOfferings(transactor, repository)(id)
             retired.value.map { it.value.key.value }.shouldContainExactly("a", "z")
             retired.value[0] shouldBe CatalogResult(lastA.reference, lastA.offering(OfferingKey("a"))!!)
@@ -566,16 +854,9 @@ class OfferingsLifecycleSpec :
         }
 
         test("invalid editable values leave all history unchanged") {
-            val id = catalog()
-            AddOffering(transactor, repository)(id, observedRevision(id), Offering(horchata, flavors, "Horchata"))
-            val before = latest(id)
-            shouldThrow<CommerceFailure.ValidationFailed> {
-                UpdateOffering(
-                    transactor,
-                    repository,
-                )(
-                    id,
-                    observedRevision(id),
+            // A blank display name never reaches an operation: Offering itself rejects it.
+            shouldThrow<IllegalArgumentException> {
+                Offering(
                     horchata,
                     flavors,
                     " ",
@@ -583,11 +864,39 @@ class OfferingsLifecycleSpec :
                     availability = OfferingAvailability.AVAILABLE,
                 )
             }
+            val id = catalog()
+            AddOfferings(
+                transactor,
+                repository,
+            )(
+                id,
+                observedRevision(id),
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata",
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
+            )
+            val before = latest(id)
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                UpdateOfferings(
+                    transactor,
+                    repository,
+                )(
+                    id,
+                    observedRevision(id),
+                    emptyList(),
+                )
+            }
             shouldThrow<CommerceFailure.ValidationFailed> {
                 UpdateOfferingCategory(transactor, repository)(id, observedRevision(id), flavors, "Flavors", minimumSelections = -1)
             }
             latest(id) shouldBe before
-            RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+            RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
             RetireOfferingCategory(transactor, repository)(id, observedRevision(id), flavors)
             val retired = latest(id)
             shouldThrow<CommerceFailure.ValidationFailed> {
@@ -600,17 +909,28 @@ class OfferingsLifecycleSpec :
             RestoreOfferingCategory(transactor, repository)(id, observedRevision(id), flavors, "Flavors")
             val restoredCategory = latest(id)
             shouldThrow<CommerceFailure.ValidationFailed> {
-                RestoreOffering(
+                RestoreOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     observedRevision(id),
-                    horchata,
-                    flavors,
-                    " ",
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Again",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             latest(id) shouldBe restoredCategory
@@ -618,35 +938,59 @@ class OfferingsLifecycleSpec :
 
         test("a stale replacement cannot undo a committed price update or create another revision") {
             val id = catalog()
-            AddOffering(transactor, repository)(id, observedRevision(id), Offering(horchata, flavors, "Horchata", price = price("0.50")))
+            AddOfferings(
+                transactor,
+                repository,
+            )(
+                id,
+                observedRevision(id),
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata",
+                        price = price("0.50"),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
+            )
             val uiObserved = latest(id)
-            UpdateOffering(
+            UpdateOfferings(
                 transactor,
                 repository,
             )(
                 id,
                 uiObserved.revision,
-                horchata,
-                flavors,
-                "Horchata",
-                price = price("0.75"),
-                selectionState = OfferingSelectionState.ENABLED,
-                availability = OfferingAvailability.AVAILABLE,
+                listOf(
+                    Offering(
+                        horchata,
+                        flavors,
+                        "Horchata",
+                        price = price("0.75"),
+                        selectionState = OfferingSelectionState.ENABLED,
+                        availability = OfferingAvailability.AVAILABLE,
+                    ),
+                ),
             )
             val committed = latest(id)
             shouldThrow<CommerceFailure.Conflict> {
-                UpdateOffering(
+                UpdateOfferings(
                     transactor,
                     repository,
                 )(
                     id,
                     uiObserved.revision,
-                    horchata,
-                    flavors,
-                    "New display name",
-                    price = price("0.50"),
-                    selectionState = OfferingSelectionState.ENABLED,
-                    availability = OfferingAvailability.AVAILABLE,
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "New display name",
+                            price = price("0.50"),
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
                 )
             }
             latest(id) shouldBe committed
@@ -665,9 +1009,24 @@ class OfferingsLifecycleSpec :
         ).forEach { action ->
             test("$action rejects stale client revisions before a successor is created") {
                 val id = catalog()
-                AddOffering(transactor, repository)(id, observedRevision(id), Offering(horchata, flavors, "Horchata"))
+                AddOfferings(
+                    transactor,
+                    repository,
+                )(
+                    id,
+                    observedRevision(id),
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
+                )
                 if (action in setOf("restoreOffering", "retireCategory", "restoreCategory")) {
-                    RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+                    RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
                 }
                 if (action == "restoreCategory") RetireOfferingCategory(transactor, repository)(id, observedRevision(id), flavors)
                 val uiObserved = latest(id)
@@ -679,41 +1038,61 @@ class OfferingsLifecycleSpec :
                 shouldThrow<CommerceFailure.Conflict> {
                     when (action) {
                         "addOffering" ->
-                            AddOffering(
+                            AddOfferings(
                                 transactor,
                                 repository,
-                            )(id, uiObserved.revision, Offering(OfferingKey("new"), flavors, "New"))
+                            )(
+                                id,
+                                uiObserved.revision,
+                                listOf(
+                                    Offering(
+                                        OfferingKey("new"),
+                                        flavors,
+                                        "New",
+                                        selectionState = OfferingSelectionState.ENABLED,
+                                        availability = OfferingAvailability.AVAILABLE,
+                                    ),
+                                ),
+                            )
                         "addCategory" ->
                             AddOfferingCategory(
                                 transactor,
                                 repository,
                             )(id, uiObserved.revision, OfferingCategory(OfferingCategoryKey("new"), "New"))
                         "updateOffering" ->
-                            UpdateOffering(
+                            UpdateOfferings(
                                 transactor,
                                 repository,
                             )(
                                 id,
                                 uiObserved.revision,
-                                horchata,
-                                flavors,
-                                "New",
-                                selectionState = OfferingSelectionState.ENABLED,
-                                availability = OfferingAvailability.AVAILABLE,
+                                listOf(
+                                    Offering(
+                                        horchata,
+                                        flavors,
+                                        "New",
+                                        selectionState = OfferingSelectionState.ENABLED,
+                                        availability = OfferingAvailability.AVAILABLE,
+                                    ),
+                                ),
                             )
-                        "retireOffering" -> RetireOffering(transactor, repository)(id, uiObserved.revision, horchata)
+                        "retireOffering" -> RetireOfferings(transactor, repository)(id, uiObserved.revision, listOf(horchata))
                         "restoreOffering" ->
-                            RestoreOffering(
+                            RestoreOfferings(
                                 transactor,
                                 repository,
                             )(
                                 id,
                                 uiObserved.revision,
-                                horchata,
-                                flavors,
-                                "New",
-                                selectionState = OfferingSelectionState.ENABLED,
-                                availability = OfferingAvailability.AVAILABLE,
+                                listOf(
+                                    Offering(
+                                        horchata,
+                                        flavors,
+                                        "New",
+                                        selectionState = OfferingSelectionState.ENABLED,
+                                        availability = OfferingAvailability.AVAILABLE,
+                                    ),
+                                ),
                             )
                         "updateCategory" -> UpdateOfferingCategory(transactor, repository)(id, uiObserved.revision, flavors, "New")
                         "retireCategory" -> RetireOfferingCategory(transactor, repository)(id, uiObserved.revision, flavors)
@@ -727,8 +1106,23 @@ class OfferingsLifecycleSpec :
         listOf("update", "retire", "restore").forEach { action ->
             test("competing $action writers from one revision produce one successor and one conflict") {
                 val id = catalog()
-                AddOffering(transactor, repository)(id, observedRevision(id), Offering(horchata, flavors, "Horchata"))
-                if (action == "restore") RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+                AddOfferings(
+                    transactor,
+                    repository,
+                )(
+                    id,
+                    observedRevision(id),
+                    listOf(
+                        Offering(
+                            horchata,
+                            flavors,
+                            "Horchata",
+                            selectionState = OfferingSelectionState.ENABLED,
+                            availability = OfferingAvailability.AVAILABLE,
+                        ),
+                    ),
+                )
+                if (action == "restore") RetireOfferings(transactor, repository)(id, observedRevision(id), listOf(horchata))
                 val before = latest(id)
                 val barrier = CyclicBarrier(2)
                 val synchronizedReads =
@@ -747,31 +1141,43 @@ class OfferingsLifecycleSpec :
                                     try {
                                         when (action) {
                                             "update" ->
-                                                UpdateOffering(
+                                                UpdateOfferings(
                                                     transactor,
                                                     synchronizedReads,
                                                 )(
                                                     id,
                                                     before.revision,
-                                                    horchata,
-                                                    flavors,
-                                                    "Writer $writer",
-                                                    selectionState = OfferingSelectionState.ENABLED,
-                                                    availability = OfferingAvailability.AVAILABLE,
+                                                    listOf(
+                                                        Offering(
+                                                            horchata,
+                                                            flavors,
+                                                            "Writer $writer",
+                                                            selectionState = OfferingSelectionState.ENABLED,
+                                                            availability = OfferingAvailability.AVAILABLE,
+                                                        ),
+                                                    ),
                                                 )
-                                            "retire" -> RetireOffering(transactor, synchronizedReads)(id, before.revision, horchata)
+                                            "retire" ->
+                                                RetireOfferings(
+                                                    transactor,
+                                                    synchronizedReads,
+                                                )(id, before.revision, listOf(horchata))
                                             else ->
-                                                RestoreOffering(
+                                                RestoreOfferings(
                                                     transactor,
                                                     synchronizedReads,
                                                 )(
                                                     id,
                                                     before.revision,
-                                                    horchata,
-                                                    flavors,
-                                                    "Writer $writer",
-                                                    selectionState = OfferingSelectionState.ENABLED,
-                                                    availability = OfferingAvailability.AVAILABLE,
+                                                    listOf(
+                                                        Offering(
+                                                            horchata,
+                                                            flavors,
+                                                            "Writer $writer",
+                                                            selectionState = OfferingSelectionState.ENABLED,
+                                                            availability = OfferingAvailability.AVAILABLE,
+                                                        ),
+                                                    ),
                                                 )
                                         }
                                         "success"

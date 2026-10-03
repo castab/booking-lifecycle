@@ -56,7 +56,15 @@ private fun offering(
     category: String,
     description: String? = null,
     price: OfferingPrice? = null,
-) = Offering(OfferingKey(key), OfferingCategoryKey(category), key, description, price)
+) = Offering(
+    OfferingKey(key),
+    OfferingCategoryKey(category),
+    key,
+    description,
+    price,
+    selectionState = OfferingSelectionState.ENABLED,
+    availability = OfferingAvailability.AVAILABLE,
+)
 
 private fun catalogId() = OfferingsCatalogId(UUID.randomUUID())
 

@@ -76,7 +76,7 @@ private class OfferingPriceSchemaCreator<NODE : Any>(
 
     /** The example-based generator cannot infer all values of the two independent enums. */
     private fun NODE.withSelectionContract(name: String): NODE {
-        if (name !in setOf("OfferingDto", "AddOfferingDto", "OfferingMutationDto")) return this
+        if (name != "OfferingDto") return this
         val schema = Json.parseToJsonElement(json.compact(this)).jsonObject
         val properties =
             schema["properties"]!!.jsonObject +
@@ -186,8 +186,7 @@ private val priceCarrierNames =
         "CategoryOfferingsDto",
         "CatalogCategoryDto",
         "OfferingsCatalogDto",
-        "AddOfferingDto",
-        "OfferingMutationDto",
+        "OfferingsBatchDto",
         "RetiredOfferingDto",
         "RetiredOfferingsDto",
     )
@@ -209,22 +208,7 @@ private fun Any.withCompletePriceShape(): Any {
         is ValidationErrorResponse -> copy(violations = violations ?: listOf(ValidationViolationResponse("VALIDATION_ERROR")))
         is OfferingPriceDto -> complete()
         is OfferingDto -> complete()
-        is AddOfferingDto ->
-            copy(
-                description = description ?: "Description",
-                price = price.completeOrSample(),
-                badge = badge ?: "Badge",
-                statusNote = statusNote ?: "Status note",
-                infoNote = infoNote ?: "Info note",
-            )
-        is OfferingMutationDto ->
-            copy(
-                description = description ?: "Description",
-                price = price.completeOrSample(),
-                badge = badge ?: "Badge",
-                statusNote = statusNote ?: "Status note",
-                infoNote = infoNote ?: "Info note",
-            )
+        is OfferingsBatchDto -> copy(offerings = offerings.map { it.complete() })
         is RetiredOfferingsDto -> copy(offerings = offerings.map { it.copy(offering = it.offering.complete()) })
         is OfferingResultDto -> copy(offering = offering.complete())
         is OfferingsDto -> copy(offerings = offerings.map { it.complete() })

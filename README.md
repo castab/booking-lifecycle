@@ -133,7 +133,9 @@ revisions are not retained, so the revision is a concurrency and staleness token
 address of past contents. Every mutation of an existing catalog requires the caller's
 observed `expectedRevision`; stale writes return 409 before creating a successor, while a
 row lock still guards true competing writers. Offering and category keys
-are durable natural identities, reserved once used, even after retirement. Add creates a
+are durable natural identities, reserved once used, even after retirement. Offering
+writes take batches: one request adds, updates, retires, or restores one or many offerings
+in a single new revision, all or nothing. Add creates a
 new identity; update retains its key and position; retire removes it from the successor;
 restore reactivates the same identity at the end of the current list. Retired discovery
 returns each last representation and the revision it was last present in. Categories
@@ -151,8 +153,8 @@ reason, returning only `OFFERING_DISABLED` when both apply.
 Offerings also carry optional `badge`, `statusNote`, and `infoNote` presentation text beside
 `description`; omitting them from an update or restore clears them.
 Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
-list the enums without a cross-field exclusion. Kotlin update and restore operations also
-require both fields explicitly; new domain construction retains enabled/available defaults.
+list the enums without a cross-field exclusion. `Offering` itself has no defaults for
+either field, so Kotlin callers state both too.
 V8 required non-null values without defaults or legacy backfills; populated pre-V8
 offering databases must be recreated.
 See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
