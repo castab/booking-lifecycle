@@ -121,23 +121,25 @@ data class OfferingCategoryDto(
         validating { OfferingCategory(OfferingCategoryKey(key), displayName, description, minimumSelections, maximumSelections) }
 }
 
-/** A new natural offering identity appended against the catalog revision the caller observed. */
+/**
+ * One or more complete offerings added, updated, or restored together against the catalog
+ * revision the caller observed. Each offering carries its own key.
+ */
 @Serializable
-data class AddOfferingDto(
+data class OfferingsBatchDto(
     val expectedRevision: Int,
-    val key: String,
-    val category: String,
-    val displayName: String,
-    val description: String? = null,
-    val price: OfferingPriceDto? = null,
-    val selectionState: OfferingSelectionStateDto,
-    val availability: OfferingAvailabilityDto,
-    val badge: String? = null,
-    val statusNote: String? = null,
-    val infoNote: String? = null,
+    val offerings: List<OfferingDto>,
 ) {
-    fun toDomain(): Offering =
-        OfferingDto(key, category, displayName, description, price, selectionState, availability, badge, statusNote, infoNote).toDomain()
+    fun toDomain(): List<Offering> = offerings.map { it.toDomain() }
+}
+
+/** One or more offering keys retired together against the catalog revision the caller observed. */
+@Serializable
+data class RetireOfferingsDto(
+    val expectedRevision: Int,
+    val keys: List<String>,
+) {
+    fun toDomain(): List<OfferingKey> = validating { keys.map(::OfferingKey) }
 }
 
 /** A new natural category identity appended against the catalog revision the caller observed. */
@@ -151,35 +153,6 @@ data class AddOfferingCategoryDto(
     val maximumSelections: Int? = null,
 ) {
     fun toDomain(): OfferingCategory = OfferingCategoryDto(key, displayName, description, minimumSelections, maximumSelections).toDomain()
-}
-
-/** Editable offering properties. Identity comes only from the route/operation key. */
-@Serializable
-data class OfferingMutationDto(
-    val expectedRevision: Int,
-    val category: String,
-    val displayName: String,
-    val description: String? = null,
-    val price: OfferingPriceDto? = null,
-    val selectionState: OfferingSelectionStateDto,
-    val availability: OfferingAvailabilityDto,
-    val badge: String? = null,
-    val statusNote: String? = null,
-    val infoNote: String? = null,
-) {
-    fun toDomain(key: OfferingKey): Offering =
-        OfferingDto(
-            key.value,
-            category,
-            displayName,
-            description,
-            price,
-            selectionState,
-            availability,
-            badge,
-            statusNote,
-            infoNote,
-        ).toDomain()
 }
 
 /** Editable category properties. Identity comes only from the route/operation key. */
