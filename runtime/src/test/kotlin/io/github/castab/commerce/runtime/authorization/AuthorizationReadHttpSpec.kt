@@ -166,12 +166,19 @@ class AuthorizationReadHttpSpec :
                 response.status shouldBe Status.OK
                 val body = Json.decodeFromString(PermissionsDto.serializer(), response.bodyString())
                 body.revision shouldBe catalog.revision
-                body.permissions.size shouldBe 16
+                body.permissions.size shouldBe 17
                 body.permissions.map { it.key } shouldBe body.permissions.map { it.key }.sorted()
                 body.permissions shouldContainExactly
                     catalog.definitions.map { PermissionDto(it.key.value, it.group.value, it.displayName, it.description) }
                 body.permissions.first() shouldBe
                     PermissionDto("catering.inquiries.assign", "catering.inquiries", "Assign inquiries", "Assign inquiries to staff.")
+                body.permissions.single { it.key == "commerce.deposit-requirement.manage" } shouldBe
+                    PermissionDto(
+                        "commerce.deposit-requirement.manage",
+                        "commerce.financial-documents",
+                        "Manage deposit requirements",
+                        "Approve, replace, reactivate, and withdraw deposit requirements against financial-document lineages.",
+                    )
                 body.permissions.single { it.key == "commerce.role.read" } shouldBe
                     PermissionDto(
                         "commerce.role.read",

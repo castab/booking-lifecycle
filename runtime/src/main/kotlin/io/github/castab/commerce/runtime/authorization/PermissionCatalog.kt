@@ -137,7 +137,7 @@ private val roles = PermissionGroup("commerce.roles")
  * [RuntimePermissions] key, described.
  * These keys denote code capabilities, never database-created permissions. Runtime routes
  * enforce the offerings, principal, role, and service-credential keys; the booking, financial-document, payment,
- * and refund keys are conventional names for operations that applications enforce.
+ * deposit-requirement, and refund keys are conventional names for operations that applications enforce.
  *
  * Every permission a runtime capability enforces must be defined here, including runtime
  * infrastructure permissions that are not [CommercePermissions] (for example the
@@ -159,6 +159,12 @@ val commercePermissionDefinitions: List<PermissionDefinition> =
             CommercePermissions.FinancialDocumentCreate,
             "Create financial documents",
             "Create estimates, quotes, and invoices.",
+            financialDocuments,
+        ),
+        PermissionDefinition(
+            CommercePermissions.DepositRequirementManage,
+            "Manage deposit requirements",
+            "Approve, replace, reactivate, and withdraw deposit requirements against financial-document lineages.",
             financialDocuments,
         ),
         PermissionDefinition(

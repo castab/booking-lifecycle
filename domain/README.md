@@ -30,6 +30,7 @@ authorization:
 | [Financial documents](#financial-documents) | `io.github.castab.commerce.financial` | Immutable, versioned commercial documents (`Estimate → Quote → Invoice`) with line items, change orders, derived totals, and persistence-agnostic history lookup. |
 | [Offerings](#offerings) | `io.github.castab.commerce.offering` | Immutable catalog values with a revision counter, generic selection constraints, descriptive price metadata, and an application policy evaluation seam producing financial line items. |
 | [Payment reconciliation](#payment-reconciliation) | `io.github.castab.commerce.payment` | Immutable payment records, payment allocations, allocation reversals, refund records, and refund allocations, with derived payment and document reconciliation. |
+| [Deposit requirements](#deposit-requirements) | `io.github.castab.commerce.deposit` | Immutable lineage-scoped approved fixed/percentage terms, frozen amounts, withdrawal revisions, and satisfaction derived from document reconciliation. |
 | [Principal authorization](#principal-authorization) | `io.github.castab.commerce.staff` | Human and service identities, extensible roles and permissions, resolver ports, and additive role-based authorization. |
 | [Payment adapter contract](#payment-adapter-contract) | `io.github.castab.commerce.payment.adapter` | Provider-neutral payment and refund instructions, observations, capability descriptions, and event decisions. |
 
@@ -57,6 +58,7 @@ is `kotlin-stdlib`.
 - [Financial documents](#financial-documents)
 - [Offerings](#offerings)
 - [Payment reconciliation](#payment-reconciliation)
+- [Deposit requirements](#deposit-requirements)
 - [Principal authorization](#principal-authorization)
 - [Payment adapter contract](#payment-adapter-contract)
 - [Using both domains together](#using-both-domains-together)
@@ -793,6 +795,63 @@ reference, context, or metadata field on its types to hold such relationships. (
 not concern the library's own document references, `FinancialDocumentReference` and
 `previousReference`, which identify financial-document snapshots.) Business-specific data stays
 strongly typed in the application.
+
+## Deposit requirements
+
+`io.github.castab.commerce.deposit` references financial documents and payment
+reconciliation. Neither of those packages imports deposits. The financial document
+continues to mean one immutable description of charges, and reconciliation continues to
+mean amounts derived from payment facts. A deposit requirement adds an independent
+approved threshold for a document lineage; it changes neither existing type's meaning.
+
+`DepositTerms` has exactly `Fixed(Money)` and `Percentage(BigDecimal)`. Fixed money must
+be positive and agree with the approval document's currency. Percentages must be greater
+than zero and at most 100; there is no default. `resolve(document)` uses the exact
+snapshot total and exact arithmetic, with HALF_UP rounding to
+`Currency.defaultFractionDigits` for percentages (including zero and three minor units).
+Currencies without minor-unit metadata cannot resolve percentages. A resolved amount
+must be strictly positive and no greater than that snapshot's total; nothing is clamped.
+Fixed money retains its full precision, consistent with `Money`.
+
+`DepositRequirementRevision.of(n)` rejects n < 1; `next()` advances by one and detects
+overflow. A requirement's identity is its document UUID plus this revision. There is no
+separate requirement UUID, persisted satisfaction, draft, pending approval, or default.
+
+```mermaid
+flowchart LR
+    None[No history] --> A[Active revision 1]
+    A --> R[Active successor: replacement]
+    A --> W[Withdrawn successor]
+    R --> W
+    W --> N[Active successor: reactivation]
+```
+
+`DepositRequirement.Active.create(document, terms)` approves revision one.
+`requirement.activate(document, terms)` replaces or reactivates at the immediate next
+revision, requiring the same lineage. Active retains only the exact `approvalReference`,
+original `terms`, and frozen `requiredAmount`; it embeds neither document nor predecessor.
+`active.withdraw()` appends Withdrawn without copying terms. `previousRevision` is absent
+only at revision one. Persistence factories restore valid facts and check an Active's
+frozen amount against its original approval snapshot; a persistence adapter also checks
+that a withdrawal's predecessor is Active.
+
+```kotlin
+import io.github.castab.commerce.deposit.*
+import java.math.BigDecimal
+
+val approved = DepositRequirement.Active.create(quote, DepositTerms.Percentage(BigDecimal("25")))
+val replacement = approved.activate(quote, DepositTerms.Fixed(amount))
+val withdrawal = replacement.withdraw()
+val reactivated = withdrawal.activate(laterInvoice, DepositTerms.Percentage(BigDecimal("50")))
+val satisfied = reactivated.isSatisfiedBy(reconciliation)
+```
+
+`Active.isSatisfiedBy(reconciliation)` checks the same lineage and currency, then returns
+exactly `reconciliation.netApplied.amount >= requiredAmount.amount`. It accepts later
+document versions without recalculating the approved amount. Refunds and allocation
+unwinds may make satisfaction false again. Booking transitions, deposit eligibility by
+stage, and every consequence of satisfaction belong to applications. Withdrawn exposes
+no satisfaction or withdrawal operation; neither form exposes a `copy()` or constructor.
 
 ## Offerings
 
@@ -1905,7 +1964,8 @@ segments. Malformed keys are rejected and never normalized: `Users.Create` fails
 than becoming `users.create`. Roles are shared by humans and services. `CommerceRoles` (`Administrator`, `Manager`,
 `Supervisor`, `Employee`) provides conventional keys without built-in grants.
 `CommercePermissions` provides keys for booking read/modify, financial-document
-read/create, offerings catalog management, payment/refund recording, and principal
+read/create, deposit requirement management (`DepositRequirementManage`,
+`commerce.deposit-requirement.manage`), offerings catalog management, payment/refund recording, and principal
 read/manage, role read/manage, and role assignment. `PermissionDefinition` supplies
 human-readable metadata for a code-backed `PermissionKey`: a required display name, a
 required description, and a `PermissionGroup` (same syntax as a key, such as

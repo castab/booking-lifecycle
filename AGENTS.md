@@ -190,7 +190,8 @@ the principal sessions `V3` migration, the authorization directory `V4` migratio
 financial ledger `V5` migration, the refunds `V6` migration, the document timestamp
 `V7` migration, the offering selection/availability `V8` migration, the aggregate
 snapshots `V9` migration, the service credentials `V10` migration, the offering
-badge/status note `V11` migration, and the current offerings catalogs `V12` migration. Do not create
+badge/status note `V11` migration, the current offerings catalogs `V12` migration, and
+the deposit requirements and lineage references `V13` migration. Do not create
 placeholder commerce tables or fake repositories.
 
 The first financial-ledger slice persists immutable financial-document snapshots,
@@ -575,6 +576,7 @@ beneath `io.github.castab.commerce`:
 | Financial documents | `io.github.castab.commerce.financial` | Concrete, library-owned immutable value types (`Estimate`, `Quote`, `Invoice`) whose invariants the library enforces. |
 | Offerings | `io.github.castab.commerce.offering` | Immutable catalog snapshots, selection constraints, descriptive price metadata, and an application policy evaluation seam. |
 | Payment reconciliation | `io.github.castab.commerce.payment` | Concrete, library-owned immutable records (payments, allocations, allocation reversals, refunds, refund allocations) and reconciliation derived from records the application supplies. |
+| Deposit requirements | `io.github.castab.commerce.deposit` | Immutable lineage-scoped approved financial terms, frozen amounts, withdrawals, and derived satisfaction. |
 | Principal authorization | `io.github.castab.commerce.staff` | Human and service identities, distinct UUID-backed principal IDs, extensible roles and permissions, and additive role-based permission resolution. |
 | Payment adapter contract | `io.github.castab.commerce.payment.adapter` | Provider-neutral instructions, observations, capabilities, event receipts, and pure decisions at the external-provider boundary. |
 
@@ -595,6 +597,7 @@ financial             independent; imports nothing from the other domains
 offering ────────────→ financial   (Money and LineItem only)
 payment ────────────→ financial   (FinancialDocument, FinancialDocumentReference, Money)
 payment.adapter ────→ payment, financial   (Money)
+deposit ────────────→ financial, payment   (approval snapshots, Money, reconciliation)
 staff                 independent of the other domains
 ```
 
@@ -643,7 +646,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `domain/src/test/kotlin/io/github/castab/commerce/staff/AuthorizationSpec.kt` | Kotest coverage for staff values, resolver behavior, and fail-closed authorization. |
 | `runtime/build.gradle.kts` | The `commerce-runtime` publication (a `java-library`; no `application` plugin), its runtime stack, and the Docker-CLI PostgreSQL build service for tests. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/` | `CommerceRuntime.kt`: the composition root `commerceRuntime(...)`, `CommerceRuntime` (lifecycle of the runtime's resources), `ApplicationContributions`, and `CommerceRuntimeContext`. No `main()`. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/financial/` | `FinancialLedger`: transaction-owning document, payment, and refund operations, reconciliation, document version metadata, and payment discovery; `Refunds.kt`: `RefundAllocationPortion` and `RecordedRefund`; `PaymentHistory.kt` and `FinancialDocumentVersion.kt`: persisted-fact read models. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/financial/` | `FinancialLedger`: transaction-owning document, deposit requirement, payment, and refund operations, reconciliation, persisted revision metadata, payment discovery, and bulk lineage reads; `Refunds.kt`: `RefundAllocationPortion` and `RecordedRefund`; immutable persisted-fact read models in `PaymentHistory.kt`, `FinancialDocumentVersion.kt`, `DepositRequirementVersion.kt`, and `FinancialLineageView.kt`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, the internal principal session and authorization repositories and `PrincipalIdColumns`, PostgreSQL error helpers. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/authorization/` | Live authorization directory; `PermissionCatalog.kt` (the catalog, its revision, `RuntimePermissions`, and `commercePermissionDefinitions`); the administration (including service credential administration), permission catalog, and current principal HTTP capabilities and DTOs. |
@@ -652,7 +655,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/operation/` | Operation support: `CommerceFailure` and `validating`. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/http/` | `CommerceJson`, the error contract and filter, health routes, `Authentication.kt` (`RequestAuthenticator`, `authentication`), and `Authorization.kt` (the `authenticatedPrincipal` lens, `requirePermission`, `requireAuthenticatedPrincipal`, `AccessControl`). |
-| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, `V5` financial ledger, `V6` refunds, `V7` document timestamps, `V8` offering selection and availability, `V9` aggregate snapshots, `V10` service credentials, `V11` offering badge, status note, and info note, and `V12` current offerings catalogs; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
+| `runtime/src/main/resources/` | Only the runtime's own Flyway migrations in `db/commerce/` (`V1` baseline, `V2` offerings tables, `V3` principal sessions, `V4` authorization directory, `V5` financial ledger, `V6` refunds, `V7` document timestamps, `V8` offering selection and availability, `V9` aggregate snapshots, `V10` service credentials, `V11` offering badge, status note, and info note, `V12` current offerings catalogs, and `V13` deposit requirements and lineage references; see [Migration contract](#migration-contract)). No `application.conf` and no logging configuration. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/` | Kotest specs for configuration, errors, health, serialization, persistence and transactions, the migration contract (`persistence/MigrationLifecycleSpec`, `CommerceRuntimeStartupSpec`), and `CommerceRuntimeSpec` (the runtime composed with explicit contributions and an application-owned table, over real HTTP); `testing/TestDatabase.kt` and `testing/Databases.kt`. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/OfferingsSnapshotRepositorySpec.kt` | PostgreSQL round trips, the stored JSON shape and malformed-JSON rejection, retirement and key reservation across saves, stale and concurrent save conflicts, and cross-schema atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/FinancialDocumentRepositorySpec.kt` | One-row snapshot round trips, the stored lines shape, malformed-lines rejection, history and latest reads, successor conflicts, and payment allocations' exact-version reference. |
@@ -986,6 +989,71 @@ fun Estimate.toInvoice(): Invoice                               // wrong: an ill
 Invoice.create(id, lineItems, total = ...)                      // wrong: totals are derived
 val balanceDue: Money                                           // wrong: settlement is derived in the payment domain
 ```
+
+# Deposit requirement domain and runtime
+
+`commerce.deposit` owns generic approved financial terms, not workflow policy. The
+existing FinancialDocument remains an immutable description of charges and knows
+nothing about deposits or settlement; FinancialDocumentReconciliation continues to derive
+amounts from payment facts. Neither package imports deposits. Booking remains independent.
+
+- DepositTerms has exactly Fixed(Money) and Percentage(BigDecimal), with no defaults.
+  Fixed amounts are positive; percentages are in (0, 100]. Percentage resolution uses
+  exact snapshot totals and HALF_UP at the currency's minor units, including zero and
+  three units; missing minor-unit metadata fails. Resolved amounts must be positive and
+  no greater than the approval total. Fixed money retains full precision. Never clamp.
+- DepositRequirement is one lineage-scoped immutable revision stream, identified by the
+  document UUID and DepositRequirementRevision. Revisions begin at one and advance by
+  one. Active stores the exact approval reference, original terms, and frozen amount.
+  Replacement/reactivation appends Active; withdrawal appends Withdrawn with no copied
+  terms and must follow Active. No draft, pending, default, stored satisfaction, random
+  requirement UUID, embedded snapshot, or embedded predecessor is permitted.
+- Active.isSatisfiedBy requires the same lineage and currency and compares exactly
+  netApplied >= requiredAmount. Refunds/unwinds may undo satisfaction. Later document
+  snapshots never recalculate or withdraw approvals. Applications own all consequences
+  and stage eligibility; do not change BookingLifecycle for deposits.
+- FinancialLedger is the supported read/write API. DepositRequirementRepository remains
+  internal. Every mutation and read accepts the caller's Transaction; convenience
+  multi-fact reads use REPEATABLE_READ without mutation locks. Requirement history is
+  immutable and oldest first; null latest means never configured, distinct from Withdrawn.
+- V13 is additive on populated V12 financial databases. It stores immutable timestamped
+  requirement revisions with predecessor/representation checks and exact approval foreign
+  keys; update/delete is rejected. Restoration validates original approval terms and frozen
+  money strictly, preserving decimal scales, with no repair or defaults.
+- V13's financial_document_lineages holds a current snapshot reference, not financial
+  amounts. Snapshot-insert triggers maintain it for every writer and lock it before a
+  successor insert. Requirement writes take this same NO KEY UPDATE NOWAIT lock before checking
+  strict document and requirement tokens (null means no history). This protects first
+  activation and lets PostgreSQL reject stale repeatable-read document mutations. Unique
+  predecessor constraints also reject stale requirement successors. Translate these races
+  into Conflict; retry the whole transaction. Never mutate a snapshot to obtain a lock
+  or add advisory/payment locks here.
+- The enforced financial mutation lock discipline is: payment rows may wait (FOR UPDATE);
+  lineage mutation locks never wait (FOR NO KEY UPDATE NOWAIT). Document successors,
+  activation/replacement/reactivation, and withdrawal acquire the lineage row; allocations,
+  recordPaymentAgainstDocument, refunds, and reconcilePayment acquire the payment row.
+  Payment operations only read immutable snapshots and do not acquire lineage mutation
+  locks. Caller-owned transactions may compose these operations in either order and
+  reacquire their own locks. A payment holder attempting a busy lineage fails immediately
+  with Conflict (SQLSTATE 55P03), so it cannot wait on a lineage holder waiting for that
+  payment. Both the repository and V13's snapshot-insert trigger enforce this rule; do
+  not replace NOWAIT with a waiting lineage lock or use deadlock detection/retry as policy.
+  A lock failure aborts the transaction: roll back the entire caller transaction before
+  retrying. This rule preserves payment allocation/refund serialization and does not
+  change transaction nesting or isolation. Nonlocking history/bulk reads remain nonlocking.
+- Approval joins use the shared strict document-only restoration path, which needs no
+  snapshot timestamp. Requirement timestamps are explicitly named requirement_created_at;
+  FinancialDocumentVersion reads take created_at from the snapshot itself. Never use a
+  requirement timestamp to construct financial-document metadata, even if discarded later.
+- financialLineages uses four set-based queries in one snapshot, input iteration order,
+  empty-to-empty, duplicate rejection, and NotFound for any missing lineage. Its view holds
+  current version metadata, reconciliation, latest requirement, derived satisfaction, and
+  objective version/requirement/allocation/refund-allocation event times. The derived
+  latestFinancialActivityAt is their exact maximum; receipt and standalone refund times
+  never count. Do not add application data or interpret inactivity/workflow policy here.
+- DepositRequirementManage (commerce.deposit-requirement.manage) is dedicated to
+  mutations and defined in commercePermissionDefinitions. Hosts conventionally use
+  FinancialDocumentRead for reads. No new generic financial HTTP API is implied.
 
 # Payment reconciliation domain
 
@@ -1732,6 +1800,14 @@ dependency just to support CI or publishing.
   the payment row lock, proven by observing the waiter blocked in PostgreSQL, never by
   sleeping. `MigrationLifecycleSpec` pins the checksums of released runtime migrations and
   migrates a released `V5` database forward.
+- `DepositRequirementSpec` covers exact fixed/percentage approvals, minor-unit rounding,
+  immutable revisions, strict restoration, and satisfaction through reconciliation.
+  `DepositRequirementLedgerSpec` and `DepositRequirementSchemaSpec` cover lifecycle,
+  caller transactions, frozen terms, strict schema/restoration, immutable history, and
+  concurrent writers (observed blocked in PostgreSQL), including stale repeatable-read
+  snapshots. `FinancialLineagesSpec` covers objective activity, all requirement forms,
+  constant query count, and coherent bulk reads across a concurrent commit.
+  `MigrationLifecycleSpec` pins released V1-V12 checksums and populated V12-to-V13 migration.
 - Session tests run against PostgreSQL and a hand-driven `MutableClock`, never the wall
   clock. Keep the security coverage: `SecureRandom` token generation, digest-only storage
   (checked in SQL), digest uniqueness, `UserId` and `ServiceId` round trips, expired,

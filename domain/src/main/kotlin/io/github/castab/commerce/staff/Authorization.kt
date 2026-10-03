@@ -184,6 +184,9 @@ object CommercePermissions {
     /** Create a financial document. */
     val FinancialDocumentCreate: PermissionKey = PermissionKey("commerce.financial-document.create")
 
+    /** Approve, replace, reactivate, or withdraw a financial lineage's deposit requirement. */
+    val DepositRequirementManage: PermissionKey = PermissionKey("commerce.deposit-requirement.manage")
+
     /** Create an offerings catalog and change its categories and offerings. */
     val OfferingsManage: PermissionKey = PermissionKey("commerce.offerings.manage")
 

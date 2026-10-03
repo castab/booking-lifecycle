@@ -1,9 +1,13 @@
 package io.github.castab.commerce.runtime.financial
 
+import io.github.castab.commerce.deposit.DepositRequirement
+import io.github.castab.commerce.deposit.DepositRequirementRevision
+import io.github.castab.commerce.deposit.DepositTerms
 import io.github.castab.commerce.financial.ChangeOrder
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.FinancialDocumentReference
 import io.github.castab.commerce.financial.Money
+import io.github.castab.commerce.financial.Version
 import io.github.castab.commerce.payment.ExternalRefundReference
 import io.github.castab.commerce.payment.FinancialDocumentReconciliation
 import io.github.castab.commerce.payment.PaymentAllocation
@@ -14,12 +18,14 @@ import io.github.castab.commerce.payment.RefundAllocation
 import io.github.castab.commerce.payment.RefundRecord
 import io.github.castab.commerce.runtime.operation.CommerceFailure
 import io.github.castab.commerce.runtime.operation.validating
+import io.github.castab.commerce.runtime.persistence.DepositRequirementRepository
 import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.TransactionIsolation
 import io.github.castab.commerce.runtime.persistence.Transactor
 import java.time.Instant
+import java.util.Collections
 import java.util.UUID
 
 /**
@@ -27,14 +33,197 @@ import java.util.UUID
  * overloads join the caller's transaction, including application-owned writes. Documents
  * and payment facts (payments, allocations, refunds, and refund allocations) are
  * append-only; settlement is derived on read. Every operation that consumes a payment's
- * value locks that payment's row first, so allocations and refunds of one payment are
- * serialized and each is checked against the other's committed facts.
+ * value locks that payment's row before validating its history, so allocations and refunds
+ * of one payment are serialized and each is checked against the other's committed facts.
+ *
+ * Caller-owned transactions may compose payment and document/deposit operations in either
+ * order. The enforced discipline is: payment rows may wait; lineage mutation locks never
+ * wait (FOR NO KEY UPDATE NOWAIT). A competing lineage mutation fails with Conflict at
+ * that operation, even if the caller already holds a payment. Roll back and retry the
+ * whole caller transaction. Thus a lineage holder waiting for a payment cannot form a
+ * cycle with a payment holder waiting for the lineage. Own locks may be reacquired;
+ * immutable snapshot reads and payment foreign-key checks take no lineage mutation lock.
  */
 class FinancialLedger internal constructor(
     private val transactor: Transactor,
     private val documents: PostgresFinancialDocumentRepository,
     private val payments: PostgresPaymentRepository,
 ) {
+    private val requirements = DepositRequirementRepository(documents)
+
+    /**
+     * Approves, replaces, or reactivates a deposit by appending Active. Both expected tokens
+     * must match; null expects no requirement history. Approval freezes the amount against
+     * exactly [expectedDocumentVersion], without a stage policy or workflow side effects.
+     * Stale tokens fail with Conflict; missing lineages with NotFound; invalid terms with
+     * ValidationFailed. Hosts conventionally enforce DepositRequirementManage on mutations.
+     */
+    fun activateDepositRequirement(
+        documentId: UUID,
+        expectedDocumentVersion: Version,
+        terms: DepositTerms,
+        expectedRequirementRevision: DepositRequirementRevision?,
+    ): DepositRequirementVersion =
+        transactor.inTransaction {
+            activateDepositRequirement(it, documentId, expectedDocumentVersion, terms, expectedRequirementRevision)
+        }
+
+    /**
+     * Appends approved terms in the caller's transaction, keeping the lineage lock until it
+     * ends. Contention fails immediately as Conflict. Changes after a REPEATABLE_READ snapshot
+     * began fail as Conflict; retry the whole caller transaction. This overload neither
+     * opens a transaction nor changes isolation.
+     */
+    fun activateDepositRequirement(
+        transaction: Transaction,
+        documentId: UUID,
+        expectedDocumentVersion: Version,
+        terms: DepositTerms,
+        expectedRequirementRevision: DepositRequirementRevision?,
+    ): DepositRequirementVersion {
+        documents.lockLineage(transaction, documentId)
+        val document = latest(transaction, documentId)
+        if (document.version !=
+            expectedDocumentVersion
+        ) {
+            throw CommerceFailure.Conflict("Financial document $documentId has a stale expected version")
+        }
+        val current = requirements.latest(transaction, documentId)?.requirement
+        if (current?.revision !=
+            expectedRequirementRevision
+        ) {
+            throw CommerceFailure.Conflict("Deposit requirement for $documentId has a stale expected revision")
+        }
+        val next =
+            validating {
+                current?.activate(document, terms) ?: DepositRequirement.Active.create(document, terms)
+            }
+        return requirements.insert(transaction, next)
+    }
+
+    /** Withdraws current approved terms; document-version changes do not prevent withdrawal. */
+    fun withdrawDepositRequirement(
+        documentId: UUID,
+        expectedRequirementRevision: DepositRequirementRevision,
+    ): DepositRequirementVersion = transactor.inTransaction { withdrawDepositRequirement(it, documentId, expectedRequirementRevision) }
+
+    /**
+     * Withdraws in the caller's transaction. Missing history fails with NotFound, a stale token
+     * with Conflict, and an already withdrawn requirement with IllegalTransition.
+     */
+    fun withdrawDepositRequirement(
+        transaction: Transaction,
+        documentId: UUID,
+        expectedRequirementRevision: DepositRequirementRevision,
+    ): DepositRequirementVersion {
+        documents.lockLineage(transaction, documentId)
+        val current =
+            requirements.latest(transaction, documentId)?.requirement
+                ?: throw CommerceFailure.NotFound("Deposit requirement for $documentId was not found")
+        if (current.revision !=
+            expectedRequirementRevision
+        ) {
+            throw CommerceFailure.Conflict("Deposit requirement for $documentId has a stale expected revision")
+        }
+        if (current !is DepositRequirement.Active) {
+            throw CommerceFailure.IllegalTransition(
+                "Deposit requirement for $documentId is already withdrawn",
+            )
+        }
+        return requirements.insert(transaction, current.withdraw())
+    }
+
+    /**
+     * Latest persisted requirement, including withdrawal, or null if never configured.
+     * Uses REPEATABLE_READ with no mutation locks. Missing lineage fails with NotFound.
+     * Inside an outer transaction use the Transaction overload: nesting cannot change its
+     * isolation. Hosts conventionally enforce FinancialDocumentRead on requirement reads.
+     */
+    fun latestDepositRequirement(documentId: UUID): DepositRequirementVersion? =
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { latestDepositRequirement(it, documentId) }
+
+    /** Reads through the caller's transaction without changing isolation; choose REPEATABLE_READ for coherence. */
+    fun latestDepositRequirement(
+        transaction: Transaction,
+        documentId: UUID,
+    ): DepositRequirementVersion? {
+        latest(transaction, documentId)
+        return requirements.latest(transaction, documentId)
+    }
+
+    /** Complete immutable requirement history, oldest first; empty means never configured. Uses REPEATABLE_READ. */
+    fun depositRequirementHistory(documentId: UUID): List<DepositRequirementVersion> =
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { depositRequirementHistory(it, documentId) }
+
+    /** Reads history in the caller's transaction; missing lineage fails with NotFound. */
+    fun depositRequirementHistory(
+        transaction: Transaction,
+        documentId: UUID,
+    ): List<DepositRequirementVersion> {
+        latest(transaction, documentId)
+        return Collections.unmodifiableList(requirements.history(transaction, documentId))
+    }
+
+    /**
+     * Current financial views of explicit lineages, in input iteration order. Empty input
+     * returns empty output, duplicate ids fail ValidationFailed, and any missing lineage
+     * fails NotFound. Four set-based queries read documents, allocations, unwinds, and
+     * requirements; no row locks, payment receipt times, or application data participate.
+     * The entire read uses one REPEATABLE_READ transaction. Inside an outer transaction
+     * use the Transaction overload and select its isolation at the outer boundary.
+     */
+    fun financialLineages(documentIds: Collection<UUID>): List<FinancialLineageView> =
+        transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { financialLineages(it, documentIds) }
+
+    /**
+     * Reads entirely through the caller's transaction, including its uncommitted facts.
+     * Does not change isolation or open a transaction. Multiple queries are coherent under
+     * concurrent writes when the caller chooses REPEATABLE_READ; READ_COMMITTED may combine
+     * committed snapshots and cause reconciliation to reject inconsistent facts.
+     */
+    fun financialLineages(
+        transaction: Transaction,
+        documentIds: Collection<UUID>,
+    ): List<FinancialLineageView> {
+        val ids = documentIds.toList()
+        if (ids.isEmpty()) return emptyList()
+        if (ids.toSet().size != ids.size) throw CommerceFailure.ValidationFailed("Financial lineage ids must not repeat")
+        val latest = documents.latestVersions(transaction, ids)
+        ids.firstOrNull { it !in latest }?.let { throw CommerceFailure.NotFound("Financial document $it was not found") }
+        val allocations = payments.allocationsForLineages(transaction, ids)
+        val byLineage = allocations.groupBy { it.financialDocumentReference.id }
+        val allocationLineages = allocations.associate { it.id to it.financialDocumentReference.id }
+        val unwinds =
+            payments
+                .refundAllocationsForLineages(
+                    transaction,
+                    ids,
+                ).groupBy { allocationLineages.getValue(it.paymentAllocationReference) }
+        val deposits = requirements.latestForLineages(transaction, ids)
+        return Collections.unmodifiableList(
+            ids.map { id ->
+                val version = latest.getValue(id)
+                val applied = byLineage[id].orEmpty()
+                val refunded = unwinds[id].orEmpty()
+                val deposit = deposits[id]
+                val reconciliation = FinancialDocumentReconciliation.reconcile(version.document, applied, emptyList(), refunded)
+                FinancialLineageView.from(
+                    version,
+                    reconciliation,
+                    deposit,
+                    FinancialLineageActivity(
+                        version.createdAt,
+                        deposit?.createdAt,
+                        applied.maxOfOrNull {
+                            it.allocatedAt
+                        },
+                        refunded.maxOfOrNull { it.allocatedAt },
+                    ),
+                )
+            },
+        )
+    }
+
     /** Stores an application-created first snapshot in the caller's transaction. */
     fun create(
         transaction: Transaction,

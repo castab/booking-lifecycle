@@ -99,19 +99,18 @@ class MigrationLifecycleSpec :
             withTestDatabase { _, dataSource ->
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
-                // Runtime V1 to V12 coexist with application V1 in separate version spaces.
+                // Runtime V1 to V13 coexist with application V1 in separate version spaces.
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
             }
         }
 
-        test("canonical runtime migrations V1 through V7 are unchanged") {
+        test("released runtime migrations V1 through V12 are unchanged") {
             withTestDatabase { _, dataSource ->
                 RuntimeMigrations(dataSource).migrate()
 
-                // V1-V6 are released and V7 is canonical for the next release. A change to
-                // any of these scripts needs a new migration, not an edited checksum.
+                // Released scripts require a new migration, never an edited checksum.
                 val canonical =
                     mapOf(
                         "1" to "-1133615564",
@@ -121,11 +120,57 @@ class MigrationLifecycleSpec :
                         "5" to "-265215424",
                         "6" to "2123768785",
                         "7" to "1335984745",
+                        "8" to "698769700",
+                        "9" to "1220597745",
+                        "10" to "1380781173",
+                        "11" to "-357389934",
+                        "12" to "-711300374",
                     )
                 dataSource
                     .strings(
-                        "SELECT version || '=' || checksum FROM commerce.$HISTORY_TABLE WHERE version::int <= 7 ORDER BY installed_rank",
+                        "SELECT version || '=' || checksum FROM commerce.$HISTORY_TABLE WHERE version::int <= 12 ORDER BY installed_rank",
                     ).shouldContainExactly(canonical.map { (version, checksum) -> "$version=$checksum" })
+            }
+        }
+
+        test("V13 adds empty requirement history to populated V12 financial tables and retains their creation instants") {
+            withTestDatabase { _, dataSource ->
+                migrateRuntimeThrough(dataSource, "12")
+                val id = "00000000-0000-0000-0000-000000000013"
+                dataSource.execute(
+                    """INSERT INTO commerce.financial_document_snapshots (document_id, version, stage, lines)
+                       VALUES ('$id', 1, 'QUOTE', '[]');
+                       INSERT INTO commerce.financial_document_snapshots (document_id, version, previous_version, stage, lines)
+                       VALUES ('$id', 2, 1, 'INVOICE', '[]');
+                       INSERT INTO commerce.payment_records (payment_id, amount, currency, method, received_at_seconds, received_at_nanos)
+                       VALUES ('$id', 25, 'USD', 'CASH', 0, 0);
+                       INSERT INTO commerce.payment_allocations
+                       (allocation_id, payment_id, document_id, document_version, amount, currency, allocated_at_seconds, allocated_at_nanos)
+                       VALUES ('$id', '$id', '$id', 1, 25, 'USD', 1, 0)""",
+                )
+                val before =
+                    dataSource.strings(
+                        "SELECT version || ':' || created_at::text FROM commerce.financial_document_snapshots ORDER BY version",
+                    )
+                RuntimeMigrations(dataSource).migrate()
+                dataSource.strings(
+                    "SELECT version || ':' || created_at::text FROM commerce.financial_document_snapshots ORDER BY version",
+                ) shouldBe
+                    before
+                dataSource.strings(
+                    "SELECT latest_version::text FROM commerce.financial_document_lineages WHERE document_id = '$id'",
+                ) shouldContainExactly
+                    listOf("2")
+                dataSource.strings("SELECT count(*)::text FROM commerce.deposit_requirement_revisions") shouldContainExactly listOf("0")
+                dataSource.strings("SELECT amount::text FROM commerce.payment_allocations") shouldContainExactly listOf("25")
+                dataSource.execute(
+                    """INSERT INTO commerce.financial_document_snapshots (document_id, version, previous_version, stage, lines)
+                       VALUES ('$id', 3, 2, 'INVOICE', '[]')""",
+                )
+                dataSource.strings(
+                    "SELECT latest_version::text FROM commerce.financial_document_lineages WHERE document_id = '$id'",
+                ) shouldContainExactly
+                    listOf("3")
             }
         }
 
@@ -142,7 +187,7 @@ class MigrationLifecycleSpec :
                 MigrationLifecycle(dataSource, testApplication).migrate()
 
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                 dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 dataSource.strings("SELECT amount::text FROM commerce.payment_records") shouldContainExactly listOf("500.00")
                 dataSource.relationExists("commerce.refund_records") shouldBe true
@@ -160,7 +205,7 @@ class MigrationLifecycleSpec :
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly listOf("1", "2", "3", "4", "5", "6")
                 RuntimeMigrations(dataSource).migrate()
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                 dataSource.strings(
                     """SELECT is_nullable || ':' || column_default
                        FROM information_schema.columns
@@ -340,7 +385,7 @@ class MigrationLifecycleSpec :
                 migrateRuntimeThrough(dataSource, "8")
                 RuntimeMigrations(dataSource).migrate()
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                 dataSource.relationExists("commerce.offerings") shouldBe false
             }
         }
@@ -392,7 +437,7 @@ class MigrationLifecycleSpec :
                 migrateRuntimeThrough(dataSource, "11")
                 RuntimeMigrations(dataSource).migrate()
                 dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                 dataSource.relationExists("commerce.offerings_snapshots") shouldBe false
                 dataSource
                     .strings(
@@ -579,7 +624,7 @@ class MigrationLifecycleSpec :
                     dataSource.relationExists("public.test_application_records") shouldBe false
                     // Independent histories and version spaces.
                     dataSource.appliedVersions(RuntimeMigrations.SCHEMA) shouldContainExactly
-                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
                     dataSource.appliedVersions(TEST_APPLICATION_SCHEMA) shouldContainExactly listOf("1")
                 }
             }

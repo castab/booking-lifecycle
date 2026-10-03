@@ -51,3 +51,11 @@ fun Throwable.isUniqueViolation(): Boolean =
     generateSequence(this) { it.cause }
         .filterIsInstance<SQLException>()
         .any { it.sqlState == UNIQUE_VIOLATION }
+
+/** A stale PostgreSQL transaction snapshot must be retried by the caller as a whole. */
+internal fun Throwable.isSerializationFailure(): Boolean =
+    generateSequence(this) { it.cause }.filterIsInstance<SQLException>().any { it.sqlState == "40001" }
+
+/** A NOWAIT mutation lock is held by another transaction; never wait while holding a payment. */
+internal fun Throwable.isLockUnavailable(): Boolean =
+    generateSequence(this) { it.cause }.filterIsInstance<SQLException>().any { it.sqlState == "55P03" }
