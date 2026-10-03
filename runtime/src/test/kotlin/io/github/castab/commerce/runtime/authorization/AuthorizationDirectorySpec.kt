@@ -18,6 +18,7 @@ import io.github.castab.commerce.runtime.testing.withTestDatabase
 import io.github.castab.commerce.staff.CommercePermissions
 import io.github.castab.commerce.staff.CommerceRoles
 import io.github.castab.commerce.staff.PermissionDefinition
+import io.github.castab.commerce.staff.PermissionGroup
 import io.github.castab.commerce.staff.PermissionKey
 import io.github.castab.commerce.staff.PrincipalStatus
 import io.github.castab.commerce.staff.RoleDefinition
@@ -47,7 +48,13 @@ import org.http4k.format.Jackson
 import org.http4k.routing.RoutingHttpHandler
 import java.util.UUID
 
-private val customPermission = PermissionDefinition(PermissionKey("example.custom.operation"), "Custom operation", null)
+private val customPermission =
+    PermissionDefinition(
+        PermissionKey("example.custom.operation"),
+        "Custom operation",
+        "Run the custom operation.",
+        PermissionGroup("example"),
+    )
 
 private fun TestDatabase.configuration() =
     CommerceRuntimeConfiguration(
@@ -270,7 +277,7 @@ class AuthorizationDirectorySpec :
                                 val access =
                                     AccessControl(
                                         sessionAuthentication(supplied.sessions, BearerSessionToken),
-                                        supplied.authorization.permissionResolver,
+                                        supplied.authorization,
                                     )
                                 host =
                                     contract {
@@ -365,6 +372,30 @@ class AuthorizationDirectorySpec :
                         """{"key":"bad","displayName":"Bad","description":null,"permissions":["unknown"]}""",
                     ).status shouldBe
                         Status.UNPROCESSABLE_ENTITY
+                    val unknown =
+                        request(
+                            Method.PUT,
+                            "$base/roles/example.custom/permissions",
+                            adminToken,
+                            """{"permissions":["commerce.principal.read","definitely.not.a.permission","another.unknown"]}""",
+                        )
+                    unknown.status shouldBe Status.UNPROCESSABLE_ENTITY
+                    unknown.bodyString().contains("Unknown permissions: another.unknown, definitely.not.a.permission") shouldBe true
+                    request(
+                        Method.PUT,
+                        "$base/roles/example.custom/permissions",
+                        adminToken,
+                        """{"permissions":["Commerce.Principal.Read"]}""",
+                    ).status shouldBe Status.UNPROCESSABLE_ENTITY
+                    auth.getRole(RoleKey("example.custom"))!!.permissions shouldBe setOf(CommercePermissions.PrincipalRead)
+                    request(
+                        Method.PUT,
+                        "$base/roles/example.custom/permissions",
+                        adminToken,
+                        """{"permissions":["example.custom.operation","commerce.principal.read","example.custom.operation"]}""",
+                    ).status shouldBe Status.OK
+                    auth.getRole(RoleKey("example.custom"))!!.permissions shouldBe
+                        setOf(CommercePermissions.PrincipalRead, customPermission.key)
                     request(Method.PUT, "$base/users/${viewer.id.value}/roles/${adminRole.key.value}", adminToken).status shouldBe
                         Status.NO_CONTENT
                     request(Method.PUT, "$base/users/${viewer.id.value}/roles/${adminRole.key.value}", adminToken).status shouldBe
@@ -392,7 +423,7 @@ class AuthorizationDirectorySpec :
                         .single()
                         .jsonObject["description"]!!
                         .jsonPrimitive.content shouldBe "Principals and roles"
-                    val blankTagAccess = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), auth.permissionResolver)
+                    val blankTagAccess = AccessControl(sessionAuthentication(context.sessions, BearerSessionToken), auth)
                     listOf("", " ").forEach { name ->
                         shouldThrow<IllegalArgumentException> {
                             authorizationAdministrationHttpCapability(context, blankTagAccess, "/admin/other", setOf(Tag(name)))
@@ -410,14 +441,24 @@ class AuthorizationDirectorySpec :
         test("duplicate application permission keys fail composition") {
             val database = TestDatabase.create()
             try {
-                shouldThrow<IllegalArgumentException> {
-                    commerceRuntime(
-                        database.configuration(),
-                        ApplicationContributions(
-                            permissionDefinitions = listOf(PermissionDefinition(CommercePermissions.PrincipalRead, "Duplicate", null)),
-                        ),
-                    )
-                }
+                val failure =
+                    shouldThrow<IllegalArgumentException> {
+                        commerceRuntime(
+                            database.configuration(),
+                            ApplicationContributions(
+                                permissionDefinitions =
+                                    listOf(
+                                        PermissionDefinition(
+                                            CommercePermissions.PrincipalRead,
+                                            "Duplicate",
+                                            "Another meaning for a runtime key.",
+                                            PermissionGroup("example"),
+                                        ),
+                                    ),
+                            ),
+                        )
+                    }
+                failure.message shouldBe "Duplicate permission keys: commerce.principal.read"
             } finally {
                 database.close()
             }
@@ -462,6 +503,98 @@ class AuthorizationDirectorySpec :
                 ).use {
                     context.authorization.permissionResolver.permissionsFor(operator.id) shouldBe emptySet()
                     context.authorization.getRole(RoleKey("example.operator"))!!.permissions shouldBe emptySet()
+                }
+            } finally {
+                database.close()
+            }
+        }
+
+        test("a stored grant that is no longer a well-formed key fails startup by name") {
+            val database = TestDatabase.create()
+            try {
+                lateinit var context: CommerceRuntimeContext
+                commerceRuntime(
+                    database.configuration(),
+                    ApplicationContributions(routes = {
+                        context = it
+                        emptyList()
+                    }),
+                ).use {
+                    context.authorization.createRole(role("example.legacy", emptySet()))
+                    context.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate(
+                                "INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES ('example.legacy', 'Legacy.Key')",
+                            ).execute()
+                    }
+                }
+                val failure = shouldThrow<IllegalStateException> { commerceRuntime(database.configuration(), ApplicationContributions()) }
+                failure.message shouldBe "Stored role permissions missing from PermissionCatalog: Legacy.Key"
+            } finally {
+                database.close()
+            }
+        }
+
+        test("role reads and role mutations fail closed on a stored grant outside the catalog") {
+            val database = TestDatabase.create()
+            try {
+                lateinit var context: CommerceRuntimeContext
+                commerceRuntime(
+                    database.configuration(),
+                    ApplicationContributions(routes = {
+                        context = it
+                        emptyList()
+                    }),
+                ).use {
+                    val auth = context.authorization
+                    val operator = auth.createUser(user("operator"))
+                    val other = auth.createUser(user("other"))
+                    val manager = RoleKey("example.manager")
+                    val clean = role("example.clean", setOf(CommercePermissions.RoleRead))
+                    auth.createRole(role(manager.value, setOf(CommercePermissions.PrincipalRead)))
+                    auth.createRole(clean)
+                    auth.assignRole(operator.id, manager)
+
+                    fun corrupt(
+                        role: RoleKey,
+                        stored: String,
+                    ) = context.transactor.inTransaction { transaction ->
+                        transaction.handle
+                            .createUpdate("INSERT INTO commerce.role_permissions (role_key, permission_key) VALUES (:role, :permission)")
+                            .bind("role", role.value)
+                            .bind("permission", stored)
+                            .execute()
+                    }
+
+                    // Both a well-formed unknown key and a malformed legacy value fail through the
+                    // deliberate stored-grant diagnostic, never as a PermissionKey format error.
+                    listOf("mystery.permission", "Legacy.Key").forEach { stored ->
+                        corrupt(manager, stored)
+                        val diagnostic = "Stored role permissions missing from PermissionCatalog: $stored"
+
+                        listOf<() -> Any?>(
+                            { auth.permissionResolver.permissionsFor(operator.id) },
+                            { auth.roleResolver.resolve(manager) },
+                            { auth.getRole(manager) },
+                            { auth.listRoles() },
+                            { auth.updateRoleDetails(manager, "Renamed", "Would keep the unknown grant") },
+                            { auth.assignRole(other.id, manager) },
+                        ).forEach { read -> shouldThrow<IllegalStateException> { read() }.message shouldBe diagnostic }
+                        auth.assignedRoles(other.id) shouldBe emptySet()
+                        auth.getRole(clean.key) shouldBe clean
+
+                        // Replacing every grant reads none of the stale ones, so it is the explicit repair.
+                        auth.replaceRolePermissions(manager, setOf(CommercePermissions.PrincipalRead)).permissions shouldBe
+                            setOf(CommercePermissions.PrincipalRead)
+                        auth.getRole(manager)!!.displayName shouldBe manager.value
+                        auth.listRoles().map { it.key } shouldBe listOf(clean.key, manager)
+                        auth.permissionResolver.permissionsFor(operator.id) shouldBe setOf(CommercePermissions.PrincipalRead)
+                    }
+
+                    // An unassigned role with an unknown grant can still be deleted.
+                    corrupt(clean.key, "mystery.permission")
+                    auth.deleteRole(clean.key)
+                    auth.listRoles().map { it.key } shouldBe listOf(manager)
                 }
             } finally {
                 database.close()

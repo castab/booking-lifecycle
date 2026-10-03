@@ -12,15 +12,48 @@ value class RoleKey(
     }
 }
 
-/** Extensible operation identifier. Business operations ordinarily check this, not a role. */
+/**
+ * The one canonical identity of an operation permission, used by permission definitions,
+ * role grants, resolvers, and enforcement alike. Business operations ordinarily check this,
+ * not a role.
+ *
+ * A key is one or more dot-separated segments; each segment is lowercase ASCII letters and
+ * digits, optionally joined by single hyphens or underscores, for example `users.read` or
+ * `catering.inquiries.assign`. Values are taken exactly as given and never normalized:
+ * `Users.Create` is rejected, not lowercased.
+ */
 @JvmInline
 value class PermissionKey(
     val value: String,
 ) {
     init {
         require(value.isNotBlank()) { "Permission key must not be blank" }
+        require(value.matches(dottedKey)) {
+            "Permission key '$value' must be lowercase dot-separated segments of letters and digits, " +
+                "optionally joined by '-' or '_'"
+        }
     }
 }
+
+/**
+ * A stable, machine-readable grouping of related permissions, such as `commerce.roles`,
+ * for presentation in administrative interfaces. It uses the same syntax as [PermissionKey]
+ * and confers no authority.
+ */
+@JvmInline
+value class PermissionGroup(
+    val value: String,
+) {
+    init {
+        require(value.isNotBlank()) { "Permission group must not be blank" }
+        require(value.matches(dottedKey)) {
+            "Permission group '$value' must be lowercase dot-separated segments of letters and digits, " +
+                "optionally joined by '-' or '_'"
+        }
+    }
+}
+
+private val dottedKey = Regex("[a-z0-9]+(?:[-_][a-z0-9]+)*(?:\\.[a-z0-9]+(?:[-_][a-z0-9]+)*)*")
 
 /** A named bundle of permissions, supplied or persisted by the application or runtime. Permissions are copied on creation. */
 class RoleDefinition(
@@ -55,14 +88,20 @@ class RoleDefinition(
         "RoleDefinition(key=$key, displayName=$displayName, description=$description, permissions=$permissions)"
 }
 
-/** Human-readable metadata for a permission implemented by runtime or application code. */
+/**
+ * Human-readable metadata for a permission implemented by runtime or application code.
+ * Describing a permission confers no authority; it names the vocabulary that role grants
+ * and enforcement use through [key].
+ */
 data class PermissionDefinition(
     val key: PermissionKey,
     val displayName: String,
-    val description: String?,
+    val description: String,
+    val group: PermissionGroup,
 ) {
     init {
         require(displayName.isNotBlank()) { "Permission display name must not be blank" }
+        require(description.isNotBlank()) { "Permission description must not be blank" }
     }
 }
 
@@ -145,7 +184,7 @@ object CommercePermissions {
     /** Create a financial document. */
     val FinancialDocumentCreate: PermissionKey = PermissionKey("commerce.financial-document.create")
 
-    /** Create an offerings catalog or append categories and offerings to it. */
+    /** Create an offerings catalog and change its categories and offerings. */
     val OfferingsManage: PermissionKey = PermissionKey("commerce.offerings.manage")
 
     /** Record a payment. */

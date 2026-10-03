@@ -59,7 +59,7 @@ class AuthorizationSpec :
             (service() as Principal).id shouldBe serviceId
         }
 
-        test("text values reject blanks without imposing application-specific syntax") {
+        test("text values reject blanks; role keys impose no application-specific syntax") {
             shouldThrow<IllegalArgumentException> { RoleKey(" ") }
             shouldThrow<IllegalArgumentException> { PermissionKey("\t") }
             shouldThrow<IllegalArgumentException> { User(userId, "", null, null, "Alex", UserStatus.ACTIVE, emptySet()) }
@@ -68,6 +68,55 @@ class AuthorizationSpec :
             shouldThrow<IllegalArgumentException> { ServiceIdentity(serviceId, " ", PrincipalStatus.ACTIVE, emptySet()) }
             RoleKey("example.booking-coordinator").value shouldBe "example.booking-coordinator"
             observePayments.value shouldBe "example.payment.observe"
+        }
+
+        test("permission keys and groups are canonical dotted identifiers, never normalized") {
+            listOf(
+                "users",
+                "users.read",
+                "authorization.permissions.read",
+                "catering.inquiries.assign",
+                "commerce.financial-document.read",
+                "example.payment_observe.v2",
+            ).forEach { value ->
+                PermissionKey(value).value shouldBe value
+                PermissionGroup(value).value shouldBe value
+            }
+            listOf(
+                "",
+                " ",
+                "Users.Create",
+                "users.Create",
+                " users.read",
+                "users.read ",
+                "users read",
+                ".users",
+                "users.",
+                "users..read",
+                "users.-read",
+                "users.read-",
+                "users.re--ad",
+                "users/read",
+                "users:read",
+                "üsers.read",
+            ).forEach { value ->
+                shouldThrow<IllegalArgumentException> { PermissionKey(value) }
+                shouldThrow<IllegalArgumentException> { PermissionGroup(value) }
+            }
+            shouldThrow<IllegalArgumentException> { PermissionKey("Users.Create") }.message shouldBe
+                "Permission key 'Users.Create' must be lowercase dot-separated segments of letters and digits, optionally joined by '-' or '_'"
+        }
+
+        test("permission definitions require non-blank metadata and a group") {
+            val users = PermissionGroup("users")
+            val definition = PermissionDefinition(PermissionKey("users.create"), "Create users", "Create additional staff users", users)
+
+            definition.key shouldBe PermissionKey("users.create")
+            definition.group shouldBe users
+            definition.copy(displayName = "Add users").displayName shouldBe "Add users"
+            shouldThrow<IllegalArgumentException> { PermissionDefinition(definition.key, " ", "Create users", users) }
+            shouldThrow<IllegalArgumentException> { PermissionDefinition(definition.key, "Create users", "	", users) }
+            shouldThrow<IllegalArgumentException> { definition.copy(description = "") }
         }
 
         test("users and role definitions copy their sets") {

@@ -383,7 +383,38 @@ definitions, permission mappings, and assignments; it provides live resolver por
 transaction-aware administration. Credentials, login and bootstrap policy, and vertical
 staff profiles remain application-owned. `ApplicationContributions.permissionDefinitions`
 adds code-backed permission metadata; runtime composition rejects duplicate keys, and
-role mutations reject unknown keys. `PrincipalRead` and `PrincipalManage` cover both principal
+role mutations reject unknown keys. Every `RoleDefinition` the directory returns passes its
+one catalog-validating read (raw stored values first, then the hydrated grants); do not
+read roles from `AuthorizationRepository` around it. Corrupt grants fail closed, are never
+filtered or repaired on read, and are replaced only by an explicit `replaceRolePermissions`.
+
+The `PermissionCatalog` is the running application's vocabulary: the runtime's
+`commercePermissionDefinitions` plus the application's definitions. It answers only "which
+keys exist?". The `PermissionResolver` answers "which does this principal hold?",
+`AccessControl` enforces, and role administration assigns known keys; never collapse these.
+`PermissionKey` is the single permission identity: do not add a second key type or a
+string translation layer between the catalog and enforcement. Keys and `PermissionGroup`s
+are validated lowercase dot-separated segments and are never normalized. A
+`PermissionDefinition` requires a display name, description, and group. The catalog is
+immutable, key-ordered, code-defined, and never persisted; do not add a table for it. Its
+`revision` is a SHA-256 digest of its canonical contents, for diagnostics only. Every
+`CommercePermissions` key has a definition; describe a new runtime key when adding it.
+`AccessControl(authentication, context.authorization)` binds the catalog, live effective
+permissions, and principal identity from one directory; do not reintroduce a public
+constructor or free `requirePermission` that accepts an unrelated resolver or catalog. Its
+`requirePermission` rejects a key outside the catalog at composition, and effective
+permissions outside the catalog fail closed (never filtered). Every permission a runtime
+capability enforces, including runtime infrastructure permissions that are not
+`CommercePermissions` (such as service-credential administration), must be in
+`commercePermissionDefinitions` with a group and description. `permissionCatalogHttpCapability`
+and `currentPrincipalHttpCapability` take only the `AccessControl`, so they describe the
+authorization it enforces; the administration capability shares the same catalog route and
+rejects an `AccessControl` from another directory. The catalog route requires `RoleRead`,
+not `RoleManage`. The current principal route reports the request's authenticated
+principal, `USER` or `SERVICE` (a BFF calling with its own credential sees itself), with
+effective permissions and never role keys; do not add delegation or forwarded-user
+semantics to it. Both are mounted only by the application. Frontend checks are user
+experience; never relax server-side enforcement because of them. `PrincipalRead` and `PrincipalManage` cover both principal
 kinds; `RoleRead`, `RoleManage`, and `RoleAssign` are distinct. Disabling either kind
 revokes all its sessions in the same transaction. An assigned role cannot be deleted.
 No conventional role, including `Administrator`, has implicit grants.
@@ -424,8 +455,8 @@ hierarchy in this version.
   runtime HTTP capability that exposes protected operations declares the commerce
   permission each requires and receives the application's `AccessControl` explicitly at
   composition, as `OfferingsHttpAccess.ReadWrite` does for
-  `CommercePermissions.OfferingsManage`. The application can use
-  `context.authorization.permissionResolver`. Never add a global resolver to
+  `CommercePermissions.OfferingsManage`. The application builds it from
+  `context.authorization`. Never add a global resolver to
   `commerceRuntime(...)`, never let missing authorization mean
   "allow", and keep public capabilities free of an irrelevant resolver.
 - **HTTP.** `SessionTokenExtractor` (transport) is separate from `SessionManager`
@@ -615,7 +646,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/financial/` | `FinancialLedger`: transaction-owning document, payment, and refund operations, reconciliation, document version metadata, and payment discovery; `Refunds.kt`: `RefundAllocationPortion` and `RecordedRefund`; `PaymentHistory.kt` and `FinancialDocumentVersion.kt`: persisted-fact read models. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/config/` | `CommerceRuntimeConfiguration`: Hoplite/HOCON loading, environment overrides, validation. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/persistence/` | HikariCP data source, `MigrationLifecycle` (the runtime and application Flyway streams), `Transactor`/`Transaction`, the offerings snapshot repository, the internal principal session and authorization repositories and `PrincipalIdColumns`, PostgreSQL error helpers. |
-| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/authorization/` | Live authorization directory, permission catalog (including `RuntimePermissions`), administration DTOs and HTTP capability, including service credential administration. |
+| `runtime/src/main/kotlin/io/github/castab/commerce/runtime/authorization/` | Live authorization directory; `PermissionCatalog.kt` (the catalog, its revision, `RuntimePermissions`, and `commercePermissionDefinitions`); the administration (including service credential administration), permission catalog, and current principal HTTP capabilities and DTOs. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/serviceauth/` | Service authentication: `ServiceCredential`, `ServiceCredentialId`, `ServiceCredentialSecret`, `IssuedServiceCredential`, the internal Argon2id `ServiceCredentialHash`, `ServiceCredentials` and its internal PostgreSQL implementation, `ServiceAccessTokens` (`ServiceAccessToken`, the internal Nimbus `SignedServiceAccessTokens`, `ServiceAccessTokenAuthenticator`), DTOs, the token endpoint capability, and `serviceAccessTokenOpenApiSecurity`. The internal `persistence/ServiceCredentialRepository` stores credentials. |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/session/` | `PrincipalSession`, `SessionId`, `IssuedSession`, `SessionToken` (and the internal `SessionTokenDigest`), `SessionManager` and its internal PostgreSQL implementation, and `SessionAuthentication.kt` (token extractors, `SessionCookie`, `SessionAuthenticator`, `sessionAuthentication`). |
 | `runtime/src/main/kotlin/io/github/castab/commerce/runtime/offering/` | Generic immutable catalog commands and queries, transport DTO translation, and the opt-in http4k Offerings contract routes. |
@@ -628,7 +659,7 @@ booking lifecycle itself, it probably does not belong in the booking lifecycle A
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/offering/OfferingsCapabilitySpec.kt` | Generic operation, real HTTP, revision, conflict, multiple catalog, read-only, price, and host OpenAPI composition checks. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/persistence/PrincipalSessionRepositorySpec.kt` | Session table and indexes, `UserId` and `ServiceId` round trips, digest-only storage and uniqueness, revocation, and caller-transaction atomicity. |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/session/` | `SessionTokenSpec` (token generation, format, redaction, digest, activity), `SessionManagerSpec` (lifecycle on PostgreSQL with a hand-driven clock), and `SessionAuthenticationSpec` (401/403 behavior, current permissions, cookies). `testing/Sessions.kt` holds the test clock and output capture. |
-| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/authorization/` | PostgreSQL schema, live resolver, cross-schema transaction, session revocation, HTTP permission, and OpenAPI tests. |
+| `runtime/src/test/kotlin/io/github/castab/commerce/runtime/authorization/` | PostgreSQL schema, live resolver, cross-schema transaction, session revocation, HTTP permission, and OpenAPI tests (`AuthorizationDirectorySpec`); catalog composition, ordering, duplicates, and revision (`PermissionCatalogSpec`); and the catalog and current principal routes, catalog completeness of runtime routes, and their OpenAPI (`AuthorizationReadHttpSpec`). |
 | `runtime/src/test/kotlin/io/github/castab/commerce/runtime/serviceauth/` | `ServiceCredentialSecretSpec` (secret format and Argon2id hash), `ServiceAccessTokensSpec` (credential lifecycle and token verification on PostgreSQL with a hand-driven clock), and `ServiceAuthenticationHttpSpec` (token endpoint, live authorization of service tokens, sessions alongside, credential administration, OpenAPI). `testing/ServiceTokens.kt` holds deterministic test signing material. |
 | `runtime/src/test/resources/` | Test-only resources: a stand-in application `application.conf` (and variants without the database block and with `serviceTokens` blocks lacking an issuer or holding empty placeholders), `logback-test.xml`, the test application migrations in `db/testapp/`, `db/testapp-dependent/` (references a runtime-owned table), and `db/testapp-broken/` (fails), and the stand-in runtime stream in `db/testruntime/`. |
 | `.github/workflows/ci.yml` | CI: lint, domain tests, runtime tests, and the full build on Java 25 for pull requests and pushes to `main`. |
@@ -1109,6 +1140,10 @@ for `PrincipalStatus` for source compatibility.
 
 - `RoleKey` and `PermissionKey` are open-ended values, never enums. Commerce-defined
   role keys are conventions, not hard-coded grants. Applications or runtime persistence supply role definitions.
+  `PermissionKey` and `PermissionGroup` must be lowercase dot-separated segments (any
+  number), rejected rather than normalized when malformed; `RoleKey` has no syntax beyond
+  non-blank. `PermissionDefinition` is presentation metadata with a required display name,
+  description, and group; it grants nothing.
 - Operations ordinarily check permissions, not role names or principal types.
   `PrincipalId.can` takes an explicit `PermissionResolver`; do not hide resolver state
   in a singleton or locator.

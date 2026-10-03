@@ -101,7 +101,11 @@ class OfferingsCapabilitySpec :
                             context = supplied
                             val writes =
                                 OfferingsHttpAccess.ReadWrite(
-                                    AccessControl(sessionAuthentication(supplied.sessions, BearerSessionToken), permissions),
+                                    AccessControl(
+                                        sessionAuthentication(supplied.sessions, BearerSessionToken),
+                                        supplied.authorization.permissionCatalog,
+                                        permissions,
+                                    ),
                                 )
                             val a =
                                 offeringsHttpCapability(
