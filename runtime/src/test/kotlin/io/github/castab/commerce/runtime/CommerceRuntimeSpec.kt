@@ -266,7 +266,7 @@ class CommerceRuntimeSpec :
         test("application contributions receive the commerce offerings repository in their runtime context") {
             val snapshot = OfferingsSnapshot.create(OfferingsCatalogId(UUID.randomUUID()))
             context.transactor.inTransaction { transaction ->
-                context.offeringsSnapshotRepository.insert(transaction, snapshot)
+                context.offeringsSnapshotRepository.save(transaction, snapshot)
             }
             context.transactor.inTransaction { transaction ->
                 context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, snapshot.catalogId)

@@ -52,8 +52,8 @@ concrete commerce application    (the consuming project)
 2. **Runtime.** `commerce-runtime` is the opinionated, reusable machinery from which a
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
-   application contribution points, append-only offerings and financial-document snapshot
-   persistence, payment records and allocations, refunds and refund allocations, derived
+   application contribution points, current offerings catalog persistence, append-only
+   financial-document snapshot persistence, payment records and allocations, refunds and refund allocations, derived
    ledger reconciliation, and
    authenticated principal sessions, persistent principal and RBAC state, live permission
    resolution, and authorization administration over HTTP. It manages a session only after
@@ -118,41 +118,43 @@ OfferingsSnapshot + OfferingSelections + application context
 ```
 
 Dessert catering, taco catering, and mobile detailing are examples of different
-application catalogs and policy engines, not built-in catalog or pricing concepts. Runtime
-snapshot storage is append-only in the `commerce` schema and joins the caller's
-`Transaction`, including transactions that also write application data. See the
+application catalogs and policy engines, not built-in catalog or pricing concepts. The
+runtime stores each catalog's current revision in the `commerce` schema and joins the
+caller's `Transaction`, including transactions that also write application data. See the
 [domain offerings API](domain/README.md#offerings) and
-[runtime persistence contract](runtime/README.md#offerings-snapshots).
+[runtime persistence contract](runtime/README.md#offerings-catalogs).
 
 The runtime also supplies generic catalog commands, queries, and an explicitly mounted
 Offerings HTTP capability. Applications select a catalog ID, route path, operation ID
 prefix, and read-only or read-write exposure; the same http4k contract routes execute
-HTTP and contribute to the application's OpenAPI document. Catalog writes append
-successor snapshots and never change historical revisions. Every mutation of an existing
-catalog requires the caller's observed `expectedRevision`; stale writes return 409 before
-creating a successor, while the database primary key still guards true competing writers.
-Offering and category keys
-are durable natural identities, reserved throughout a catalog's history. Add creates a
+HTTP and contribute to the application's OpenAPI document. Each catalog write replaces the
+current revision with its immediate successor and advances the revision number; earlier
+revisions are not retained, so the revision is a concurrency and staleness token, not an
+address of past contents. Every mutation of an existing catalog requires the caller's
+observed `expectedRevision`; stale writes return 409 before creating a successor, while a
+row lock still guards true competing writers. Offering and category keys
+are durable natural identities, reserved once used, even after retirement. Add creates a
 new identity; update retains its key and position; retire removes it from the successor;
 restore reactivates the same identity at the end of the current list. Retired discovery
-returns each last representation and its revision without reconstructing history on the
-client. Categories containing offerings cannot be retired. Writes require the
+returns each last representation and the revision it was last present in. Categories
+containing offerings cannot be retired. Writes require the
 `commerce.offerings.manage` permission, evaluated through the supplied `AccessControl`
 (normally bound to `context.authorization`);
 retired discovery is also protected by this permission and absent from read-only bindings.
-Ordinary active and historical reads are as public as the host mounts them.
+Ordinary reads of the current catalog are as public as the host mounts them.
 
 Active offerings expose required `selectionState` (`ENABLED`/`DISABLED`) and
 `availability` (`AVAILABLE`/`UNAVAILABLE`). Disabled and unavailable offerings remain
 readable. All four combinations are valid independent facts; neither field implies the
 other. Disabled takes precedence over unavailable for the reported selection rejection
 reason, returning only `OFFERING_DISABLED` when both apply.
+Offerings also carry optional `badge`, `statusNote`, and `infoNote` presentation text beside
+`description`; omitting them from an update or restore clears them.
 Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
 list the enums without a cross-field exclusion. Kotlin update and restore operations also
 require both fields explicitly; new domain construction retains enabled/available defaults.
 V8 required non-null values without defaults or legacy backfills; populated pre-V8
 offering databases must be recreated.
-Changes append catalog revisions, preserving the selection semantics of historical reads.
 See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
 
 This is conceptual, not a required persistence design: each application chooses its own
@@ -171,12 +173,13 @@ database-assigned `createdAt`. V7 refuses to migrate a database containing older
 financial snapshots, because their original creation times were not recorded.
 
 The same persistence rule applies to offerings catalogs: a row is an independently
-meaningful fact or version, and immutable values that only make up a snapshot live in its
-row. A catalog revision is one `commerce.offerings_snapshots` row whose `catalog` JSONB
-holds its ordered categories and offerings, and a financial snapshot's line items are one
-`lines` JSONB value, so reading either is one row and one aggregate. Payments, allocations,
-refunds, principals, roles, and sessions stay relational. V9 does not convert populated
-databases; recreate an ephemeral database that has financial documents or catalogs. See the
+meaningful fact, entity, or version, and values that only make up an aggregate live in its
+row. A catalog is one `commerce.offerings_catalogs` row whose `catalog` JSONB holds its
+current ordered categories and offerings and its retired entries, and a financial
+snapshot's line items are one `lines` JSONB value, so reading either is one row and one
+aggregate. Payments, allocations, refunds, principals, roles, and sessions stay
+relational. V9, V11, and V12 do not convert populated databases; recreate an ephemeral
+database that has financial documents or catalogs. See the
 [runtime persistence notes](runtime/README.md#aggregate-snapshot-persistence).
 
 `PaymentRecord` describes money received. A separate `PaymentAllocation` connects part of

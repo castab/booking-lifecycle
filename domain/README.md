@@ -28,7 +28,7 @@ authorization:
 |---|---|---|
 | [Booking lifecycle](#booking-lifecycle) | `io.github.castab.commerce.booking.lifecycle` | A type-level protocol for the phases of a booking (`InitialRequest → Quote → Booked → Completed`, or `Cancelled`). Your application's own types implement the phases. |
 | [Financial documents](#financial-documents) | `io.github.castab.commerce.financial` | Immutable, versioned commercial documents (`Estimate → Quote → Invoice`) with line items, change orders, derived totals, and persistence-agnostic history lookup. |
-| [Offerings](#offerings) | `io.github.castab.commerce.offering` | Immutable, revisioned catalogs, generic selection constraints, descriptive price metadata, and an application policy evaluation seam producing financial line items. |
+| [Offerings](#offerings) | `io.github.castab.commerce.offering` | Immutable catalog values with a revision counter, generic selection constraints, descriptive price metadata, and an application policy evaluation seam producing financial line items. |
 | [Payment reconciliation](#payment-reconciliation) | `io.github.castab.commerce.payment` | Immutable payment records, payment allocations, allocation reversals, refund records, and refund allocations, with derived payment and document reconciliation. |
 | [Principal authorization](#principal-authorization) | `io.github.castab.commerce.staff` | Human and service identities, extensible roles and permissions, resolver ports, and additive role-based authorization. |
 | [Payment adapter contract](#payment-adapter-contract) | `io.github.castab.commerce.payment.adapter` | Provider-neutral payment and refund instructions, observations, capability descriptions, and event decisions. |
@@ -799,7 +799,12 @@ strongly typed in the application.
 `io.github.castab.commerce.offering` describes commercial choices without
 defining a particular business's catalog or price policy. An `Offering` has a stable
 `OfferingKey`, one `OfferingCategoryKey`, presentation text, and an optional
-`OfferingPrice`, plus selection state and availability. An `OfferingCategory` has a stable
+`OfferingPrice`, plus selection state and availability. Presentation text is the required
+`displayName` and the optional `description`, `badge` (a short label shown with the offering
+at all times, such as "Popular"), `statusNote` (the offering's current situation, such
+as "Back this fall"), and `infoNote` (a lasting fact shown on demand, such as "Contains
+peanuts"). Optional text is absent or nonblank. A status note is descriptive only:
+it neither implies nor overrides selection state or availability. An `OfferingCategory` has a stable
 key and min/max selection counts:
 `0..1` is optional single selection, `1..1` required single selection, and a null maximum
 is unbounded. The category and offering order supplied to a snapshot is preserved.
@@ -814,7 +819,7 @@ active catalog reads. For a submitted selection, `DISABLED` takes precedence ove
 `UNAVAILABLE`, yielding only `OFFERING_DISABLED` when both apply. This precedence
 chooses a rejection reason; it places no constraint on stored representation values.
 Retirement is independent: the key is absent from the latest snapshot. These properties
-belong to each catalog revision; changes create successors and preserve historical values.
+belong to each catalog revision; changes create successors.
 
 Prices are descriptive metadata: `OfferingPrice.Fixed(Money)`,
 `PerQuantity(Money, QuantityDimension)`, and `PerDuration(Money, Duration)`. A quantity
@@ -825,19 +830,21 @@ dependencies, and bundles stay in the application's engine, with no generic rule
 or metadata map.
 
 `OfferingsSnapshot.create(catalogId, categories, offerings)` starts an immutable catalog
-at revision 1. `revise(...)` returns its successor, retaining the catalog ID and recording
-the immediate prior revision. `restore(...)` reconstructs a stored revision. Each
-`OfferingsSnapshotReference(catalogId, revision)` identifies exactly one snapshot.
+value at revision 1. `revise(...)` returns its successor, retaining the catalog ID and
+recording the immediate prior revision. `restore(...)` reconstructs a stored revision. An
+`OfferingsSnapshotReference(catalogId, revision)` names a catalog at a revision. The
+revision advances on every change and is a concurrency and staleness token; whether
+earlier revisions are kept is a persistence decision, and `commerce-runtime` keeps only the
+current one.
 Construction rejects duplicate keys, offerings with missing categories, and invalid
 revision lineage. Empty catalogs are allowed. Lookups by key and by category are
 conveniences on the in-memory snapshot; they do not access persistence.
 
 `OfferingKey` and `OfferingCategoryKey` are durable natural identities within one catalog.
-A key that has appeared in any historical revision remains reserved. Absence from the
-latest snapshot means retired; retirement never deletes or rewrites history. Restoration
-reactivates the same identity and can supply updated properties. Ordinary update changes
-properties, never keys. Catalog revision plus catalog ID plus key identifies the exact
-historical representation; there are no per-item UUIDs, versions, timestamps, or active flags.
+A key that has ever been used remains reserved. Absence from the latest snapshot means
+retired; a retired key is never reused for something else. Restoration reactivates the
+same identity and can supply updated properties. Ordinary update changes properties, never
+keys. There are no per-item UUIDs, versions, timestamps, or active flags.
 
 ```text
 never existed -> add -> active -> update -> active -> retire -> retired -> restore -> active

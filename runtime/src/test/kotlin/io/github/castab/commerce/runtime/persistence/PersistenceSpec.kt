@@ -56,7 +56,7 @@ class PersistenceSpec :
         context("migrations") {
             test("every migration succeeds from an empty database; runtime migrations own the commerce schema and history") {
                 jdbi.appliedVersions("commerce.flyway_schema_history") shouldContainExactly
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
             }
 
             test("the runtime owns offerings, sessions, authorization, service credential, financial ledger, and refund tables") {
@@ -71,7 +71,7 @@ class PersistenceSpec :
             test("migrating again is a no-op") {
                 MigrationLifecycle(dataSource, testApplicationMigrations()).migrate()
 
-                jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 10
+                jdbi.count("commerce.flyway_schema_history WHERE version IS NOT NULL") shouldBe 12
             }
 
             test("the database is reachable for readiness checks") {

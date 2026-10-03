@@ -12,10 +12,10 @@ import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.offering.OfferingsRevision
 import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.operation.CommerceFailure
-import io.github.castab.commerce.runtime.persistence.HistoricalCatalogValue
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
+import io.github.castab.commerce.runtime.persistence.RetiredCatalogValue
 import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
@@ -66,7 +66,7 @@ class OfferingsLifecycleSpec :
 
         fun price(amount: String): OfferingPrice = OfferingPrice.Fixed(Money(BigDecimal(amount), Currency.getInstance("USD")))
 
-        test("independent selection transitions persist immutable history and retirement retains both facts") {
+        test("independent selection transitions advance the revision and retirement retains both facts") {
             val id = catalog()
             val original = Offering(horchata, flavors, "Horchata")
             AddOffering(transactor, repository)(id, observedRevision(id), original)
@@ -104,7 +104,6 @@ class OfferingsLifecycleSpec :
                 history += current
             }
             history.map { it.offerings.single().selectionState to it.offerings.single().availability }.shouldContainExactly(states)
-            history.forEach { GetOfferingsCatalogRevision(transactor, repository)(it.reference) shouldBe it }
             val both = history.last()
             shouldThrow<CommerceFailure.Conflict> {
                 UpdateOffering(transactor, repository)(
@@ -135,7 +134,6 @@ class OfferingsLifecycleSpec :
                 availability = OfferingAvailability.UNAVAILABLE,
             )
             latest(id).offerings.single() shouldBe both.offerings.single()
-            GetOfferingsCatalogRevision(transactor, repository)(retired.reference).offerings shouldBe emptyList()
         }
 
         test("full replacement mutation API requires both properties and unrelated updates preserve them explicitly") {
@@ -166,10 +164,9 @@ class OfferingsLifecycleSpec :
             )
             latest(id).offerings.single() shouldBe both.copy(displayName = "Updated name")
             latest(id).previousRevision shouldBe before.revision
-            GetOfferingsCatalogRevision(transactor, repository)(before.reference).offerings.single() shouldBe both
         }
 
-        test("offering keys remain reserved through retirement and restoration with exact immutable history") {
+        test("offering keys remain reserved through retirement and restoration") {
             val id = catalog()
             val initial = latest(id)
             val offering = Offering(horchata, flavors, "Horchata", price = price("0.50"))
@@ -231,21 +228,21 @@ class OfferingsLifecycleSpec :
             restored.offerings.single().key shouldBe horchata
             restored.offerings.single().price shouldBe price("1.00")
             ListRetiredOfferings(transactor, repository)(id).value shouldBe emptyList()
-            // Capture complete snapshots, including decimal scale and ordering, and reread after all mutations.
-            listOf(initial, added, updated, retired, restored).forEach { expected ->
-                GetOfferingsCatalogRevision(transactor, repository)(expected.reference) shouldBe expected
-            }
+            listOf(initial, added, updated, retired, restored).map { it.revision.number } shouldContainExactly listOf(2, 3, 4, 5, 6)
+            latest(id) shouldBe restored
             transactor.inTransaction {
-                repository.offeringKeyExistsInHistory(it, id, horchata) shouldBe true
-                repository.offeringKeyExistsInHistory(it, OfferingsCatalogId(UUID.randomUUID()), horchata) shouldBe false
-                // A read anchored to r5 still describes r5 even after r6 has restored the item.
-                repository.retrieveRetiredOfferings(it, retired.reference).shouldContainExactly(
-                    HistoricalCatalogValue(updated.reference, updated.offerings.single()),
+                repository.offeringKeyReserved(it, id, horchata) shouldBe true
+                repository.offeringKeyReserved(it, OfferingsCatalogId(UUID.randomUUID()), horchata) shouldBe false
+            }
+            RetireOffering(transactor, repository)(id, observedRevision(id), horchata)
+            transactor.inTransaction {
+                repository.retrieveRetiredOfferings(it, id).shouldContainExactly(
+                    RetiredCatalogValue(restored.reference, restored.offerings.single()),
                 )
             }
         }
 
-        test("category keys remain reserved through retirement and restoration with exact immutable history") {
+        test("category keys remain reserved through retirement and restoration") {
             val id = catalog()
             val initial = latest(id)
             UpdateOfferingCategory(transactor, repository)(id, observedRevision(id), flavors, "New flavors", "Description", 1, 2)
@@ -272,14 +269,16 @@ class OfferingsLifecycleSpec :
             RestoreOfferingCategory(transactor, repository)(id, observedRevision(id), flavors, "Restored flavors", minimumSelections = 0)
             val restored = latest(id)
             ListRetiredCategories(transactor, repository)(id).value shouldBe emptyList()
-            listOf(initial, updated, retired, restored).forEach { expected ->
-                GetOfferingsCatalogRevision(transactor, repository)(expected.reference) shouldBe expected
-            }
+            listOf(initial, updated, retired, restored).map { it.revision.number } shouldContainExactly listOf(2, 3, 4, 5)
+            latest(id) shouldBe restored
             transactor.inTransaction {
-                repository.categoryKeyExistsInHistory(it, id, flavors) shouldBe true
-                repository.categoryKeyExistsInHistory(it, OfferingsCatalogId(UUID.randomUUID()), flavors) shouldBe false
-                repository.retrieveRetiredCategories(it, retired.reference).shouldContainExactly(
-                    HistoricalCatalogValue(updated.reference, updated.categories.single()),
+                repository.categoryKeyReserved(it, id, flavors) shouldBe true
+                repository.categoryKeyReserved(it, OfferingsCatalogId(UUID.randomUUID()), flavors) shouldBe false
+            }
+            RetireOfferingCategory(transactor, repository)(id, observedRevision(id), flavors)
+            transactor.inTransaction {
+                repository.retrieveRetiredCategories(it, id).shouldContainExactly(
+                    RetiredCatalogValue(restored.reference, restored.categories.single()),
                 )
             }
         }
@@ -526,7 +525,6 @@ class OfferingsLifecycleSpec :
                 availability = OfferingAvailability.AVAILABLE,
             )
             RetireOfferingCategory(transactor, repository)(id, observedRevision(id), target)
-            GetOfferingsCatalogRevision(transactor, repository)(original.reference) shouldBe original
         }
 
         test("retired discovery is catalog scoped, ordered by key, and returns each last complete representation") {
@@ -653,10 +651,6 @@ class OfferingsLifecycleSpec :
             }
             latest(id) shouldBe committed
             latest(id).offerings.single().price shouldBe price("0.75")
-            shouldThrow<CommerceFailure.NotFound> {
-                GetOfferingsCatalogRevision(transactor, repository)(committed.reference.copy(revision = committed.revision.next()))
-            }
-            GetOfferingsCatalogRevision(transactor, repository)(uiObserved.reference) shouldBe uiObserved
         }
 
         listOf(
@@ -727,17 +721,6 @@ class OfferingsLifecycleSpec :
                     }
                 }
                 latest(id) shouldBe committed
-                GetOfferingsCatalogRevision(transactor, repository)(uiObserved.reference) shouldBe uiObserved
-                shouldThrow<CommerceFailure.NotFound> {
-                    GetOfferingsCatalogRevision(transactor, repository)(committed.reference.copy(revision = committed.revision.next()))
-                }
-                transactor.inTransaction {
-                    it.handle
-                        .createQuery("SELECT count(*) FROM commerce.offerings_snapshots WHERE catalog_id = :id")
-                        .bind("id", id.value)
-                        .mapTo(Int::class.java)
-                        .one() shouldBe committed.revision.number
-                }
             }
         }
 
@@ -800,14 +783,7 @@ class OfferingsLifecycleSpec :
                     results.sorted().shouldContainExactly("conflict", "success")
                 }
                 latest(id).revision shouldBe before.revision.next()
-                GetOfferingsCatalogRevision(transactor, repository)(before.reference) shouldBe before
-                transactor.inTransaction {
-                    it.handle
-                        .createQuery("SELECT count(*) FROM commerce.offerings_snapshots WHERE catalog_id = :id")
-                        .bind("id", id.value)
-                        .mapTo(Int::class.java)
-                        .one() shouldBe before.revision.number + 1
-                }
+                latest(id).previousRevision shouldBe before.revision
             }
         }
     })

@@ -88,6 +88,9 @@ data class OfferingDto(
     val price: OfferingPriceDto? = null,
     val selectionState: OfferingSelectionStateDto,
     val availability: OfferingAvailabilityDto,
+    val badge: String? = null,
+    val statusNote: String? = null,
+    val infoNote: String? = null,
 ) {
     fun toDomain(): Offering =
         validating {
@@ -99,6 +102,9 @@ data class OfferingDto(
                 price?.toDomain(),
                 selectionState.toDomain(),
                 availability.toDomain(),
+                badge,
+                statusNote,
+                infoNote,
             )
         }
 }
@@ -126,8 +132,12 @@ data class AddOfferingDto(
     val price: OfferingPriceDto? = null,
     val selectionState: OfferingSelectionStateDto,
     val availability: OfferingAvailabilityDto,
+    val badge: String? = null,
+    val statusNote: String? = null,
+    val infoNote: String? = null,
 ) {
-    fun toDomain(): Offering = OfferingDto(key, category, displayName, description, price, selectionState, availability).toDomain()
+    fun toDomain(): Offering =
+        OfferingDto(key, category, displayName, description, price, selectionState, availability, badge, statusNote, infoNote).toDomain()
 }
 
 /** A new natural category identity appended against the catalog revision the caller observed. */
@@ -153,9 +163,23 @@ data class OfferingMutationDto(
     val price: OfferingPriceDto? = null,
     val selectionState: OfferingSelectionStateDto,
     val availability: OfferingAvailabilityDto,
+    val badge: String? = null,
+    val statusNote: String? = null,
+    val infoNote: String? = null,
 ) {
     fun toDomain(key: OfferingKey): Offering =
-        OfferingDto(key.value, category, displayName, description, price, selectionState, availability).toDomain()
+        OfferingDto(
+            key.value,
+            category,
+            displayName,
+            description,
+            price,
+            selectionState,
+            availability,
+            badge,
+            statusNote,
+            infoNote,
+        ).toDomain()
 }
 
 /** Editable category properties. Identity comes only from the route/operation key. */
@@ -289,6 +313,9 @@ private fun Offering.dto(): OfferingDto =
             OfferingAvailability.AVAILABLE -> OfferingAvailabilityDto.AVAILABLE
             OfferingAvailability.UNAVAILABLE -> OfferingAvailabilityDto.UNAVAILABLE
         },
+        badge,
+        statusNote,
+        infoNote,
     )
 
 fun OfferingsSnapshot.dto(): OfferingsCatalogDto =
