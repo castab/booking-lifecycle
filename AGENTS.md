@@ -1022,12 +1022,29 @@ amounts from payment facts. Neither package imports deposits. Booking remains in
   money strictly, preserving decimal scales, with no repair or defaults.
 - V13's financial_document_lineages holds a current snapshot reference, not financial
   amounts. Snapshot-insert triggers maintain it for every writer and lock it before a
-  successor insert. Requirement writes take this same NO KEY UPDATE lock before checking
+  successor insert. Requirement writes take this same NO KEY UPDATE NOWAIT lock before checking
   strict document and requirement tokens (null means no history). This protects first
   activation and lets PostgreSQL reject stale repeatable-read document mutations. Unique
   predecessor constraints also reject stale requirement successors. Translate these races
-  into Conflict; retry the whole transaction. Never mutate a snapshot to obtain a lock,
-  add advisory/payment locks here, or introduce a payment/lineage lock inversion.
+  into Conflict; retry the whole transaction. Never mutate a snapshot to obtain a lock
+  or add advisory/payment locks here.
+- The enforced financial mutation lock discipline is: payment rows may wait (FOR UPDATE);
+  lineage mutation locks never wait (FOR NO KEY UPDATE NOWAIT). Document successors,
+  activation/replacement/reactivation, and withdrawal acquire the lineage row; allocations,
+  recordPaymentAgainstDocument, refunds, and reconcilePayment acquire the payment row.
+  Payment operations only read immutable snapshots and do not acquire lineage mutation
+  locks. Caller-owned transactions may compose these operations in either order and
+  reacquire their own locks. A payment holder attempting a busy lineage fails immediately
+  with Conflict (SQLSTATE 55P03), so it cannot wait on a lineage holder waiting for that
+  payment. Both the repository and V13's snapshot-insert trigger enforce this rule; do
+  not replace NOWAIT with a waiting lineage lock or use deadlock detection/retry as policy.
+  A lock failure aborts the transaction: roll back the entire caller transaction before
+  retrying. This rule preserves payment allocation/refund serialization and does not
+  change transaction nesting or isolation. Nonlocking history/bulk reads remain nonlocking.
+- Approval joins use the shared strict document-only restoration path, which needs no
+  snapshot timestamp. Requirement timestamps are explicitly named requirement_created_at;
+  FinancialDocumentVersion reads take created_at from the snapshot itself. Never use a
+  requirement timestamp to construct financial-document metadata, even if discarded later.
 - financialLineages uses four set-based queries in one snapshot, input iteration order,
   empty-to-empty, duplicate rejection, and NotFound for any missing lineage. Its view holds
   current version metadata, reconciliation, latest requirement, derived satisfaction, and

@@ -83,6 +83,9 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
                 .bind("lines", snapshot.lineItems.toStoredLines())
                 .execute()
         } catch (e: UnableToExecuteStatementException) {
+            if (e.isLockUnavailable() || e.isSerializationFailure()) {
+                throw CommerceFailure.Conflict("Financial document ${snapshot.id} has a competing mutation", e)
+            }
             if (e.isUniqueViolation()) {
                 throw CommerceFailure.Conflict("Financial document ${snapshot.reference} already has this snapshot or successor", e)
             }
@@ -150,7 +153,12 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
             .map { rows, _ -> restore(rows) }
             .list()
 
-    /** Serializes document successors and requirement approvals, including the first approval. */
+    /**
+     * Serializes document successors and requirement mutations, including first approval.
+     * Never waits: the caller may already hold a payment lock, while the lineage holder
+     * waits for that payment. NOWAIT breaks that cycle with Conflict at this operation.
+     * Reacquiring our own lock succeeds. The snapshot-insert trigger enforces the same rule.
+     */
     fun lockLineage(
         transaction: Transaction,
         id: UUID,
@@ -160,7 +168,7 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
                 transaction.handle
                     .createQuery(
                         """SELECT latest_version FROM commerce.financial_document_lineages
-                   WHERE document_id = :id FOR NO KEY UPDATE""",
+                   WHERE document_id = :id FOR NO KEY UPDATE NOWAIT""",
                     ).bind("id", id)
                     .mapTo(Int::class.java)
                     .findOne()
@@ -168,6 +176,9 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
                     ?: throw CommerceFailure.NotFound("Financial document $id was not found")
             return Version.of(number)
         } catch (e: UnableToExecuteStatementException) {
+            if (e.isLockUnavailable()) {
+                throw CommerceFailure.Conflict("Financial document $id has a competing mutation", e)
+            }
             if (e.isSerializationFailure()) {
                 throw CommerceFailure.Conflict(
                     "Financial document $id changed after the transaction snapshot",
@@ -193,23 +204,25 @@ internal class PostgresFinancialDocumentRepository : FinancialDocumentRepository
             .list()
             .associateBy { it.document.id }
 
-    internal fun restore(rows: ResultSet): FinancialDocumentVersion {
+    private fun restore(rows: ResultSet): FinancialDocumentVersion =
+        FinancialDocumentVersion.from(restoreDocument(rows), rows.getObject("created_at", OffsetDateTime::class.java).toInstant())
+
+    /** Strict document restoration for joins that intentionally omit snapshot timestamp metadata. */
+    internal fun restoreDocument(rows: ResultSet): FinancialDocument {
         val id = rows.getObject("document_id", UUID::class.java)
         val version = Version.of(rows.getInt("version"))
         val what = "financial document $id version ${version.number}"
         val lines = restoreStoredLines("lines of $what", rows.getString("lines"))
-        val document =
-            try {
-                when (val stage = rows.getString("stage")) {
-                    "ESTIMATE" -> FinancialDocument.Estimate.restore(id, version, lines)
-                    "QUOTE" -> FinancialDocument.Quote.restore(id, version, lines)
-                    "INVOICE" -> FinancialDocument.Invoice.restore(id, version, lines)
-                    else -> error("Unsupported financial document stage: $stage")
-                }
-            } catch (e: IllegalArgumentException) {
-                throw IllegalStateException("Persisted $what violates a domain invariant: ${e.message}", e)
+        return try {
+            when (val stage = rows.getString("stage")) {
+                "ESTIMATE" -> FinancialDocument.Estimate.restore(id, version, lines)
+                "QUOTE" -> FinancialDocument.Quote.restore(id, version, lines)
+                "INVOICE" -> FinancialDocument.Invoice.restore(id, version, lines)
+                else -> error("Unsupported financial document stage: $stage")
             }
-        return FinancialDocumentVersion.from(document, rows.getObject("created_at", OffsetDateTime::class.java).toInstant())
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException("Persisted $what violates a domain invariant: ${e.message}", e)
+        }
     }
 
     private fun FinancialDocument.stageName(): String =

@@ -16,7 +16,9 @@ INSERT INTO commerce.financial_document_lineages (document_id, latest_version)
     SELECT document_id, max(version) FROM commerce.financial_document_snapshots GROUP BY document_id;
 
 -- Maintain the reference for every snapshot writer, including older runtime instances.
--- Lock before the snapshot insert, so all writers take the same order.
+-- Lock before the snapshot insert. Never wait for a lineage: a caller may already
+-- own a payment for which the lineage holder is waiting. NOWAIT breaks that cycle,
+-- including for writers that do not first call the runtime's lockLineage method.
 CREATE FUNCTION commerce.lock_financial_document_lineage() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -24,7 +26,7 @@ DECLARE
 BEGIN
     IF NEW.version > 1 THEN
         SELECT latest_version INTO current_version FROM commerce.financial_document_lineages
-            WHERE document_id = NEW.document_id FOR NO KEY UPDATE;
+            WHERE document_id = NEW.document_id FOR NO KEY UPDATE NOWAIT;
         IF current_version IS DISTINCT FROM NEW.previous_version THEN
             RAISE EXCEPTION 'Financial document has a stale predecessor' USING ERRCODE = '23505';
         END IF;

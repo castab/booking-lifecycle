@@ -13,7 +13,6 @@ import io.github.castab.commerce.runtime.persistence.Transaction
 import io.github.castab.commerce.runtime.persistence.Transactor
 import io.github.castab.commerce.runtime.persistence.createDataSource
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.string.shouldContain
 import org.jdbi.v3.core.Jdbi
 import java.math.BigDecimal
 import java.time.Instant
@@ -58,8 +57,8 @@ internal class FinancialLedgerFixture : AutoCloseable {
     fun <T> onOtherThread(block: () -> T): T =
         Executors.newSingleThreadExecutor().use { it.submit(Callable(block)).get(30, TimeUnit.SECONDS) }
 
-    /** Observes PostgreSQL lock waits, then releases the holder. No timing-based race assertions. */
-    fun <T> serialize(
+    /** The contender must finish while the lineage holder is still uncommitted. */
+    fun <T> contendForLineage(
         holding: (Transaction) -> Unit,
         waiting: (Transaction) -> T,
         rollbackHolder: Boolean = false,
@@ -67,68 +66,69 @@ internal class FinancialLedgerFixture : AutoCloseable {
         val executor = Executors.newFixedThreadPool(2)
         val release = CountDownLatch(1)
         try {
-            val holderPid = CompletableFuture<Int>()
+            val holderReady = CompletableFuture<Unit>()
             val holder =
                 executor.submit(
                     Callable {
                         runCatching {
                             transactor.inTransaction { transaction ->
                                 holding(transaction)
-                                holderPid.complete(pid(transaction))
+                                holderReady.complete(Unit)
                                 check(release.await(30, TimeUnit.SECONDS))
                                 if (rollbackHolder) error("abort holder")
                             }
-                        }.also { if (!holderPid.isDone) holderPid.completeExceptionally(it.exceptionOrNull()!!) }
+                        }.also { if (!holderReady.isDone) holderReady.completeExceptionally(it.exceptionOrNull()!!) }
                     },
                 )
-            val holderBackend = holderPid.get(30, TimeUnit.SECONDS)
-            val waiterPid = CompletableFuture<Int>()
+            holderReady.get(30, TimeUnit.SECONDS)
             val waiter =
                 executor.submit(
                     Callable {
                         runCatching {
                             transactor.inTransaction { transaction ->
-                                waiterPid.complete(pid(transaction))
                                 waiting(transaction)
                             }
                         }
                     },
                 )
-            val waitingBackend = waiterPid.get(30, TimeUnit.SECONDS)
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-            while (true) {
-                val query =
-                    transactor.inTransaction { transaction ->
-                        transaction.handle
-                            .createQuery(
-                                """SELECT query FROM pg_stat_activity
-                           WHERE pid = :waiter AND wait_event_type = 'Lock'
-                             AND :holder = ANY (pg_blocking_pids(pid))""",
-                            ).bind("waiter", waitingBackend)
-                            .bind("holder", holderBackend)
-                            .mapTo(String::class.java)
-                            .findOne()
-                            .orElse(null)
-                    }
-                if (query != null) {
-                    query shouldContain "commerce.financial_document_lineages"
-                    query shouldContain "FOR NO KEY UPDATE"
-                    break
-                }
-                check(System.nanoTime() < deadline) { "Waiter was never blocked by the lineage writer" }
-                Thread.sleep(10)
-            }
-            waiter.isDone shouldBe false
+            val outcome = waiter.get(10, TimeUnit.SECONDS)
+            holder.isDone shouldBe false
             release.countDown()
             holder.get(30, TimeUnit.SECONDS).isFailure shouldBe rollbackHolder
-            return waiter.get(30, TimeUnit.SECONDS)
+            return outcome
         } finally {
             release.countDown()
             executor.shutdownNow()
         }
     }
 
-    private fun pid(transaction: Transaction): Int =
+    /** Observes an actual PostgreSQL wait edge; polling does not decide operation ordering. */
+    fun awaitBlocked(
+        waiter: Int,
+        holder: Int,
+    ): String {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (true) {
+            val query =
+                transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createQuery(
+                            """SELECT query FROM pg_stat_activity
+                       WHERE pid = :waiter AND wait_event_type = 'Lock'
+                         AND :holder = ANY (pg_blocking_pids(pid))""",
+                        ).bind("waiter", waiter)
+                        .bind("holder", holder)
+                        .mapTo(String::class.java)
+                        .findOne()
+                        .orElse(null)
+                }
+            if (query != null) return query
+            check(System.nanoTime() < deadline) { "Expected PostgreSQL lock wait was not observed" }
+            Thread.yield()
+        }
+    }
+
+    fun pid(transaction: Transaction): Int =
         transaction.handle
             .createQuery("SELECT pg_backend_pid()")
             .mapTo(Int::class.java)

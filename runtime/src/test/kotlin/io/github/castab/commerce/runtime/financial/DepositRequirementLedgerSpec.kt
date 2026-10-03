@@ -278,7 +278,7 @@ class DepositRequirementLedgerSpec :
                         null
                     }
                 val outcome =
-                    fixture.serialize(
+                    fixture.contendForLineage(
                         holding = { ledger.activateDepositRequirement(it, document.id, document.version, fixed("30"), expected) },
                         waiting = { ledger.activateDepositRequirement(it, document.id, document.version, fixed("40"), expected) },
                     )
@@ -295,15 +295,20 @@ class DepositRequirementLedgerSpec :
             }
         }
 
-        test("competing activation sees a rolled back first writer as no history") {
+        test("competing activation conflicts before holder rollback and an explicit retry sees no history") {
             val document = fixture.document()
             val outcome =
-                fixture.serialize(
+                fixture.contendForLineage(
                     holding = { fixture.ledger.activateDepositRequirement(it, document.id, document.version, fixed("30"), null) },
                     waiting = { fixture.ledger.activateDepositRequirement(it, document.id, document.version, fixed("40"), null) },
                     rollbackHolder = true,
                 )
-            outcome.getOrThrow().requirement.revision shouldBe initial
+            outcome.exceptionOrNull().shouldBeInstanceOf<CommerceFailure.Conflict>()
+            fixture.ledger.depositRequirementHistory(document.id).shouldBeEmpty()
+            fixture.ledger
+                .activateDepositRequirement(document.id, document.version, fixed("40"), null)
+                .requirement.revision shouldBe
+                initial
             fixture.ledger.depositRequirementHistory(document.id).size shouldBe 1
         }
 
@@ -311,7 +316,7 @@ class DepositRequirementLedgerSpec :
             val document = fixture.document()
             fixture.ledger.activateDepositRequirement(document.id, document.version, fixed(), null)
             val outcome =
-                fixture.serialize(
+                fixture.contendForLineage(
                     holding = { fixture.ledger.withdrawDepositRequirement(it, document.id, initial) },
                     waiting = { fixture.ledger.withdrawDepositRequirement(it, document.id, initial) },
                 )
@@ -319,14 +324,17 @@ class DepositRequirementLedgerSpec :
             fixture.ledger.depositRequirementHistory(document.id).size shouldBe 2
         }
 
-        test("approval waits for a document successor then rejects its stale expected document version") {
+        test("approval conflicts immediately with a document successor and still rejects its stale version after commit") {
             val document = fixture.document()
             val outcome =
-                fixture.serialize(
+                fixture.contendForLineage(
                     holding = { fixture.ledger.issueInvoice(it, document.id) },
                     waiting = { fixture.ledger.activateDepositRequirement(it, document.id, document.version, fixed(), null) },
                 )
             outcome.exceptionOrNull().shouldBeInstanceOf<CommerceFailure.Conflict>()
+            shouldThrow<CommerceFailure.Conflict> {
+                fixture.ledger.activateDepositRequirement(document.id, document.version, fixed(), null)
+            }
             fixture.ledger.depositRequirementHistory(document.id).shouldBeEmpty()
         }
 

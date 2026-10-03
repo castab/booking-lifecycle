@@ -33,8 +33,16 @@ import java.util.UUID
  * overloads join the caller's transaction, including application-owned writes. Documents
  * and payment facts (payments, allocations, refunds, and refund allocations) are
  * append-only; settlement is derived on read. Every operation that consumes a payment's
- * value locks that payment's row first, so allocations and refunds of one payment are
- * serialized and each is checked against the other's committed facts.
+ * value locks that payment's row before validating its history, so allocations and refunds
+ * of one payment are serialized and each is checked against the other's committed facts.
+ *
+ * Caller-owned transactions may compose payment and document/deposit operations in either
+ * order. The enforced discipline is: payment rows may wait; lineage mutation locks never
+ * wait (FOR NO KEY UPDATE NOWAIT). A competing lineage mutation fails with Conflict at
+ * that operation, even if the caller already holds a payment. Roll back and retry the
+ * whole caller transaction. Thus a lineage holder waiting for a payment cannot form a
+ * cycle with a payment holder waiting for the lineage. Own locks may be reacquired;
+ * immutable snapshot reads and payment foreign-key checks take no lineage mutation lock.
  */
 class FinancialLedger internal constructor(
     private val transactor: Transactor,
@@ -62,8 +70,9 @@ class FinancialLedger internal constructor(
 
     /**
      * Appends approved terms in the caller's transaction, keeping the lineage lock until it
-     * ends. Changes after a REPEATABLE_READ snapshot began fail as Conflict; retry the whole
-     * caller transaction. This overload neither opens a transaction nor changes isolation.
+     * ends. Contention fails immediately as Conflict. Changes after a REPEATABLE_READ snapshot
+     * began fail as Conflict; retry the whole caller transaction. This overload neither
+     * opens a transaction nor changes isolation.
      */
     fun activateDepositRequirement(
         transaction: Transaction,

@@ -1066,13 +1066,33 @@ V13 also creates `commerce.financial_document_lineages`, holding only each docum
 and its current snapshot reference. Snapshot-insert triggers maintain that reference,
 including inserts from older runtimes, and take the lineage lock before inserting a
 successor. It is internal concurrency infrastructure, not another financial fact or a
-balance. Requirements lock this row with `FOR NO KEY UPDATE` before checking both tokens
+balance. Requirements lock this row with `FOR NO KEY UPDATE NOWAIT` before checking both tokens
 and inserting. This protects first approval as well as replacement; competing writers
 receive Conflict. The reference changes when documents advance, so PostgreSQL also
 rejects a stale `REPEATABLE_READ` mutation as Conflict; retry the whole caller transaction.
-Document snapshots and requirement revisions remain immutable. These operations take
-no payment locks, and allocation/refund operations take no lineage locks: payment lock
-order is preserved. Reads take no mutation locks.
+Document snapshots and requirement revisions remain immutable.
+
+The runtime enforces one financial mutation lock discipline: payment rows may wait
+(`FOR UPDATE`); lineage mutation locks never wait (`FOR NO KEY UPDATE NOWAIT`). Document
+successors (`changeOrder`, `issueQuote`, `issueInvoice`) and deposit activation,
+replacement, reactivation, and withdrawal lock the lineage row. Payment allocation,
+`recordPaymentAgainstDocument`, refunds, and `reconcilePayment` lock the payment row and
+only read immutable snapshots. Those payment operations take no lineage mutation lock.
+The repositories reacquire their own locks safely, including the snapshot-insert trigger.
+
+Caller-owned transactions may compose these operations in either order. If a transaction
+already holds a payment while another holds the lineage and waits for that payment,
+the first transaction's lineage operation fails immediately with `CommerceFailure.Conflict`
+(PostgreSQL `55P03`), rather than waiting to form a cycle. Roll back the whole transaction
+before retrying, including any application-owned writes. The repository and V13 trigger
+both enforce NOWAIT; callers need no application lock or lock-order bookkeeping. Payment
+allocation/refund serialization remains unchanged, as do transaction nesting and isolation.
+History and bulk reads take no mutation locks.
+
+Approval joins restore the document representation through the same strict restoration
+logic used for snapshot reads, without constructing timestamp metadata. The requirement's
+timestamp is selected explicitly as `requirement_created_at`; financial-document version
+reads use the snapshot's own `created_at`. The two facts' timestamps remain independent.
 
 `financialLineages(ids)` returns an unmodifiable list of `FinancialLineageView` in the
 input's iteration order. Empty input returns empty output; duplicates fail

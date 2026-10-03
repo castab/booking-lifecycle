@@ -19,7 +19,9 @@ internal class DepositRequirementRepository(
     private val documents: PostgresFinancialDocumentRepository,
 ) {
     private val select =
-        """SELECT r.*, d.version, d.stage, d.lines::text AS lines,
+        """SELECT r.document_id, r.revision, r.previous_revision, r.kind, r.approval_version,
+                  r.terms_kind, r.terms_amount, r.terms_scale, r.required_amount, r.required_scale,
+                  r.currency, r.created_at AS requirement_created_at, d.version, d.stage, d.lines::text AS lines,
                   p.kind AS predecessor_kind
            FROM commerce.deposit_requirement_revisions r
            LEFT JOIN commerce.financial_document_snapshots d
@@ -136,7 +138,7 @@ internal class DepositRequirementRepository(
                                 "PERCENTAGE" -> DepositTerms.Percentage(value)
                                 else -> error("Unsupported deposit terms kind")
                             }
-                        val approval = documents.restore(rows).document
+                        val approval = documents.restoreDocument(rows)
                         DepositRequirement.Active.restore(
                             approval,
                             revision,
@@ -159,7 +161,10 @@ internal class DepositRequirementRepository(
                     }
                     else -> error("Unsupported deposit requirement kind")
                 }
-            return DepositRequirementVersion.from(requirement, rows.getObject("created_at", OffsetDateTime::class.java).toInstant())
+            return DepositRequirementVersion.from(
+                requirement,
+                rows.getObject("requirement_created_at", OffsetDateTime::class.java).toInstant(),
+            )
         } catch (e: RuntimeException) {
             throw IllegalStateException("Persisted $what violates its representation or domain invariants: ${e.message}", e)
         }
