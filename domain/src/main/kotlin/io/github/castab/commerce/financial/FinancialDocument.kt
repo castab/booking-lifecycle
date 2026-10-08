@@ -9,6 +9,10 @@ import java.util.UUID
  * One immutable snapshot of a commercial document: an [Estimate], a [Quote], or an
  * [Invoice].
  *
+ * Lines are application-supplied financial snapshots. Creation and revision never require
+ * products, selections, catalog revisions, or pricing-policy evaluation. Later application
+ * catalog or policy changes cannot rewrite this snapshot.
+ *
  * ## Lineage and versions
  *
  * Every snapshot belongs to a lineage identified by [id]. A lineage starts at

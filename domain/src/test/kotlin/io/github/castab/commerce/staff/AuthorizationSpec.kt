@@ -223,7 +223,6 @@ class AuthorizationSpec :
         test("built-in keys are ordinary values and imply no grants") {
             CommerceRoles.Manager shouldBe RoleKey("commerce.manager")
             CommercePermissions.PaymentRecord shouldBe PermissionKey("commerce.payment.record")
-            CommercePermissions.OfferingsManage shouldBe PermissionKey("commerce.offerings.manage")
             val resolver =
                 RoleBasedPermissionResolver(
                     PrincipalResolver { user(roles = setOf(RoleAssignment(CommerceRoles.Manager))) },

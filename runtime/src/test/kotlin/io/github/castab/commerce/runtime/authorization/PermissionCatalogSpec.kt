@@ -33,14 +33,13 @@ class PermissionCatalogSpec :
     FunSpec({
         test("the runtime-only catalog describes every CommercePermissions and RuntimePermissions key") {
             val catalog = PermissionCatalog(commercePermissionDefinitions)
-            catalog.definitions.size shouldBe 14
+            catalog.definitions.size shouldBe 13
             listOf(
                 CommercePermissions.BookingRead,
                 CommercePermissions.BookingModify,
                 CommercePermissions.FinancialDocumentRead,
                 CommercePermissions.FinancialDocumentCreate,
                 CommercePermissions.DepositRequirementManage,
-                CommercePermissions.OfferingsManage,
                 CommercePermissions.PaymentRecord,
                 CommercePermissions.RefundRecord,
                 CommercePermissions.PrincipalRead,
@@ -50,6 +49,7 @@ class PermissionCatalogSpec :
                 CommercePermissions.RoleAssign,
                 RuntimePermissions.ServiceCredentialManage,
             ).forEach { key -> (key in catalog) shouldBe true }
+            catalog.find(PermissionKey("commerce.offerings.manage")).shouldBeNull()
             catalog.find(CommercePermissions.RoleRead)!!.group shouldBe PermissionGroup("commerce.roles")
             catalog.find(RuntimePermissions.ServiceCredentialManage)!!.group shouldBe PermissionGroup("commerce.principals")
             catalog.definitions.forEach { definition ->

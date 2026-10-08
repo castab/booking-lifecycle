@@ -104,6 +104,7 @@ class FinancialLedgerPaymentHistorySpec :
                 ChangeOrder(
                     listOf(ChangeOrder.Change.AddLineItem(LineItem(UUID.randomUUID(), "Extra", null, null, money("1.00"), money("0.00")))),
                 ),
+                expectedDocumentVersion = document.version,
             )
 
         fun payment(

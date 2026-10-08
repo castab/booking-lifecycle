@@ -44,7 +44,7 @@ class FinancialLineagesSpec :
             val approval = ledger.activateDepositRequirement(active.id, active.version, DepositTerms.Fixed(depositMoney("25")), null)
             ledger.activateDepositRequirement(withdrawn.id, withdrawn.version, DepositTerms.Fixed(depositMoney("10")), null)
             val withdrawal = ledger.withdrawDepositRequirement(withdrawn.id, DepositRequirementRevision.INITIAL)
-            val latest = ledger.issueInvoice(active.id)
+            val latest = ledger.issueInvoice(active.id, expectedDocumentVersion = active.version)
             val payment = fixture.payment()
             val allocatedAt = Instant.parse("2040-01-01T00:00:00.123456789Z")
             val allocation = ledger.allocatePayment(payment.id, UUID.randomUUID(), active.reference, depositMoney("30"), allocatedAt)
@@ -149,7 +149,7 @@ class FinancialLineagesSpec :
             val second = ledger.financialLineages(listOf(document.id)).single()
             second.activity.latestDepositRequirementAt shouldBe approved.createdAt
             second.activity.latestFinancialActivityAt shouldBe maxOf(first.latestVersion.createdAt, approved.createdAt)
-            ledger.issueInvoice(document.id)
+            ledger.issueInvoice(document.id, expectedDocumentVersion = document.version)
             val third = ledger.financialLineages(listOf(document.id)).single()
             third.activity.latestFinancialActivityAt shouldBe maxOf(third.latestVersion.createdAt, approved.createdAt)
         }
@@ -196,7 +196,12 @@ class FinancialLineagesSpec :
                             committed = true
                             fixture.onOtherThread {
                                 fixture.transactor.inTransaction { transaction ->
-                                    val latest = ledger.issueInvoice(transaction, document.id)
+                                    val latest =
+                                        ledger.issueInvoice(
+                                            transaction,
+                                            document.id,
+                                            expectedDocumentVersion = document.version,
+                                        )
                                     ledger.activateDepositRequirement(
                                         transaction,
                                         document.id,
@@ -258,7 +263,12 @@ class FinancialLineagesSpec :
             val document = fixture.document()
             fixture.transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
                 val before = fixture.ledger.financialLineages(transaction, listOf(document.id)).single()
-                fixture.onOtherThread { fixture.ledger.issueInvoice(document.id) }
+                fixture.onOtherThread {
+                    fixture.ledger.issueInvoice(
+                        document.id,
+                        expectedDocumentVersion = document.version,
+                    )
+                }
                 fixture.ledger
                     .financialLineages(transaction, listOf(document.id))
                     .single()

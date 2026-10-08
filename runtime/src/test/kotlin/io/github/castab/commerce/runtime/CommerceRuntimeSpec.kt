@@ -3,8 +3,6 @@ package io.github.castab.commerce.runtime
 import io.github.castab.commerce.financial.FinancialDocument
 import io.github.castab.commerce.financial.LineItem
 import io.github.castab.commerce.financial.Money
-import io.github.castab.commerce.offering.OfferingsCatalogId
-import io.github.castab.commerce.offering.OfferingsSnapshot
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.http.CommerceJson
@@ -261,16 +259,6 @@ class CommerceRuntimeSpec :
             val read = http(Request(Method.GET, "/test-application/records/${record.id}"))
             read.status shouldBe Status.OK
             read.record() shouldBe record
-        }
-
-        test("application contributions receive the commerce offerings repository in their runtime context") {
-            val snapshot = OfferingsSnapshot.create(OfferingsCatalogId(UUID.randomUUID()))
-            context.transactor.inTransaction { transaction ->
-                context.offeringsSnapshotRepository.save(transaction, snapshot)
-            }
-            context.transactor.inTransaction { transaction ->
-                context.offeringsSnapshotRepository.retrieveLatestVersion(transaction, snapshot.catalogId)
-            } shouldBe snapshot
         }
 
         test("application contributions can atomically write a financial snapshot and their own relationship") {

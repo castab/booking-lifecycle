@@ -21,14 +21,13 @@ io.github.castab:commerce-domain:<version>
 ```
 
 It contains independent, reusable commerce concepts: the booking lifecycle protocol,
-financial documents, offerings, payment reconciliation, a payment adapter contract, and principal
+financial documents, payment reconciliation, a payment adapter contract, and principal
 authorization:
 
 | Domain | Package | What it provides |
 |---|---|---|
 | [Booking lifecycle](#booking-lifecycle) | `io.github.castab.commerce.booking.lifecycle` | A type-level protocol for the phases of a booking (`InitialRequest → Quote → Booked → Completed`, or `Cancelled`). Your application's own types implement the phases. |
 | [Financial documents](#financial-documents) | `io.github.castab.commerce.financial` | Immutable, versioned commercial documents (`Estimate → Quote → Invoice`) with line items, change orders, derived totals, and persistence-agnostic history lookup. |
-| [Offerings](#offerings) | `io.github.castab.commerce.offering` | Immutable catalog values with a revision counter, generic selection constraints, descriptive price metadata, and an application policy evaluation seam producing financial line items. |
 | [Payment reconciliation](#payment-reconciliation) | `io.github.castab.commerce.payment` | Immutable payment records, payment allocations, allocation reversals, refund records, and refund allocations, with derived payment and document reconciliation. |
 | [Deposit requirements](#deposit-requirements) | `io.github.castab.commerce.deposit` | Immutable lineage-scoped approved fixed/percentage terms, frozen amounts, withdrawal revisions, and satisfaction derived from document reconciliation. |
 | [Principal authorization](#principal-authorization) | `io.github.castab.commerce.staff` | Human and service identities, extensible roles and permissions, resolver ports, and additive role-based authorization. |
@@ -56,7 +55,6 @@ is `kotlin-stdlib`.
 - [Booking lifecycle](#booking-lifecycle)
 - [Application-owned entities and relationships](#application-owned-entities-and-relationships)
 - [Financial documents](#financial-documents)
-- [Offerings](#offerings)
 - [Payment reconciliation](#payment-reconciliation)
 - [Deposit requirements](#deposit-requirements)
 - [Principal authorization](#principal-authorization)
@@ -853,108 +851,14 @@ unwinds may make satisfaction false again. Booking transitions, deposit eligibil
 stage, and every consequence of satisfaction belong to applications. Withdrawn exposes
 no satisfaction or withdrawal operation; neither form exposes a `copy()` or constructor.
 
-## Offerings
-
-`io.github.castab.commerce.offering` describes commercial choices without
-defining a particular business's catalog or price policy. An `Offering` has a stable
-`OfferingKey`, one `OfferingCategoryKey`, presentation text, and an optional
-`OfferingPrice`, plus selection state and availability. Presentation text is the required
-`displayName` and the optional `description`, `badge` (a short label shown with the offering
-at all times, such as "Popular"), `statusNote` (the offering's current situation, such
-as "Back this fall"), and `infoNote` (a lasting fact shown on demand, such as "Contains
-peanuts"). Optional text is absent or nonblank. A status note is descriptive only:
-it neither implies nor overrides selection state or availability. An `OfferingCategory` has a stable
-key and min/max selection counts:
-`0..1` is optional single selection, `1..1` required single selection, and a null maximum
-is unbounded. The category and offering order supplied to a snapshot is preserved.
-
-An offering representation has non-null `OfferingSelectionState` (`ENABLED`, `DISABLED`)
-and `OfferingAvailability` (`AVAILABLE`, `UNAVAILABLE`). Neither has a default: every
-construction states both explicitly. All four combinations are valid in construction and `copy`.
-Selection configuration and fulfillment availability are independent facts: disabled
-means selection is deliberately forbidden, while unavailable means the offering cannot
-currently be fulfilled. Neither property implies or rewrites the other. Both remain in
-active catalog reads. For a submitted selection, `DISABLED` takes precedence over
-`UNAVAILABLE`, yielding only `OFFERING_DISABLED` when both apply. This precedence
-chooses a rejection reason; it places no constraint on stored representation values.
-Retirement is independent: the key is absent from the latest snapshot. These properties
-belong to each catalog revision; changes create successors.
-
-Prices are descriptive metadata: `OfferingPrice.Fixed(Money)`,
-`PerQuantity(Money, QuantityDimension)`, and `PerDuration(Money, Duration)`. A quantity
-dimension is an application-named machine value such as `guest`, `vehicle`, or `item`;
-the common library assigns it no business meaning. A price may be absent when a choice
-has no independent charge. Complex pricing, context-specific fulfillment policy,
-dependencies, and bundles stay in the application's engine, with no generic rule language
-or metadata map.
-
-`OfferingsSnapshot.create(catalogId, categories, offerings)` starts an immutable catalog
-value at revision 1. `revise(...)` returns its successor, retaining the catalog ID and
-recording the immediate prior revision. `restore(...)` reconstructs a stored revision. An
-`OfferingsSnapshotReference(catalogId, revision)` names a catalog at a revision. The
-revision advances on every change and is a concurrency and staleness token; whether
-earlier revisions are kept is a persistence decision, and `commerce-runtime` keeps only the
-current one.
-Construction rejects duplicate keys, offerings with missing categories, and invalid
-revision lineage. Empty catalogs are allowed. Lookups by key and by category are
-conveniences on the in-memory snapshot; they do not access persistence.
-
-`OfferingKey` and `OfferingCategoryKey` are durable natural identities within one catalog.
-A key that has ever been used remains reserved. Absence from the latest snapshot means
-retired; a retired key is never reused for something else. Restoration reactivates the
-same identity and can supply updated properties. Ordinary update changes properties, never
-keys. There are no per-item UUIDs, versions, timestamps, or active flags.
-
-```text
-never existed -> add -> active -> update -> active -> retire -> retired -> restore -> active
-```
-
-`retired -> add`, `active -> restore`, `unknown -> restore`, `unknown -> update`, and
-`retired -> update` are invalid. Lifetime identity checks belong to runtime persistence,
-not a single domain snapshot. The domain's `replaceOffering(key, replacement)` and
-`replaceCategory(key, replacement)` require an existing item and the same key, preserving
-position. `withoutOffering(key)` and `withoutCategory(key)` produce successors that
-remove only that item and retain other order. A category must be empty before removal;
-every offering must reference a category in the successor. Adding and restoring through
-the runtime append to the relevant list. No general reorder operation is provided.
-
-Candidate `OfferingSelections` contain ordered `OfferingCategorySelection` blocks. They
-may be built before a snapshot is known. `OfferingsEngine<C>.evaluate(...)` checks selected
-categories and offerings, category membership, selection eligibility, cardinalities, and
-duplicates before calling the application's `evaluateValid(...)`. Problems are typed
-`StructuralOfferingsViolation`s in deterministic order. Disabled selections report
-`DisabledOffering` (`OFFERING_DISABLED`), unavailable selections report
-`UnavailableOffering` (`OFFERING_UNAVAILABLE`), and keys absent from the evaluated snapshot
-(including retired keys) retain `UnknownOffering` (`UNKNOWN_OFFERING`). The engine evaluates
-the supplied revision; applications choose the current snapshot when validating a new order.
-Applications implement the open
-`OfferingsViolation` interface for their own rejection codes and return either
-`OfferingsPolicyResult.Accepted(lineItems)` or `Rejected(violations)`.
-
-An accepted `OfferingsEvaluation` binds the exact snapshot reference and submitted
-selections to one or more `LineItem`s. Its lines are directly usable in
-`FinancialDocument.Estimate.create(id, evaluation.lineItems)`. The engine does not create
-or persist a financial document: an offering describes what may be selected, while a
-financial document records the resulting commercial fact.
-
-```text
-OfferingsSnapshot + OfferingSelections + application context
-                         ↓
-            application OfferingsEngine
-                         ↓
-              OfferingsEvaluation
-                         ↓
-               LineItem[] → Estimate
-```
-
-For example, dessert catering can define flavors and cones, taco catering can define
-fillings and add-ons, and mobile detailing can define services and add-ons. Those
-categories, their prices, and any rule such as “four included, then charge per selected
-item and guest” are application data and policy. Adding a coffee category or cup sizes
-means changing a stored snapshot and the application's policy where needed, without
-adding a common-domain field.
-
 ## Financial documents
+
+Documents accept arbitrary, self-contained application-priced lines. No shared catalog,
+product key, selection policy, or price lookup is required. Application operations
+establish price authority and actor authorization before committing; service credentials
+do not confer authority over browser amounts. Catalog provenance belongs to the application
+when needed. Immutable history remains meaningful after product or pricing-policy changes.
+
 
 Package `io.github.castab.commerce.financial`. Immutable, versioned commercial documents:
 estimates, quotes, and invoices.
@@ -1965,7 +1869,7 @@ than becoming `users.create`. Roles are shared by humans and services. `Commerce
 `Supervisor`, `Employee`) provides conventional keys without built-in grants.
 `CommercePermissions` provides keys for booking read/modify, financial-document
 read/create, deposit requirement management (`DepositRequirementManage`,
-`commerce.deposit-requirement.manage`), offerings catalog management, payment/refund recording, and principal
+`commerce.deposit-requirement.manage`), payment/refund recording, and principal
 read/manage, role read/manage, and role assignment. `PermissionDefinition` supplies
 human-readable metadata for a code-backed `PermissionKey`: a required display name, a
 required description, and a `PermissionGroup` (same syntax as a key, such as

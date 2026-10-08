@@ -1,11 +1,7 @@
 package io.github.castab.commerce.runtime.http
 
-import io.github.castab.commerce.offering.OfferingCategoryKey
-import io.github.castab.commerce.offering.OfferingKey
-import io.github.castab.commerce.offering.OfferingsViolation
-import io.github.castab.commerce.offering.StructuralOfferingsViolation
-import io.github.castab.commerce.runtime.offering.offeringsValidationFailed
 import io.github.castab.commerce.runtime.operation.CommerceFailure
+import io.github.castab.commerce.runtime.operation.ValidationViolation
 import io.github.castab.commerce.runtime.operation.validating
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -114,38 +110,19 @@ class ErrorHandlingSpec :
             }.message shouldBe "Line item quantity must be positive"
         }
 
-        test("disabled unavailable and absent selection reasons retain their domain codes over HTTP") {
-            val category = OfferingCategoryKey("choice")
-            val key = OfferingKey("item")
-            listOf(
-                StructuralOfferingsViolation.DisabledOffering(category, key) to "OFFERING_DISABLED",
-                StructuralOfferingsViolation.UnavailableOffering(category, key) to "OFFERING_UNAVAILABLE",
-                StructuralOfferingsViolation.UnknownOffering(category, key) to "UNKNOWN_OFFERING",
-            ).forEach { (violation, code) ->
-                val response = failing(offeringsValidationFailed("Selection rejected", listOf(violation)))(Request(Method.POST, "/pricing"))
-                response.status shouldBe Status.UNPROCESSABLE_ENTITY
-                CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()) shouldBe
-                    ValidationErrorResponse("validation_failed", "Selection rejected", listOf(ValidationViolationResponse(code)))
-            }
-        }
-
-        test("offering violation codes survive mapping and HTTP while other errors retain two fields") {
-            val violations =
-                listOf<OfferingsViolation>(
-                    StructuralOfferingsViolation.TooManySelections(OfferingCategoryKey("service"), 1, 2),
-                    object : OfferingsViolation {
-                        override val code = "UNSUPPORTED_CURRENCY"
-                    },
+        test("application validation codes survive HTTP while other errors retain two fields") {
+            val failure =
+                CommerceFailure.ValidationFailed(
+                    "Application request rejected",
+                    violations = listOf(ValidationViolation("APPLICATION_RULE")),
                 )
-            val failure = offeringsValidationFailed("Selection cannot be priced", violations)
-            failure.violations.map { it.code } shouldBe listOf("TOO_MANY_SELECTIONS", "UNSUPPORTED_CURRENCY")
-            val response = failing(failure)(Request(Method.POST, "/pricing"))
+            val response = failing(failure)(Request(Method.POST, "/application-operation"))
             response.status shouldBe Status.UNPROCESSABLE_ENTITY
             CommerceJson.asA(response.bodyString(), ValidationErrorResponse.serializer()) shouldBe
                 ValidationErrorResponse(
                     "validation_failed",
-                    "Selection cannot be priced",
-                    listOf(ValidationViolationResponse("TOO_MANY_SELECTIONS"), ValidationViolationResponse("UNSUPPORTED_CURRENCY")),
+                    "Application request rejected",
+                    listOf(ValidationViolationResponse("APPLICATION_RULE")),
                 )
             val plain = failing(CommerceFailure.NotFound("Missing"))(Request(Method.GET, "/missing"))
             plain.bodyString() shouldNotContain "violations"
