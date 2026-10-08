@@ -6,7 +6,6 @@ import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.AccessControl
 import io.github.castab.commerce.runtime.operation.CommerceFailure
-import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
 import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
@@ -36,7 +35,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.flywaydb.core.Flyway
 import org.http4k.contract.Tag
 import org.http4k.contract.contract
 import org.http4k.contract.openapi.ApiInfo
@@ -72,29 +70,11 @@ private fun role(
 
 class AuthorizationDirectorySpec :
     FunSpec({
-        test("V4 migrates a database already at the released V3 session schema") {
-            withTestDatabase { _, dataSource ->
-                Flyway
-                    .configure()
-                    .dataSource(dataSource)
-                    .schemas("commerce")
-                    .table("flyway_schema_history")
-                    .locations("classpath:db/commerce")
-                    .target("3")
-                    .load()
-                    .migrate()
-                dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3")
-                MigrationLifecycle(dataSource).migrate()
-                dataSource.appliedVersions("commerce") shouldBe listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
-                dataSource.relationExists("commerce.principal_roles") shouldBe true
-            }
-        }
-
-        test("V4 schema enforces principal kinds, unique normalized usernames, assignments, and references") {
+        test("the fresh schema enforces principal kinds, unique normalized usernames, assignments, and references") {
             withTestDatabase { database, dataSource ->
                 commerceRuntime(database.configuration(), ApplicationContributions()).use {
                     dataSource.appliedVersions("commerce") shouldBe
-                        listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13")
+                        listOf("1")
                     listOf("principals", "users", "service_identities", "roles", "role_permissions", "principal_roles")
                         .forEach { table -> dataSource.relationExists("commerce.$table") shouldBe true }
                     shouldThrow<Exception> {

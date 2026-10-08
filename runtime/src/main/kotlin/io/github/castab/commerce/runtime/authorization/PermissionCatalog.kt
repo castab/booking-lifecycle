@@ -127,7 +127,6 @@ object RuntimePermissions {
 
 private val bookings = PermissionGroup("commerce.bookings")
 private val financialDocuments = PermissionGroup("commerce.financial-documents")
-private val offerings = PermissionGroup("commerce.offerings")
 private val payments = PermissionGroup("commerce.payments")
 private val principals = PermissionGroup("commerce.principals")
 private val roles = PermissionGroup("commerce.roles")
@@ -136,7 +135,7 @@ private val roles = PermissionGroup("commerce.roles")
  * The runtime's own permission vocabulary: every [CommercePermissions] and
  * [RuntimePermissions] key, described.
  * These keys denote code capabilities, never database-created permissions. Runtime routes
- * enforce the offerings, principal, role, and service-credential keys; the booking, financial-document, payment,
+ * enforce the principal, role, and service-credential keys; the booking, financial-document, payment,
  * deposit-requirement, and refund keys are conventional names for operations that applications enforce.
  *
  * Every permission a runtime capability enforces must be defined here, including runtime
@@ -166,12 +165,6 @@ val commercePermissionDefinitions: List<PermissionDefinition> =
             "Manage deposit requirements",
             "Approve, replace, reactivate, and withdraw deposit requirements against financial-document lineages.",
             financialDocuments,
-        ),
-        PermissionDefinition(
-            CommercePermissions.OfferingsManage,
-            "Manage offerings",
-            "Create offerings catalogs; add, update, retire, and restore their categories and offerings; and view retired entries.",
-            offerings,
         ),
         PermissionDefinition(CommercePermissions.PaymentRecord, "Record payments", "Record money received from payers.", payments),
         PermissionDefinition(CommercePermissions.RefundRecord, "Record refunds", "Record money returned to payers.", payments),

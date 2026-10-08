@@ -67,7 +67,7 @@ class DepositRequirementRestorationSpec :
             val document = fixture.document()
             fixture.ledger.activateDepositRequirement(document.id, document.version, DepositTerms.Fixed(depositMoney("25")), null)
             // Advance so the latest snapshot is valid; only the original approval is corrupt.
-            fixture.ledger.issueInvoice(document.id)
+            fixture.ledger.issueInvoice(document.id, expectedDocumentVersion = document.version)
             fixture.transactor.inTransaction { transaction ->
                 transaction.handle
                     .createUpdate(

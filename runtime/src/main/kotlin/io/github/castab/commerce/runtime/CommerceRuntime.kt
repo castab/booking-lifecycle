@@ -13,10 +13,8 @@ import io.github.castab.commerce.runtime.persistence.ApplicationMigrations
 import io.github.castab.commerce.runtime.persistence.AuthorizationRepository
 import io.github.castab.commerce.runtime.persistence.FinancialDocumentRepository
 import io.github.castab.commerce.runtime.persistence.MigrationLifecycle
-import io.github.castab.commerce.runtime.persistence.OfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PaymentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresFinancialDocumentRepository
-import io.github.castab.commerce.runtime.persistence.PostgresOfferingsSnapshotRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPaymentRepository
 import io.github.castab.commerce.runtime.persistence.PostgresPrincipalSessionRepository
 import io.github.castab.commerce.runtime.persistence.ServiceCredentialRepository
@@ -44,7 +42,7 @@ private val logger = KotlinLogging.logger {}
 
 /**
  * The shared runtime pieces an application may build on: configuration, the transaction
- * boundary, commerce-owned [offeringsSnapshotRepository], [financialDocumentRepository],
+ * boundary, commerce-owned [financialDocumentRepository],
  * [paymentRepository], [financialLedger] operations, authenticated principal [sessions],
  * and live [authorization] directory. Application repositories use the same [transactor] and
  * [io.github.castab.commerce.runtime.persistence.Transaction] the runtime uses.
@@ -70,7 +68,6 @@ private val logger = KotlinLogging.logger {}
 class CommerceRuntimeContext internal constructor(
     val configuration: CommerceRuntimeConfiguration,
     val transactor: Transactor,
-    val offeringsSnapshotRepository: OfferingsSnapshotRepository,
     val financialDocumentRepository: FinancialDocumentRepository,
     val paymentRepository: PaymentRepository,
     val financialLedger: FinancialLedger,
@@ -220,7 +217,6 @@ fun commerceRuntime(
             CommerceRuntimeContext(
                 configuration,
                 transactor,
-                PostgresOfferingsSnapshotRepository(),
                 financialDocuments,
                 payments,
                 FinancialLedger(transactor, financialDocuments, payments),

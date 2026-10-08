@@ -33,7 +33,6 @@ Examples include concepts such as:
 - refunds;
 - refund allocations;
 - deposit requirements;
-- offering and catalog vocabulary;
 - reconciliation semantics;
 - commerce identities and references.
 
@@ -78,7 +77,7 @@ Examples include:
 
 - inquiry workflows;
 - application-specific customer entities;
-- business-specific pricing policy;
+- products, offerings, categories, selection limits, availability, price tables, and business-specific pricing policy;
 - how shared commerce capabilities are composed;
 - presentation and UI-facing language;
 - application authentication experience;
@@ -141,7 +140,7 @@ Examples include:
 - refunds;
 - refund allocations;
 - deposit requirement revisions;
-- catalog revisions.
+- approved financial terms.
 
 Avoid persisting mutable summaries such as:
 
@@ -167,7 +166,7 @@ Historical commerce facts should not be silently rewritten.
 
 Corrections, replacements, withdrawals, reversals, and similar changes should preserve the prior facts necessary to explain the current state.
 
-This principle is especially important for financial documents, payments, refunds, allocations, deposit requirements, and catalog revisions.
+This principle is especially important for financial documents, payments, refunds, allocations, and deposit requirements.
 
 ---
 
@@ -192,45 +191,36 @@ An application may legitimately begin a financial lineage at different document 
 
 ---
 
-# 7. Pricing Is Server-Authoritative
+# 7. Applications Establish Authorized Financial Lines
 
-Clients express intent.
+Consuming applications own catalog data, product-selection validation, pricing formulas,
+discounts, overrides, and presentation. Their server-side operations produce final,
+self-contained financial line items. Commerce enforces financial structure and lifecycle
+invariants; it never requires a product lookup, selection evaluation, or catalog revision.
 
-The server determines authoritative:
+An untrusted browser expresses selections and requests. A backend service credential
+establishes the technical caller's identity; it does not authorize arbitrary browser
+amounts. Application operations must construct or validate public prices through trusted
+server policy and authorize staff-defined prices against the responsible staff principal.
+A caller-provided staff identifier alone proves no authority. Applications securely derive
+or verify that actor's authority; commerce retains USER/SERVICE, sessions, and RBAC without
+a pricing-authority or impersonation framework.
 
-- prices;
-- line items;
-- totals;
-- financial document contents;
-- catalog provenance;
-- pricing provenance.
-
-Clients must not submit authoritative financial values merely because those values were displayed in a UI.
-
-Catalogs may describe reusable price forms such as fixed, per-quantity, or per-duration pricing.
-
-Application-specific business policy interprets catalog data in business context and produces authoritative financial artifacts.
-
-The shared platform should not become a generic pricing-rule language solely to move application policy into shared code.
+Financial contents become authoritative when committed by an authorized application
+operation. Shared ledger methods are composition APIs, not implicit authorization checks.
 
 ---
 
-# 8. Catalog History Must Not Rewrite Financial History
+# 8. Financial History Is Catalog-Independent
 
-Catalogs and offerings may evolve over time.
+Each immutable financial revision contains its own ordered lines, stable line identities,
+descriptions, optional details and quantities, prices, supplied tax, and currency. Totals
+are derived from those facts. Catalog provenance may remain in application-owned records,
+but is never mandatory shared financial data.
 
-Financial artifacts created from catalog data must preserve the meaning and price that were authoritative when the artifact was created.
-
-Changing:
-
-- an offering price;
-- an offering description;
-- availability;
-- a catalog revision;
-
-must not retroactively alter existing estimates, quotes, invoices, or other historical financial artifacts.
-
-Financial line items should therefore contain the durable snapshot and provenance necessary to remain independently meaningful.
+Later catalog and pricing-policy changes cannot rewrite financial history. Bespoke
+services, direct price replacements, and separate signed adjustments use the same
+financial vocabulary, even if the business has no catalog at all.
 
 ---
 
@@ -309,7 +299,6 @@ Avoid application-local copies of:
 - financial histories;
 - permission catalogs;
 - deposit requirement state;
-- shared catalog state;
 
 when runtime remains the authoritative owner.
 
@@ -421,7 +410,6 @@ Where a capability is genuinely reusable, runtime may expose reusable HTTP route
 Examples may include shared:
 
 - authorization;
-- catalog;
 - financial;
 - administrative;
 

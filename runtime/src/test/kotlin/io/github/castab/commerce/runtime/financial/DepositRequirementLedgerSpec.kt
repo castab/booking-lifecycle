@@ -76,7 +76,7 @@ class DepositRequirementLedgerSpec :
 
         test("stale document version fails without creating history") {
             val document = fixture.document()
-            fixture.ledger.issueInvoice(document.id)
+            fixture.ledger.issueInvoice(document.id, expectedDocumentVersion = document.version)
             shouldThrow<CommerceFailure.Conflict> {
                 fixture.ledger.activateDepositRequirement(
                     document.id,
@@ -117,7 +117,7 @@ class DepositRequirementLedgerSpec :
         test("withdrawal is independent of subsequent document versions") {
             val document = fixture.document()
             fixture.ledger.activateDepositRequirement(document.id, document.version, fixed(), null)
-            fixture.ledger.issueInvoice(document.id)
+            fixture.ledger.issueInvoice(document.id, expectedDocumentVersion = document.version)
             fixture.ledger
                 .withdrawDepositRequirement(document.id, initial)
                 .requirement
@@ -197,6 +197,7 @@ class DepositRequirementLedgerSpec :
                     ChangeOrder(
                         listOf(ChangeOrder.Change.ReplaceLineItem(originalLine.id, originalLine.copy(price = depositMoney("200")))),
                     ),
+                    expectedDocumentVersion = document.version,
                 )
             val frozen = ledger.latestDepositRequirement(document.id)!!.requirement.shouldBeInstanceOf<DepositRequirement.Active>()
             frozen.requiredAmount shouldBe depositMoney("25.00")
@@ -328,7 +329,13 @@ class DepositRequirementLedgerSpec :
             val document = fixture.document()
             val outcome =
                 fixture.contendForLineage(
-                    holding = { fixture.ledger.issueInvoice(it, document.id) },
+                    holding = {
+                        fixture.ledger.issueInvoice(
+                            it,
+                            document.id,
+                            expectedDocumentVersion = document.version,
+                        )
+                    },
                     waiting = { fixture.ledger.activateDepositRequirement(it, document.id, document.version, fixed(), null) },
                 )
             outcome.exceptionOrNull().shouldBeInstanceOf<CommerceFailure.Conflict>()
@@ -361,7 +368,12 @@ class DepositRequirementLedgerSpec :
             shouldThrow<CommerceFailure.Conflict> {
                 fixture.transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
                     fixture.ledger.latest(transaction, document.id) shouldBe document
-                    fixture.onOtherThread { fixture.ledger.issueInvoice(document.id) }
+                    fixture.onOtherThread {
+                        fixture.ledger.issueInvoice(
+                            document.id,
+                            expectedDocumentVersion = document.version,
+                        )
+                    }
                     fixture.ledger.activateDepositRequirement(transaction, document.id, document.version, fixed(), null)
                 }
             }

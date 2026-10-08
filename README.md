@@ -43,7 +43,7 @@ concrete commerce application    (the consuming project)
 ```
 
 1. **Domain.** `commerce-domain` holds independent, reusable commerce concepts, facts,
-   invariants, and protocols: revisioned offerings and an application policy seam,
+   invariants, and protocols: self-contained financial lines,
    the booking lifecycle topology, estimates, quotes, and
    invoices (line items, money, change orders), payments, allocations, refunds,
    reconciliation, the provider-neutral payment adapter contract, and principals, roles,
@@ -52,7 +52,7 @@ concrete commerce application    (the consuming project)
 2. **Runtime.** `commerce-runtime` is the opinionated, reusable machinery from which a
    commerce application is assembled: operations, transactions, PostgreSQL persistence,
    HTTP on http4k and Jetty, errors, health, the configuration model and its loader,
-   application contribution points, current offerings catalog persistence, append-only
+   application contribution points, append-only
    financial-document snapshot persistence, payment records and allocations, refunds and refund allocations, derived
    ledger reconciliation, and
    authenticated principal sessions, persistent principal and RBAC state, live permission
@@ -97,70 +97,29 @@ Booking ────────────────┤
 FinancialDocument   BookingLifecycle    Payments/etc.
 ```
 
-## Offerings to financial documents
+## Application pricing to financial documents
 
-`OfferingsSnapshot` describes what may be selected. Candidate `OfferingSelections` plus
-application context go through an application-implemented `OfferingsEngine`. The domain
-checks category membership, min/max cardinality, and offering selection eligibility first;
-the application decides prices, bundles, context-specific fulfillment, and other business
-policy. An accepted `OfferingsEvaluation` records the exact snapshot reference, selections, and generic `LineItem`s. The application
-can pass those lines to `FinancialDocument.Estimate.create(...)`; the engine does not create
-the estimate.
+The application owns products, catalog persistence, selection rules, availability,
+price tables, discounts, overrides, and server-side pricing. It submits final `LineItem`
+snapshots through authorized operations. Commerce validates financial and lifecycle
+invariants without product lookups or catalog provenance.
 
 ```text
-OfferingsSnapshot + OfferingSelections + application context
-                         ↓
-                  OfferingsEngine
-                         ↓
-               OfferingsEvaluation
-                         ↓
-               LineItem[] → Estimate
+Untrusted request → trusted application pricing / authorized staff decision
+                  → self-contained LineItem list → Estimate / Quote / Invoice
+                  → FinancialLedger persistence and reconciliation
 ```
 
-Dessert catering, taco catering, and mobile detailing are examples of different
-application catalogs and policy engines, not built-in catalog or pricing concepts. The
-runtime stores each catalog's current revision in the `commerce` schema and joins the
-caller's `Transaction`, including transactions that also write application data. See the
-[domain offerings API](domain/README.md#offerings) and
-[runtime persistence contract](runtime/README.md#offerings-catalogs).
+A BFF service token identifies the technical caller. It does not authorize browser amounts
+or prove a staff member's authority. The application must construct public prices through
+trusted server policy and securely authorize and attribute staff-defined edits. A
+caller-supplied staff ID alone is insufficient. Once committed by that authorized operation,
+the document is authoritative and immutable; later catalog or pricing changes cannot
+rewrite it. Flat charges, quantities, supplied tax, signed credit lines, and stable-ID
+price replacements use the existing financial model.
 
-The runtime also supplies generic catalog commands, queries, and an explicitly mounted
-Offerings HTTP capability. Applications select a catalog ID, route path, operation ID
-prefix, and read-only or read-write exposure; the same http4k contract routes execute
-HTTP and contribute to the application's OpenAPI document. Each catalog write replaces the
-current revision with its immediate successor and advances the revision number; earlier
-revisions are not retained, so the revision is a concurrency and staleness token, not an
-address of past contents. Every mutation of an existing catalog requires the caller's
-observed `expectedRevision`; stale writes return 409 before creating a successor, while a
-row lock still guards true competing writers. Offering and category keys
-are durable natural identities, reserved once used, even after retirement. Offering
-writes take batches: one request adds, updates, retires, or restores one or many offerings
-in a single new revision, all or nothing. Add creates a
-new identity; update retains its key and position; retire removes it from the successor;
-restore reactivates the same identity at the end of the current list. Retired discovery
-returns each last representation and the revision it was last present in. Categories
-containing offerings cannot be retired. Writes require the
-`commerce.offerings.manage` permission, evaluated through the supplied `AccessControl`
-(normally bound to `context.authorization`);
-retired discovery is also protected by this permission and absent from read-only bindings.
-Ordinary reads of the current catalog are as public as the host mounts them.
-
-Active offerings expose required `selectionState` (`ENABLED`/`DISABLED`) and
-`availability` (`AVAILABLE`/`UNAVAILABLE`). Disabled and unavailable offerings remain
-readable. All four combinations are valid independent facts; neither field implies the
-other. Disabled takes precedence over unavailable for the reported selection rejection
-reason, returning only `OFFERING_DISABLED` when both apply.
-Offerings also carry optional `badge`, `statusNote`, and `infoNote` presentation text beside
-`description`; omitting them from an update or restore clears them.
-Add, update, and restore HTTP bodies require both fields, and their OpenAPI schemas
-list the enums without a cross-field exclusion. `Offering` itself has no defaults for
-either field, so Kotlin callers state both too.
-V8 required non-null values without defaults or legacy backfills; populated pre-V8
-offering databases must be recreated.
-See [runtime Offerings operations and HTTP](runtime/README.md#offerings-catalog-operations-and-http).
-
-This is conceptual, not a required persistence design: each application chooses its own
-types, tables, and relationships.
+This is a breaking pre-production release: the shared catalog subsystem is removed and
+developer databases must be recreated. See [the API and consumer migration](CATALOG_REMOVAL.md).
 
 ## Durable financial ledger
 
@@ -171,17 +130,13 @@ orders append a new version; previous versions remain available. A lineage may b
 any of the three stages. The runtime stores exact decimal line facts and derives document
 totals from the domain model when restoring them. `FinancialLedger.version`,
 `latestVersion`, and `versionHistory` return each persisted snapshot with its
-database-assigned `createdAt`. V7 refuses to migrate a database containing older
-financial snapshots, because their original creation times were not recorded.
+database-assigned `createdAt`. Edits and promotions require the reviewed document version;
+stale or competing mutations fail with `Conflict`.
 
-The same persistence rule applies to offerings catalogs: a row is an independently
-meaningful fact, entity, or version, and values that only make up an aggregate live in its
-row. A catalog is one `commerce.offerings_catalogs` row whose `catalog` JSONB holds its
-current ordered categories and offerings and its retired entries, and a financial
-snapshot's line items are one `lines` JSONB value, so reading either is one row and one
-aggregate. Payments, allocations, refunds, principals, roles, and sessions stay
-relational. V9, V11, and V12 do not convert populated databases; recreate an ephemeral
-database that has financial documents or catalogs. See the
+Values that only make up a financial snapshot live in its row. Payments, allocations,
+refunds, principals, roles, and sessions remain relational independent facts. The fresh
+`V1__commerce_baseline.sql` establishes this schema directly. Existing developer databases
+must be recreated rather than repaired. See the
 [runtime persistence notes](runtime/README.md#aggregate-snapshot-persistence).
 
 `PaymentRecord` describes money received. A separate `PaymentAllocation` connects part of
@@ -214,10 +169,8 @@ and partially applied payments with money still available to allocate; the amoun
 `PaymentHistory.reconciliation.unallocated`. These reads use one `REPEATABLE_READ`
 snapshot and take no lock.
 
-The shared HTTP error envelope can add `violations` with stable codes to a
-`validation_failed` response. Application pricing routes pass `OfferingsViolation` values
-through `offeringsValidationFailed`; no client needs to parse diagnostic text. The
-Offerings OpenAPI renderer omits absent schema formats.
+The shared HTTP error envelope can add `violations` with application-supplied stable codes
+to a `validation_failed` response, without coupling the error model to a product catalog.
 
 Applications create documents from their own authoritative pricing and pass them to
 `context.financialLedger.create(...)`. For an application-owned association, use
@@ -236,8 +189,7 @@ stream, and returns their database creation times. Satisfaction is derived from 
 lineage reconciliation (`netApplied >= requiredAmount`), so a refund can undo financial
 satisfaction. Applications own every workflow consequence; booking remains independent.
 
-V13 adds deposit requirements to populated V12 databases without inventing historical
-requirements. It also maintains each lineage's current snapshot reference for safe
+The baseline includes deposit requirements and maintains each lineage's current snapshot reference for safe
 document/requirement write serialization. `financialLineages(ids)` reads explicit lineages
 with a fixed set of queries in one `REPEATABLE_READ` snapshot: current documents,
 reconciliation, requirements, satisfaction, and objective document/requirement/allocation/

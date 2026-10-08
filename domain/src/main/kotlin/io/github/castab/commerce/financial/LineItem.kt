@@ -10,12 +10,15 @@ import java.util.UUID
  * The [id] is supplied by the application and identifies the line within its document, so
  * that a [ChangeOrder] can replace or remove it. It must be unique within one document.
  *
+ * The line is self-contained. Products, catalog provenance, selection rules, and pricing
+ * authority belong to the application; no shared catalog reference is required.
+ *
  * ## Quantity semantics
  *
  * - When [quantity] is present, [price] is a unit price and the line [subtotal] is
  *   `price × quantity` (for example 4 × 25.00 = 100.00).
  * - When [quantity] is `null`, the line is flat-priced: a service fee, labor, or another
- *   offering that is not counted in units. The line [subtotal] is [price] itself.
+ *   charge that is not counted in units. The line [subtotal] is [price] itself.
  *
  * ## Tax
  *

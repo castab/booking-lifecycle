@@ -56,7 +56,11 @@ class FinancialLedgerLockCompositionSpec :
                                         paymentOwner.complete(fixture.pid(transaction))
                                         check(attemptLineage.await(10, TimeUnit.SECONDS))
                                         // B owns the lineage and is observably waiting for A's payment.
-                                        fixture.ledger.issueInvoice(transaction, document.id)
+                                        fixture.ledger.issueInvoice(
+                                            transaction,
+                                            document.id,
+                                            expectedDocumentVersion = document.version,
+                                        )
                                     }
                                 }.also { if (!paymentOwner.isDone) paymentOwner.completeExceptionally(it.exceptionOrNull()!!) }
                             },
@@ -67,7 +71,12 @@ class FinancialLedgerLockCompositionSpec :
                             Callable {
                                 runCatching {
                                     fixture.transactor.inTransaction(isolation) { transaction ->
-                                        val invoice = fixture.ledger.issueInvoice(transaction, document.id)
+                                        val invoice =
+                                            fixture.ledger.issueInvoice(
+                                                transaction,
+                                                document.id,
+                                                expectedDocumentVersion = document.version,
+                                            )
                                         lineageOwner.complete(fixture.pid(transaction))
                                         fixture.ledger.allocatePayment(
                                             transaction,
@@ -124,7 +133,11 @@ class FinancialLedgerLockCompositionSpec :
                             Instant.EPOCH,
                         )
                     }
-                    fixture.ledger.issueInvoice(transaction, document.id)
+                    fixture.ledger.issueInvoice(
+                        transaction,
+                        document.id,
+                        expectedDocumentVersion = document.version,
+                    )
                     val active =
                         fixture.ledger.activateDepositRequirement(
                             transaction,
@@ -168,7 +181,7 @@ class FinancialLedgerLockCompositionSpec :
             }
         }
 
-        test("V13's trigger refuses a busy lineage even when the writer bypasses the repository lock") {
+        test("the snapshot trigger refuses a busy lineage even when the writer bypasses the repository lock") {
             val document = fixture.document()
             val outcome =
                 fixture.contendForLineage(
@@ -216,11 +229,20 @@ class FinancialLedgerLockCompositionSpec :
                     shouldThrow<CommerceFailure.Conflict> {
                         fixture.transactor.inTransaction(TransactionIsolation.REPEATABLE_READ) { transaction ->
                             fixture.ledger.latest(transaction, document.id) shouldBe document
-                            fixture.onOtherThread { fixture.ledger.issueInvoice(document.id) }
+                            fixture.onOtherThread {
+                                fixture.ledger.issueInvoice(
+                                    document.id,
+                                    expectedDocumentVersion = document.version,
+                                )
+                            }
                             if (withdrawal) {
                                 fixture.ledger.withdrawDepositRequirement(transaction, document.id, active.requirement.revision)
                             } else {
-                                fixture.ledger.issueInvoice(transaction, document.id)
+                                fixture.ledger.issueInvoice(
+                                    transaction,
+                                    document.id,
+                                    expectedDocumentVersion = document.version,
+                                )
                             }
                         }
                     }

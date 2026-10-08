@@ -224,7 +224,12 @@ class FinancialLedger internal constructor(
         )
     }
 
-    /** Stores an application-created first snapshot in the caller's transaction. */
+    /**
+     * Stores an application-authorized initial Estimate, Quote, or Invoice in the caller's
+     * transaction. Self-contained priced lines are already final: the ledger validates
+     * financial structure, never product selections, pricing policy, or catalog provenance.
+     * The consuming application must enforce creation permission and actor attribution.
+     */
     fun create(
         transaction: Transaction,
         document: FinancialDocument,
@@ -304,52 +309,79 @@ class FinancialLedger internal constructor(
     ): List<FinancialDocumentVersion> =
         documents.versionHistory(transaction, id).ifEmpty { throw CommerceFailure.NotFound("Financial document $id was not found") }
 
-    /** Applies the domain change order and appends its same-stage successor. */
+    /**
+     * Appends a same-stage revision from the version the application reviewed. Lines may be
+     * bespoke, overridden, or signed adjustments; no catalog lookup or repricing occurs.
+     * The application authorizes the operation and constructs its financial lines.
+     * Stale versions and competing mutations fail with Conflict; retry the whole operation.
+     */
     fun changeOrder(
         id: UUID,
         changeOrder: ChangeOrder,
-    ): FinancialDocument = transactor.inTransaction { transaction -> changeOrder(transaction, id, changeOrder) }
+        expectedDocumentVersion: Version,
+    ): FinancialDocument = transactor.inTransaction { changeOrder(it, id, changeOrder, expectedDocumentVersion) }
 
-    /** Applies a change order and appends its successor in the caller's transaction. */
+    /** Applies a change order in the caller's transaction, without changing its isolation. */
     fun changeOrder(
         transaction: Transaction,
         id: UUID,
         changeOrder: ChangeOrder,
+        expectedDocumentVersion: Version,
     ): FinancialDocument {
-        val current = latest(transaction, id)
+        val current = mutationSource(transaction, id, expectedDocumentVersion)
         val next = validating { current.changeOrder(changeOrder) }
         documents.insert(transaction, next)
         return next
     }
 
-    /** Appends an Estimate's domain-derived Quote successor. */
-    fun issueQuote(id: UUID): FinancialDocument.Quote = transactor.inTransaction { transaction -> issueQuote(transaction, id) }
+    /** Appends the reviewed Estimate's domain-derived Quote successor. */
+    fun issueQuote(
+        id: UUID,
+        expectedDocumentVersion: Version,
+    ): FinancialDocument.Quote = transactor.inTransaction { issueQuote(it, id, expectedDocumentVersion) }
 
-    /** Appends a Quote successor in the caller's transaction. */
+    /** Appends a Quote successor in the caller's transaction; stale versions fail with Conflict. */
     fun issueQuote(
         transaction: Transaction,
         id: UUID,
+        expectedDocumentVersion: Version,
     ): FinancialDocument.Quote {
-        val current = latest(transaction, id)
+        val current = mutationSource(transaction, id, expectedDocumentVersion)
         if (current !is FinancialDocument.Estimate) {
             throw CommerceFailure.IllegalTransition("Financial document $id is not an estimate")
         }
         return current.toQuote().also { documents.insert(transaction, it) }
     }
 
-    /** Appends a Quote's domain-derived Invoice successor. */
-    fun issueInvoice(id: UUID): FinancialDocument.Invoice = transactor.inTransaction { transaction -> issueInvoice(transaction, id) }
+    /** Appends the reviewed Quote's domain-derived Invoice successor. */
+    fun issueInvoice(
+        id: UUID,
+        expectedDocumentVersion: Version,
+    ): FinancialDocument.Invoice = transactor.inTransaction { issueInvoice(it, id, expectedDocumentVersion) }
 
-    /** Appends an Invoice successor in the caller's transaction. */
+    /** Appends an Invoice successor in the caller's transaction; stale versions fail with Conflict. */
     fun issueInvoice(
         transaction: Transaction,
         id: UUID,
+        expectedDocumentVersion: Version,
     ): FinancialDocument.Invoice {
-        val current = latest(transaction, id)
+        val current = mutationSource(transaction, id, expectedDocumentVersion)
         if (current !is FinancialDocument.Quote) {
             throw CommerceFailure.IllegalTransition("Financial document $id is not a quote")
         }
         return current.toInvoice().also { documents.insert(transaction, it) }
+    }
+
+    private fun mutationSource(
+        transaction: Transaction,
+        id: UUID,
+        expectedDocumentVersion: Version,
+    ): FinancialDocument {
+        val currentVersion = documents.lockLineage(transaction, id)
+        if (currentVersion != expectedDocumentVersion) {
+            throw CommerceFailure.Conflict("Financial document $id has a stale expected version")
+        }
+        return get(transaction, FinancialDocumentReference(id, currentVersion))
     }
 
     /** A payment may be recorded before its allocation is known. */

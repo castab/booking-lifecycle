@@ -97,17 +97,169 @@ class FinancialLedgerSpec :
             }
         }
 
+        test("staff can swap all service lines then override and credit a bespoke quote with immutable history") {
+            val softServe = line("400.00").copy(description = "Soft-serve service", taxAmount = money("32.00"))
+            val flavors = line("100.00").copy(description = "Soft-serve flavors", taxAmount = money("8.00"))
+            val first = ledger.create(FinancialDocument.Quote.create(UUID.randomUUID(), listOf(softServe, flavors)))
+            val churros =
+                line(
+                    "100.00",
+                    "2.500",
+                    "Prepared on site",
+                ).copy(description = "Churro catering service", taxAmount = money("20.00"))
+            val swap =
+                ledger.changeOrder(
+                    first.id,
+                    ChangeOrder(
+                        listOf(
+                            ChangeOrder.Change.RemoveLineItem(softServe.id),
+                            ChangeOrder.Change.RemoveLineItem(flavors.id),
+                            ChangeOrder.Change.AddLineItem(churros),
+                        ),
+                    ),
+                    first.version,
+                )
+            val override = churros.copy(price = money("80.000"), taxAmount = money("16.00"))
+            val credit = line("-25.00").copy(description = "Staff-approved credit", taxAmount = money("-2.00"))
+            val revised =
+                ledger.changeOrder(
+                    first.id,
+                    ChangeOrder(listOf(ChangeOrder.Change.ReplaceLineItem(churros.id, override), ChangeOrder.Change.AddLineItem(credit))),
+                    swap.version,
+                )
+            ledger.get(first.reference) shouldBe first
+            ledger.get(swap.reference).lineItems.shouldContainExactly(churros)
+            ledger.get(revised.reference).lineItems.shouldContainExactly(override, credit)
+            revised.subtotal.amount.compareTo(BigDecimal("175.00")) shouldBe 0
+            revised.taxAmount shouldBe money("14.00")
+            revised.total.amount.compareTo(BigDecimal("189.00")) shouldBe 0
+            ledger.history(first.id).shouldContainExactly(first, swap, revised)
+            val invoice = ledger.issueInvoice(first.id, revised.version)
+            invoice.lineItems.shouldContainExactly(override, credit)
+            ledger.reconcileLatest(first.id).balance shouldBe invoice.total
+        }
+
+        test("reviewed versions cannot silently edit or promote a newer committed snapshot") {
+            val first = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
+            val changes = ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("25.00"))))
+            val second = ledger.changeOrder(first.id, changes, first.version)
+            shouldThrow<CommerceFailure.Conflict> { ledger.changeOrder(first.id, changes, first.version) }
+            shouldThrow<CommerceFailure.Conflict> { ledger.issueQuote(first.id, first.version) }
+            transactor.inTransaction { transaction ->
+                shouldThrow<CommerceFailure.Conflict> { ledger.changeOrder(transaction, first.id, changes, first.version) }
+                shouldThrow<CommerceFailure.Conflict> { ledger.issueQuote(transaction, first.id, first.version) }
+            }
+            val quote = ledger.issueQuote(first.id, second.version)
+            val revisedQuote =
+                ledger.changeOrder(
+                    first.id,
+                    ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("5.00")))),
+                    quote.version,
+                )
+            shouldThrow<CommerceFailure.Conflict> { ledger.issueInvoice(first.id, quote.version) }
+            transactor.inTransaction { transaction ->
+                shouldThrow<CommerceFailure.Conflict> { ledger.issueInvoice(transaction, first.id, quote.version) }
+            }
+            ledger.history(first.id).shouldContainExactly(first, second, quote, revisedQuote)
+        }
+
+        test("a stale document mutation rolls back application-owned writes in the same transaction") {
+            val first = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
+            val quote = ledger.issueQuote(first.id, first.version)
+            val recordId = UUID.randomUUID()
+            shouldThrow<CommerceFailure.Conflict> {
+                transactor.inTransaction { transaction ->
+                    transaction.handle
+                        .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, 'stale edit')")
+                        .bind("id", recordId)
+                        .execute()
+                    ledger.changeOrder(transaction, first.id, ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line()))), first.version)
+                }
+            }
+            transactor.inTransaction { transaction ->
+                transaction.handle
+                    .createQuery("SELECT count(*) FROM testapp.test_application_records WHERE id = :id")
+                    .bind("id", recordId)
+                    .mapTo(Int::class.java)
+                    .one() shouldBe 0
+            }
+            ledger.history(first.id).shouldContainExactly(first, quote)
+        }
+
+        test("concurrent ledger edits with one reviewed version commit only one successor") {
+            val first = ledger.create(FinancialDocument.Quote.create(UUID.randomUUID(), listOf(line())))
+            val executor = Executors.newFixedThreadPool(2)
+            val barrier = java.util.concurrent.CyclicBarrier(2)
+            try {
+                val outcomes =
+                    (1..2)
+                        .map {
+                            executor.submit(
+                                Callable {
+                                    barrier.await()
+                                    runCatching {
+                                        ledger.changeOrder(
+                                            first.id,
+                                            ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("1.00")))),
+                                            first.version,
+                                        )
+                                    }
+                                },
+                            )
+                        }.map { it.get(10, java.util.concurrent.TimeUnit.SECONDS) }
+                outcomes.count { it.isSuccess } shouldBe 1
+                outcomes.count { it.exceptionOrNull() is CommerceFailure.Conflict } shouldBe 1
+                ledger.history(first.id).size shouldBe 2
+                ledger.get(first.reference) shouldBe first
+            } finally {
+                executor.shutdownNow()
+            }
+        }
+
+        test("invalid targets duplicate lines and noninitial creation leave history unchanged") {
+            val first = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
+            val original = first.lineItems.single()
+            val absent = line()
+            listOf(
+                ChangeOrder(listOf(ChangeOrder.Change.RemoveLineItem(UUID.randomUUID()))),
+                ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(original))),
+                ChangeOrder(listOf(ChangeOrder.Change.RemoveLineItem(original.id))),
+                ChangeOrder(listOf(ChangeOrder.Change.ReplaceLineItem(absent.id, absent))),
+            ).forEach { changes ->
+                shouldThrow<CommerceFailure.ValidationFailed> { ledger.changeOrder(first.id, changes, first.version) }
+            }
+            shouldThrow<CommerceFailure.ValidationFailed> {
+                ledger.create(first.changeOrder(ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line())))))
+            }
+            ledger.history(first.id).shouldContainExactly(first)
+        }
+
         test("stage transitions and change orders append immutable history") {
             val id = UUID.randomUUID()
             val first = ledger.create(FinancialDocument.Estimate.create(id, listOf(line())))
-            val changedEstimate = ledger.changeOrder(id, ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("1.25")))))
+            val changedEstimate =
+                ledger.changeOrder(
+                    id,
+                    ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("1.25")))),
+                    expectedDocumentVersion = first.version,
+                )
             changedEstimate shouldBe ledger.get(FinancialDocumentReference(id, Version.of(2)))
-            val quote = ledger.issueQuote(id)
+            val quote = ledger.issueQuote(id, expectedDocumentVersion = changedEstimate.version)
             quote.version shouldBe Version.of(3)
-            val changedQuote = ledger.changeOrder(id, ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("2.00")))))
-            val invoice = ledger.issueInvoice(id)
+            val changedQuote =
+                ledger.changeOrder(
+                    id,
+                    ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("2.00")))),
+                    expectedDocumentVersion = quote.version,
+                )
+            val invoice = ledger.issueInvoice(id, expectedDocumentVersion = changedQuote.version)
             invoice.version shouldBe Version.of(5)
-            val changedInvoice = ledger.changeOrder(id, ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("3.00")))))
+            val changedInvoice =
+                ledger.changeOrder(
+                    id,
+                    ChangeOrder(listOf(ChangeOrder.Change.AddLineItem(line("3.00")))),
+                    expectedDocumentVersion = invoice.version,
+                )
             ledger.history(id).shouldContainExactly(first, changedEstimate, quote, changedQuote, invoice, changedInvoice)
             val versions = ledger.versionHistory(id)
             versions.map { it.document }.shouldContainExactly(first, changedEstimate, quote, changedQuote, invoice, changedInvoice)
@@ -119,15 +271,15 @@ class FinancialLedgerSpec :
             }
             ledger.latestVersion(id).document shouldBe changedInvoice
             ledger.latestVersion(id).createdAt shouldBe versions.last().createdAt
-            shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueQuote(id) }
-            shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueInvoice(id) }
+            shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueQuote(id, expectedDocumentVersion = changedInvoice.version) }
+            shouldThrow<CommerceFailure.IllegalTransition> { ledger.issueInvoice(id, expectedDocumentVersion = changedInvoice.version) }
             ledger.history(id).size shouldBe 6
         }
 
         test("every read restores each document from its own snapshot row in one query") {
             val first = ledger.create(FinancialDocument.Estimate.create(UUID.randomUUID(), listOf(line())))
-            ledger.issueQuote(first.id)
-            ledger.issueInvoice(first.id)
+            val quote = ledger.issueQuote(first.id, expectedDocumentVersion = first.version)
+            ledger.issueInvoice(first.id, expectedDocumentVersion = quote.version)
             val statements = mutableListOf<String>()
             val probe =
                 object : SqlLogger {
@@ -176,8 +328,8 @@ class FinancialLedgerSpec :
 
         test("payments, exact snapshot allocations, and lineage balance") {
             val id = UUID.randomUUID()
-            ledger.create(FinancialDocument.Estimate.create(id, listOf(line())))
-            val quote = ledger.issueQuote(id)
+            val first = ledger.create(FinancialDocument.Estimate.create(id, listOf(line())))
+            val quote = ledger.issueQuote(id, expectedDocumentVersion = first.version)
             val payment =
                 PaymentRecord(
                     UUID.randomUUID(),
@@ -198,7 +350,7 @@ class FinancialLedgerSpec :
                 payments.retrievePayment(transaction, payment.id) shouldBe payment
                 payments.retrieveAllocation(transaction, allocation.id) shouldBe allocation
             }
-            val invoice = ledger.issueInvoice(id)
+            val invoice = ledger.issueInvoice(id, expectedDocumentVersion = quote.version)
             val firstBalance = ledger.reconcileLatest(id)
             firstBalance.documentReference shouldBe invoice.reference
             firstBalance.documentTotal shouldBe money("1000.00")
@@ -216,6 +368,7 @@ class FinancialLedgerSpec :
                         ),
                     ),
                 ),
+                expectedDocumentVersion = invoice.version,
             )
             ledger.reconcileLatest(id).balance shouldBe money("900.00")
             transactor.inTransaction { transaction -> payments.retrieveAllocation(transaction, allocation.id) } shouldBe allocation
@@ -284,7 +437,12 @@ class FinancialLedgerSpec :
             val rolledBackRow = UUID.randomUUID()
             shouldThrow<IllegalStateException> {
                 transactor.inTransaction { transaction ->
-                    val quote = ledger.issueQuote(transaction, estimate.id)
+                    val quote =
+                        ledger.issueQuote(
+                            transaction,
+                            estimate.id,
+                            expectedDocumentVersion = estimate.version,
+                        )
                     ledger.get(transaction, quote.reference) shouldBe quote
                     ledger.latest(transaction, estimate.id) shouldBe quote
                     ledger.history(transaction, estimate.id).shouldContainExactly(estimate, quote)
@@ -308,13 +466,18 @@ class FinancialLedgerSpec :
             val committedRow = UUID.randomUUID()
             val quote =
                 transactor.inTransaction { transaction ->
-                    ledger.issueQuote(transaction, estimate.id).also {
-                        transaction.handle
-                            .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
-                            .bind("id", committedRow)
-                            .bind("value", "quote issued")
-                            .execute()
-                    }
+                    ledger
+                        .issueQuote(
+                            transaction,
+                            estimate.id,
+                            expectedDocumentVersion = estimate.version,
+                        ).also {
+                            transaction.handle
+                                .createUpdate("INSERT INTO testapp.test_application_records (id, value) VALUES (:id, :value)")
+                                .bind("id", committedRow)
+                                .bind("value", "quote issued")
+                                .execute()
+                        }
                 }
             ledger.latest(estimate.id) shouldBe quote
             transactor.inTransaction { transaction ->

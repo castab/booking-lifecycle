@@ -1,15 +1,11 @@
 package io.github.castab.commerce.runtime.authorization
 
-import io.github.castab.commerce.offering.OfferingsCatalogId
 import io.github.castab.commerce.runtime.ApplicationContributions
 import io.github.castab.commerce.runtime.CommerceRuntime
 import io.github.castab.commerce.runtime.CommerceRuntimeContext
 import io.github.castab.commerce.runtime.commerceRuntime
 import io.github.castab.commerce.runtime.config.CommerceRuntimeConfiguration
 import io.github.castab.commerce.runtime.http.AccessControl
-import io.github.castab.commerce.runtime.offering.OfferingsHttpAccess
-import io.github.castab.commerce.runtime.offering.OfferingsHttpBinding
-import io.github.castab.commerce.runtime.offering.offeringsHttpCapability
 import io.github.castab.commerce.runtime.session.BearerSessionToken
 import io.github.castab.commerce.runtime.session.sessionAuthentication
 import io.github.castab.commerce.runtime.testing.TestDatabase
@@ -166,7 +162,7 @@ class AuthorizationReadHttpSpec :
                 response.status shouldBe Status.OK
                 val body = Json.decodeFromString(PermissionsDto.serializer(), response.bodyString())
                 body.revision shouldBe catalog.revision
-                body.permissions.size shouldBe 17
+                body.permissions.size shouldBe 16
                 body.permissions.map { it.key } shouldBe body.permissions.map { it.key }.sorted()
                 body.permissions shouldContainExactly
                     catalog.definitions.map { PermissionDto(it.key.value, it.group.value, it.displayName, it.description) }
@@ -416,16 +412,7 @@ class AuthorizationReadHttpSpec :
                         val routes =
                             authorizationAdministrationHttpCapability(context, access, "/admin").contractRoutes +
                                 permissionCatalogHttpCapability(access, "/authorization").contractRoutes +
-                                currentPrincipalHttpCapability(access, "/me").contractRoutes +
-                                offeringsHttpCapability(
-                                    context,
-                                    OfferingsHttpBinding(
-                                        OfferingsCatalogId(UUID.randomUUID()),
-                                        "/offerings",
-                                        "runtimeCatalog",
-                                        OfferingsHttpAccess.ReadWrite(access),
-                                    ),
-                                ).contractRoutes
+                                currentPrincipalHttpCapability(access, "/me").contractRoutes
                         composed = routes.size
                         listOf(contract { this.routes += routes })
                     }),

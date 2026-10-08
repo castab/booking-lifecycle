@@ -58,6 +58,35 @@ class FinancialDocumentSpec :
         val serviceFee = lineItem("Event service fee", quantity = null, price = usd("100"), taxAmount = usd("8"))
         val items = listOf(chairs, serviceFee)
 
+        test("bespoke service swaps overrides and signed credits are independent financial snapshots") {
+            val softServe = lineItem("Soft-serve service", quantity = null, price = usd("400.00"), taxAmount = usd("32.00"))
+            val flavors = lineItem("Soft-serve flavors", quantity = null, price = usd("100.00"), taxAmount = usd("8.00"))
+            val first = FinancialDocument.Quote.create(UUID.randomUUID(), listOf(softServe, flavors))
+            val churros = lineItem("Churro catering service", quantity = "2.5", price = usd("100.00"), taxAmount = usd("20.00"))
+            val swap =
+                first.changeOrder(
+                    ChangeOrder(
+                        listOf(
+                            Change.RemoveLineItem(softServe.id),
+                            Change.RemoveLineItem(flavors.id),
+                            Change.AddLineItem(churros),
+                        ),
+                    ),
+                )
+            val override = churros.copy(price = usd("80.00"), taxAmount = usd("16.00"))
+            val discount = lineItem("Staff-approved credit", quantity = null, price = usd("-25.00"), taxAmount = usd("-2.00"))
+            val revised = swap.changeOrder(ChangeOrder(listOf(Change.ReplaceLineItem(churros.id, override), Change.AddLineItem(discount))))
+            first.lineItems.shouldContainExactly(softServe, flavors)
+            first.total shouldBe usd("540.00")
+            swap.lineItems.shouldContainExactly(churros)
+            revised.lineItems.shouldContainExactly(override, discount)
+            revised.version shouldBe Version.of(3)
+            revised.previousVersion shouldBe swap.version
+            revised.subtotal.amount.compareTo(BigDecimal("175.00")) shouldBe 0
+            revised.taxAmount shouldBe usd("14.00")
+            revised.total.amount.compareTo(BigDecimal("189.00")) shouldBe 0
+        }
+
         context("direct creation") {
 
             test("an Estimate can start a lineage at version 1 with no previous version") {
